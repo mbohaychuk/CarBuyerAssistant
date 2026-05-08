@@ -104,9 +104,9 @@ All units depend on the local Postgres unit and journal their output; `journalct
 
 ### `active_listings` — full fidelity, working set
 
-- Identifying: `id`, `source` (`kijiji`), `source_id` (Kijiji listing ID), `url`, `title`, `description`, `asking_price_cad`, `posted_at`, `seen_first_at`, `seen_last_at`.
+- Identifying: `id`, `source_platform` (`kijiji` / `autotrader` / `fb_marketplace` / etc.), `source_listing_id`, `url`, `title`, `description`, `asking_price_cad`, `posted_at`, `seen_first_at`, `seen_last_at`.
 - Photos: array of URLs only (never bytes).
-- Seller: `seller_type` (`private` / `dealer` / `unknown`), `seller_province`, `seller_city`, `seller_phone_normalized` (E.164 via `phonenumbers`).
+- Seller: `sale_channel` (`private` / `dealer` / `unknown`), `seller_province`, `seller_city`, `seller_phone_normalized` (E.164 via `phonenumbers`).
 - Vehicle facts (post-enrichment): `year`, `make`, `model`, `trim`, `engine`, `transmission`, `drivetrain`, `mileage_km`, `vin` (when present).
 - Title status: `title_status` ∈ {`NORMAL`, `SALVAGE`, `REBUILT`, `NON_REPAIRABLE`, `STOLEN`, `UNKNOWN`}, plus `province_of_origin` for cross-province brand reconciliation.
 - LLM enrichment (description): `condition_categorical`, `condition_confidence`, `red_flags` (jsonb), `green_flags` (jsonb), `showstopper_flags` (jsonb), `carfax_url`, `carfax_findings` (jsonb), `summary`, `enrichment_version`.
@@ -123,7 +123,9 @@ Schema-versioned. Distillation copies these fields and discards the rest:
 - Vehicle: `year`, `make`, `model`, `trim`, `engine`, `transmission`, `drivetrain`, `mileage_km`, `title_status`, `province_of_origin`.
 - `condition_categorical`.
 - `final_listed_price_cad`, `days_listed`.
-- `sale_format` ∈ {`kijiji_private`, `kijiji_dealer`, `autotrader`, `fb_marketplace`, `auction`, `other`}.
+- `sale_channel` ∈ {`private`, `dealer`, `auction_estate`, `auction_govt`, `auction_commercial`, `auction_salvage`, `other`}.
+- `sale_platform` (string, indexed) — specific source: `kijiji`, `autotrader`, `fb_marketplace`, `hibid`, `mcdougall`, `ritchie_bros`, `govdeals_ca`, `mack_inhouse`, `schmalz_inhouse`, etc.
+- For auctions: `buyer_premium_pct_at_sale`, `final_price_with_premium_cad` (the actual all-in hammer-plus-premium).
 - `seller_province`, `seller_city`.
 - `observed_first_at`, `disappeared_at`.
 - `disposition_reason`.
@@ -178,7 +180,28 @@ Pull from `historical_sales` first (true sold-price proxies); top up from `activ
 
 Trims apply *before* the confidence check below. If fewer than 5 comps survive trimming, the listing is `confidence_bucket='insufficient'`, gets no `price_deal_score`, and is surfaced in the dashboard as "uncomped — review manually" but never auto-notified.
 
-### 4b. Asking-to-sold haircut
+### 4b. Channel normalization (private-sale-equivalent)
+
+Every comp price is normalized to a private-sale-equivalent before the percentile computation. The reasoning: a vehicle that auction-cleared for $12k is not a $12k private-sale comp — the auction buyer paid a discount for accepting "as-is, where-is" with no test drive, no recourse, and rural pickup. The private-sale equivalent is meaningfully higher. We need all comps in the same units before computing P10/P50/P90.
+
+Channel multipliers (applied to each comp's price; calibrated empirically once we have enough cross-channel observations):
+
+| Source channel | Multiplier to convert to private-equivalent | Rationale |
+|---|---|---|
+| `private` | 1.00 | reference |
+| `dealer` | 0.92 | dealer prices average 6–10% above private for the same vehicle (markup) |
+| `auction_estate` | 1.20 | auction buyers discount for no-test-drive, as-is, rural pickup |
+| `auction_govt` | 1.15 | govt vehicles are better-documented, discount is smaller |
+| `auction_commercial` | 1.10 | well-documented commercial inventory, smaller discount |
+| `auction_salvage` | excluded | different scoring entirely |
+
+Numbers are MVP defaults — research-supported but rough. Calibration phase 2 learns them from data: for any pair of comps that match on `(year, make, model, trim, mileage ±10%)` but differ in `sale_channel`, the price ratio is a sample of the true conversion factor. Group by channel pair, take median, store as live config.
+
+`expected_value` (§4c) is therefore always *what this vehicle would clear at in a private sale*. This is the right reference because flipping math assumes the user resells privately — auction buy-back-out-as-private is the canonical flip.
+
+For valuing an auction lot specifically, this means the comp set is normalized to private-equivalent (just like a listing), then auction-specific scoring (§9.1.5) backs out the `recommended_max_bid` from that private-equivalent expected value, accounting for buyer's premium, tax, and landed cost.
+
+### 4c. Asking-to-sold haircut
 
 Applied per-comp from `active_listings`:
 - `0.95` if `days_listed < 15`
@@ -193,7 +216,7 @@ Applied per-comp from `active_listings`:
 
 The percentile computation weights each comp accordingly (weighted P10/P50/P90).
 
-### 4c. Fair-value range
+### 4d. Fair-value range
 
 From the comp set:
 - `value_low = P10`, `value_mid = P50`, `value_high = P90`.
@@ -210,7 +233,7 @@ Map this listing's LLM-assessed condition to a position in the range:
 
 `expected_value = value_low + position × (value_high - value_low)`.
 
-### 4d. Landed cost premium
+### 4e. Landed cost premium
 
 For each listing in a non-home province:
 ```
@@ -222,7 +245,7 @@ landed_cost_premium = transport_estimate + inspection_cost_by_dest[dest] + repai
 
 Same-province listings have `landed_cost_premium = 0`.
 
-### 4e. Price-deal score
+### 4f. Price-deal score
 
 ```
 price_deal_score = (expected_value - asking_price - landed_cost_premium) / expected_value
@@ -232,7 +255,7 @@ Positive = underpriced after landed costs. The threshold for notification is 0.1
 
 `suspicious_underprice` flag fires (does not block notification, just labels) when `asking_price < value_low × 0.85`.
 
-### 4f. Flag score
+### 4g. Flag score
 
 LLM emits a list of red flags and green flags, each with a category and weight. `flag_score = clamp(sum(weights), -5, +5)`. Examples:
 
@@ -253,7 +276,7 @@ LLM emits a list of red flags and green flags, each with a category and weight. 
 
 Showstoppers exclude the listing from notifications regardless of `price_deal_score`.
 
-### 4g. Notification rule
+### 4h. Notification rule
 
 For a hot-deal push notification:
 - No showstopper flag.
@@ -266,16 +289,17 @@ For a hot-deal push notification:
 For dashboard "watchlist":
 - `price_deal_score ≥ 0.08` **OR** `flag_score ≥ +2`.
 
-### 4h. Score versioning
+### 4i. Score versioning
 
 Every scored row records `scoring_version` and `weights_hash`. Weight changes don't retroactively rewrite history; backfill is an explicit admin action. Lets us A/B-test future weight changes against `historical_sales` outcomes.
 
-### 4i. Calibration (phase 2)
+### 4j. Calibration (phase 2)
 
 When `historical_sales` accumulates enough data:
 - Replace P10/P90 spread with median-price-per-condition-bucket curve, learned per make/model.
 - Calibrate the asking-to-sold haircut from real listing-to-disappearance pairs.
 - Calibrate flag weights from cross-correlation with `days_listed` and `disposition_reason`.
+- **Calibrate channel multipliers**: for any pair of `historical_sales` rows that match on `(year, make, model, trim, mileage_km ± 10%)` but differ in `sale_channel`, the price ratio is one observation of the true conversion factor. Group by channel pair, take median, store as live config. Falls back to MVP defaults (1.20 / 1.15 / 1.10 / 0.92) when sample size is insufficient.
 
 ---
 
@@ -298,7 +322,7 @@ Provider selected per stage from config. Cost ceiling enforced inside each provi
 ### 5b. Description pass (real-time, every listing)
 
 **Inputs:** title, description, structured scraper fields, Carfax URL if extractable from description text, plus a static knowledge block injected into the prompt:
-- Canonical taxonomy of red/green flags (from §4f).
+- Canonical taxonomy of red/green flags (from §4g).
 - Model-specific gotchas table (Tacoma frame rust 2005–2015, CR-V 1.5T fuel-in-oil 2017–2022, Ford 3.5L EcoBoost cam phaser, Subaru EJ25 head gaskets 1999–2011, Hyundai/Kia Theta II rod bearings, Nissan CVT issues, etc.) — keyed by make/model/year so the LLM only sees relevant entries.
 - Scam-pattern catalog (curbsider phone signals, urgency phrasing, "ran when parked", VIN refusal, etc.).
 
@@ -566,6 +590,7 @@ The `sources/` package follows a plugin pattern (inspired by stephanlensky/hyaci
 
 | Phase-2 item | What MVP reserves |
 |---|---|
+| **Auction support (Western Canada)** — see §9.1 for full design | `sale_format` includes `auction`; source plugin interface accommodates auction-shaped sources via `AuctionSource` subclass; `historical_sales` schema unchanged |
 | AutoTrader.ca scraper | `sources/` plugin interface; `sale_format` enum value already present |
 | Multi-search profiles | `searches` table exists; UI hardcodes a single row in MVP |
 | Family/friends multi-user | `searches.user_id` exists, hardcoded; auth middleware is a single addition |
@@ -579,6 +604,168 @@ The `sources/` package follows a plugin pattern (inspired by stephanlensky/hyaci
 | Reverse-image search verification | Add as a verification call in description-pass for high-deal-score listings |
 | Phone-cross-listing search | Same; flags curbsiders with multiple active vehicles |
 | FB Marketplace | If ever needed: pay Apify ($0.01/listing) on demand, not built |
+
+---
+
+## 9.1 Phase-2 auction support — locked design
+
+Build order: after Kijiji MVP ships and proves stable. Auctions become the second source family before AutoTrader.ca.
+
+### 9.1.1 Goals
+
+- Discover and track upcoming vehicle auctions across Western Canada (AB / BC / SK / MB).
+- Surface lots whose **all-in cost** (current high bid + buyer's premium + tax + landed cost) sits meaningfully below estimated fair value.
+- Recommend a max bid that preserves a configurable flip margin.
+- Push closing-soon notifications with current bid status and time-remaining urgency.
+- Track bid trajectory (we observe; we don't bid).
+- Honour HiBid's soft-close mechanic — never assume the nominal end time is final.
+
+### 9.1.2 Sources, prioritised
+
+| Priority | Source | Role | Coverage |
+|---|---|---|---|
+| 1 | **HiBid** (`hibid.com/{province}/auctions/700006/cars-and-vehicles`) | Primary lot data | ~15–25 active Western CA auctioneers from one scraper |
+| 2 | **farmauctionguide.com** (per-province pages) | Discovery feed for auctions not on HiBid | Surfaces auctions on in-house platforms |
+| 3 | **McDougall Auctioneers** (in-house at `mcdougallauction.com`) | Direct extractor — has a dedicated Vehicles + Vocational Trucks taxonomy | Weekly Regina/Saskatoon/Winnipeg/Aldersyde sales |
+| Reserved | Government surplus (govdeals.ca, BC Auctions, Alberta surplus) | Separate plugin family, deferred | Maintained vehicles with paper trail |
+| Reserved | Ritchie Bros and equivalents | Separate plugin, deferred | Larger commercial vehicles, cleaner data |
+| Skipped | Proxibid | Heavier anti-bot, thinner Western CA coverage; HiBid already covers the long tail | — |
+| Skipped | Salvage auctions (Copart, IAA) | Out of scope — different scoring entirely | — |
+
+### 9.1.3 Source plugin interface
+
+Existing `sources/` package gets a type-discriminated split:
+
+```python
+class Source(ABC):
+    type: Literal["listing", "auction"]
+
+class ListingSource(Source):
+    type = "listing"
+    async def discover(self) -> AsyncIterator[ListingRef]: ...
+    async def fetch(self, ref: ListingRef) -> RawListing: ...
+
+class AuctionSource(Source):
+    type = "auction"
+    async def discover_auctions(self) -> AsyncIterator[AuctionRef]: ...
+    async def fetch_auction(self, ref: AuctionRef) -> RawAuction: ...
+    async def fetch_lots(self, auction_ref: AuctionRef) -> AsyncIterator[LotRef]: ...
+    async def fetch_lot(self, ref: LotRef) -> RawLot: ...
+    async def poll_bid(self, ref: LotRef) -> BidObservation: ...
+```
+
+`KijijiSource` implements `ListingSource`. `HiBidSource`, `FarmAuctionGuideSource` (discovery-only — populates `auctions` rows then defers to a per-auctioneer `AuctionSource` for lots), and `McDougallSource` implement `AuctionSource`.
+
+### 9.1.4 New data model (additive — no MVP table changes)
+
+**`auctions`** — auction events themselves
+- `id`, `source` (`hibid` / `mcdougall` / `farmauctionguide_discovered` / etc.), `source_auction_id`, `url`
+- `auction_subtype` ∈ {`estate`, `govt`, `commercial`} — drives the channel multiplier when the lot eventually distills. Default `estate` for HiBid + farmauctionguide-discovered + McDougall; `govt` when `source ∈ {govdeals_ca, bc_auctions, alberta_surplus}`; `commercial` for Ritchie Bros and similar. Auctioneer-name regex overrides apply (e.g., `auctioneer_name ~* 'rcmp|police|surplus|government'` → `govt`).
+- `auctioneer_name`, `auctioneer_external_id`
+- `title`, `description`, `terms_text`
+- `scheduled_start_at`, `scheduled_end_at`, `last_seen_end_at`, `closed_at`
+- `pickup_address`, `pickup_city`, `pickup_province`, `pickup_window_text`
+- `buyer_premium_pct` (decimal), `online_bidding_fee_pct` (some platforms tack on extra)
+- `gst_pct`, `pst_pct` (province-derived but per-auction-overridable)
+- `status` ∈ {`upcoming`, `live`, `closing`, `closed`, `cancelled`}
+- `first_seen_at`, `last_seen_at`, `discovery_confidence` (high if direct HiBid scrape; lower if inferred from farmauctionguide)
+
+**`auction_lots`** — individual vehicles in an auction
+- `id`, `auction_id` (FK), `source_lot_id`, `lot_number`, `url`
+- `title`, `description`, `photos` (URL array)
+- Normalized vehicle facts: `year`, `make`, `model`, `trim`, `engine`, `transmission`, `drivetrain`, `mileage_km`, `vin`, `title_status`, `province_of_origin` (same shape as `active_listings`)
+- LLM enrichment (same shape as `active_listings`): `condition_categorical`, `condition_confidence`, `red_flags`, `green_flags`, `showstopper_flags`, `enrichment_status`, `enrichment_version`
+- Vision findings (same shape, when run)
+- Auction-specific bid state:
+  - `current_high_bid_cad` (nullable until first bid)
+  - `last_bid_observed_at`
+  - `reserve_met` (`null` if no reserve, `true`/`false` if disclosed)
+  - `bid_count_visible` (often visible without login)
+  - `lot_status` ∈ {`open`, `closing_soon`, `extended`, `closed`, `unsold`, `sold`}
+  - `closed_at`, `final_bid_cad`
+- Valuation (auction-specific):
+  - `comp_count`, `value_low_cad`, `value_mid_cad`, `value_high_cad`, `expected_value_cad`
+  - `landed_cost_premium_cad` (transport + inspection + repair contingency, same model as §4e)
+  - `all_in_at_current_bid_cad` (current_high_bid × (1+BP) × (1+tax) + landed)
+  - `recommended_max_bid_cad` (working backwards from expected_value − configurable margin)
+  - `auction_deal_score` (margin-percent at current bid)
+  - `scoring_version`
+- Lifecycle / user action: `notification_status`, `user_action` (`watching` / `bid_planned` / `passed`), `notes`, `was_purchased_by_us`
+
+**`auction_bid_history`** — what we observe by polling
+- `id`, `lot_id` (FK), `observed_at`
+- `current_high_bid_cad`, `end_time_at_observation`, `status_at_observation`
+- Append-only. Used to compute bid velocity, plot trajectory in the dashboard, and learn typical buyer behavior.
+
+**Indexes:**
+- `auctions (status, scheduled_end_at)` — find lots closing soon
+- `auction_lots (auction_id, lot_status)`
+- `auction_lots (make, model, year)` — comp lookups (auction lots can be comps for listings and vice versa)
+- `auction_bid_history (lot_id, observed_at)` — trajectory queries
+
+### 9.1.5 Scoring for auctions
+
+For a given lot at a moment in time:
+
+```
+all_in_at_bid = current_high_bid × (1 + buyer_premium_pct) × (1 + gst_pct + pst_pct)
+all_in_total  = all_in_at_bid + landed_cost_premium
+
+auction_deal_score = (expected_value - all_in_total) / expected_value
+```
+
+`expected_value` is computed exactly as for listings (range-based, condition-mapped — §4d), including the channel-normalization step (§4b) that converts every comp to private-sale-equivalent dollars. The auction comp set draws from both `historical_sales` and *closed* `auction_lots`; once normalized, an auction comp at $12k all-in becomes ~$14.4k private-equivalent and is comparable. Open `auction_lots` are NOT used as comps until they close.
+
+**Recommended max bid** (working backwards from a target margin):
+
+```
+flip_margin     = configurable (default $1500 or 10% of expected_value, whichever is greater)
+target_all_in   = expected_value - flip_margin
+recommended_max_bid = target_all_in / ((1 + buyer_premium_pct) × (1 + gst_pct + pst_pct)) - landed_cost_premium / ((1 + bp) × (1 + tax))
+```
+
+Surfaced prominently in the lot detail view: *"Don't bid above $X to keep your $1500 margin."*
+
+**Notification triggers:**
+- **Discovery** — fired when a new lot is enriched and `auction_deal_score ≥ 0.15` at current bid (or when current bid is null/no-bid, computed against `recommended_max_bid` as the implicit ceiling).
+- **Closing-soon** — fired at `T-24h`, `T-6h`, `T-1h` for any lot the user has marked `watching` or that has an active deal score ≥ threshold. Channel: `#auction-closing`.
+- **Bid trajectory alert** — fired when a watched lot's bid crosses 80% of `recommended_max_bid` (decision point for the user).
+- **Lot extended** — fired when soft-close pushes a watched lot past its scheduled end time. Channel: `#auction-closing`.
+
+### 9.1.6 New workers
+
+| Worker | Cadence | Notes |
+|---|---|---|
+| **Auction-discoverer** | 4×/day | Crawls farmauctionguide.com per-province pages + HiBid province search; writes new `auctions` rows |
+| **Auction-lot-scraper** | continuous (queue) | For each new `auctions` row, fetches the auction's lot catalog, writes `auction_lots` rows, marks each `enrichment_status='pending'` |
+| **Bid-poller** | tiered schedule | Long-running async process. Maintains a priority queue keyed on `next_poll_at`. Tier rules: `>24h to close → 60 min`; `2–24h → 15 min`; `1–2h → 5 min`; `10–60 min → 60 s`; `<10 min or extended → 30 s, continue past scheduled_end until lot_status=closed` |
+| **Auction-distiller** | nightly | Closed lots ≥ 14 days past `closed_at` distill into `historical_sales` with `sale_channel = auction_<subtype>` (estate/govt/commercial), `sale_platform = auctions.source` (hibid/mcdougall/etc.), `final_listed_price_cad = final_bid_cad`, `final_price_with_premium_cad = final_bid_cad × (1 + buyer_premium_pct)`, `buyer_premium_pct_at_sale` retained |
+
+The description-enricher and valuator are reused unchanged — they consume `auction_lots` rows the same way they consume `active_listings` rows. The vision-batcher's shortlist query expands to include high-score auction lots.
+
+### 9.1.7 Discord channel additions
+
+- `#hot-deals` (existing) — also receives auction discovery alerts where score ≥ threshold
+- `#auction-closing` (new) — closing-soon urgency notifications (T-24h/T-6h/T-1h, extension events, bid-trajectory crosses)
+- `#auction-watch` (new) — daily summary of lots the user has marked `watching` with current bid status
+
+### 9.1.8 Auction-specific scam / risk patterns (LLM prompt additions)
+
+- "As-is, where-is" — universal at auction; not itself a flag, but absence of any disclosed condition info IS a flag.
+- Vehicles described only as "ran when parked", "hasn't run in years", or with no engine state mentioned.
+- No photos of engine bay or under-hood — heavy red flag at auction.
+- Lots withdrawn from previous auctions (visible on HiBid via lot history) — repeat sellers signal hidden problems.
+- "Reserve not met" status + low bid count — the seller wants more than the market will give; a deal here is unlikely unless the seller capitulates.
+- Title-only or no-VIN listings — bid-blind risk.
+- Pickup terms with very tight windows (<5 days) — pressure to close transport before issues surface.
+
+### 9.1.9 Open questions (auction-specific)
+
+- **Bid sniping disclosure.** We're observing only — never bidding. The system surfaces information, the user decides. Document this clearly so usage stays clean.
+- **Buyer's premium variance.** Most auctions are 5–15%; some specialty/online-only fees stack. Auctioneer rules can be PDF-only — extracting BP reliably might require LLM fallback when the structured field is missing.
+- **GST/PST handling.** Provincial tax differences matter when a Saskatchewan buyer wins an Alberta lot. Default to destination-province tax but allow override per-auction.
+- **Phone-pseudo-VIN dedup vs auction lots.** Same vehicle re-listed across auctions is rare but possible (estate gets passed to a different auctioneer). Lot-photo perceptual hashing across `auction_lots` and across `auction_lots ↔ active_listings` would catch it. Defer until cross-source dedup proves needed.
+- **Soft-close polling cost.** A 30s poll cadence on the last 10 min of a lot is fine for one lot — at 50 lots closing in the same hour it adds up. Cap concurrent fast-poll lots at ~20 and slow the rest to 60s.
 
 ---
 
@@ -616,6 +803,12 @@ Key research findings that drove non-obvious design choices:
 - **Native OpenAI structured outputs over `instructor`**: grammar-constrained decoding eliminates the re-ask loop `instructor` exists to provide.
 - **Legal tracking as first-class feature**: BC has a hard 5-vehicle deeming clause; Alberta has zero tolerance; Ontario raised curbsider minimum fine to $5,000 in Dec 2023. The system needs to know how many transfers I've done this year to keep me legal.
 - **Transport + inspection cost in the score**: a Toronto→Calgary deal carries ~$1,750–2,400 transport plus $550 inspection-and-contingency. This materially changes which listings are deals.
+- **Auction phase 2: HiBid as primary substrate**: ~47 Western Canadian auctioneers run on HiBid; ~15–25 of them have active vehicle inventory. One scraper covers Mack, Schmalz, Terry McDougall, Graham, Penner, Kaye's, plus dozens more. Pages embed `lotModels` JSON (same pattern as Kijiji's `__NEXT_DATA__`) — no headless browser needed. McDougall Auctioneers is the one in-house exception worth a direct extractor.
+- **Auction phase 2: discovery via farmauctionguide.com**: pure event-level aggregator with per-province feeds. Used to find auctions on platforms HiBid doesn't cover. Not the lot-data source itself.
+- **Auction phase 2: soft-close polling**: HiBid soft-close extends end times by 2–4 minutes per late bid. Tiered poll schedule (60min → 15min → 5min → 60s → 30s) and continue past scheduled_end until status flips to `closed`.
+- **Auction phase 2: bid history is reconstructed**: only current bid is public; historical bids require login. We poll and persist our own observations to `auction_bid_history`, which gives us trajectory plotting and bid-velocity signals without any auth requirement.
+- **Channel-normalized comps**: a vehicle that auction-cleared at $12k is not a $12k private-sale comp; the auction buyer paid a discount for accepting "as-is, where-is" with no test drive. Mixing channels without correction biases fair-value by whatever channel mix happens to be in the comp set. Normalizing every comp to a private-sale-equivalent (default multipliers: auction_estate × 1.20, auction_govt × 1.15, auction_commercial × 1.10, dealer × 0.92) makes the comp set internally consistent and matches the flipping use case where the user resells privately. Multipliers calibrate from same-vehicle cross-channel observations once `historical_sales` is large enough.
+- **Two-axis sale taxonomy (channel + platform)**: `sale_channel` captures the type of transaction (`private` / `dealer` / `auction_estate` / `auction_govt` / `auction_commercial`); `sale_platform` captures the specific source (`kijiji` / `autotrader` / `hibid` / `mcdougall` / etc.). Channel drives the normalization multiplier; platform supports source-specific behavior (anti-bot strategies, parsing patterns, dedup keys).
 
 ---
 
