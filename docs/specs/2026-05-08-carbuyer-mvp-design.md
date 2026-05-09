@@ -10,7 +10,7 @@
 
 ### Goals (MVP)
 
-- A personal tool that compiles vehicle lots across Western Canadian auction sites — small farm/estate auctions and larger commercial auctioneers — into a single ranked feed.
+- A personal tool that compiles vehicle lots across small Western Canadian farm/estate auctions into a single ranked feed. Larger commercial auctioneers (Ritchie Bros, Michener Allen) are deferred to phase 2 — they're well-known enough that the user goes through their lots manually anyway.
 - **Two distinct alert types:**
   - **Rare/popular early-warning** — fired when a desirable vehicle is detected at discovery (typically days–weeks before auction close), so the user has time to travel for inspection.
   - **Going-cheap price alert** — fired when a lot's all-in cost (current bid + buyer's premium + tax + landed cost) sits meaningfully below estimated fair value, especially as auction close approaches.
@@ -98,7 +98,7 @@ All units depend on the local Postgres unit; logs flow to journald (`journalctl 
 
 ### Data flow (one lot's lifecycle)
 
-1. Auction-discoverer hits each source plugin (HiBid Western CA province pages, farmauctionguide.com per-province feeds, McDougall direct, Ritchie Bros catalog, Michener Allen catalog), upserts `auctions` rows for new/updated auctions.
+1. Auction-discoverer hits each source plugin (HiBid Western CA province pages, farmauctionguide.com per-province feeds, McDougall direct), upserts `auctions` rows for new/updated auctions.
 2. Lot-scraper claims new auctions, fetches each catalog, writes `auction_lots` with `enrichment_status='pending'` and emits `NOTIFY enrichment_pending`.
 3. Description enricher claims each lot, runs the LLM (description + rarity assessment), writes structured output, sets `enrichment_status='done'`, `valuation_status='pending'`, emits `NOTIFY valuation_pending`.
 4. Valuator claims the lot, builds the comp set from `historical_sales` + recently-closed `auction_lots`, computes fair-value range and `price_deal_score`, computes `rarity_score` (combining LLM output and database signals). Sets `valuation_status='done'`, emits `NOTIFY notification_pending`.
@@ -117,8 +117,8 @@ All units depend on the local Postgres unit; logs flow to journald (`journalctl 
 
 ### `auctions` — auction events
 
-- `id`, `source` (`hibid` / `mcdougall` / `ritchie_bros` / `michener_allen` / `farmauctionguide_discovered`), `source_auction_id`, `url`
-- `auction_subtype` ∈ {`estate`, `commercial`} — drives the channel multiplier when a lot eventually distills. Defaults: HiBid + farmauctionguide-discovered + McDougall + Michener Allen → `estate`; Ritchie Bros → `commercial`. Auctioneer-name regex overrides apply.
+- `id`, `source` (`hibid` / `mcdougall` / `farmauctionguide_discovered`; phase-2 adds `ritchie_bros`, `michener_allen`, etc.), `source_auction_id`, `url`
+- `auction_subtype` ∈ {`estate`, `commercial`} — drives the channel multiplier when a lot eventually distills. In MVP all sources default to `estate` (HiBid + farmauctionguide-discovered + McDougall). Auctioneer-name regex overrides apply. `commercial` enum value is reserved for phase-2 RB / Michener Allen.
 - `auctioneer_name`, `auctioneer_external_id`
 - `title`, `description`, `terms_text`
 - `scheduled_start_at`, `scheduled_end_at`, `last_seen_end_at`, `closed_at`
@@ -167,7 +167,7 @@ Schema-versioned. Distillation copies these fields:
 - `final_listed_price_cad`, `days_listed` (for auctions: `final_bid_cad` and lot duration)
 - For auctions: `buyer_premium_pct_at_sale`, `final_price_with_premium_cad` (the actual all-in clearing price)
 - `sale_channel` ∈ {`auction_estate`, `auction_commercial`, `auction_govt`, `private`, `dealer`, `other`} — in MVP only the auction values populate
-- `sale_platform` (string, indexed) — `hibid`, `mcdougall`, `ritchie_bros`, `michener_allen`, etc.
+- `sale_platform` (string, indexed) — MVP: `hibid`, `mcdougall`. Phase-2 additions: `ritchie_bros`, `michener_allen`, `kijiji`, `autotrader`, etc.
 - `seller_province`, `seller_city`
 - `observed_first_at`, `disappeared_at`
 - `disposition_reason` ∈ {`sold`, `unsold`, `cancelled`, `unknown`}
@@ -640,9 +640,8 @@ CarBuyerAssistant/
 │   │   ├── base.py            # Source ABC, AuctionSource, ListingSource
 │   │   ├── hibid/             # HiBid platform (multi-auctioneer)
 │   │   ├── mcdougall/         # McDougall in-house
-│   │   ├── ritchiebros/       # Ritchie Bros / IronPlanet
-│   │   ├── michener_allen/    # Michener Allen Edmonton
 │   │   └── farmauctionguide/  # Discovery aggregator
+│   │   # phase-2: ritchiebros/, michener_allen/, kijiji/, autotrader/
 │   ├── scoring/
 │   ├── transport/             # transport + inspection cost model
 │   ├── legal/                 # YTD transfer tracking
@@ -667,6 +666,7 @@ The `sources/` package follows a plugin pattern (inspired by stephanlensky/hyaci
 
 | Phase-2 item | What MVP reserves |
 |---|---|
+| Larger commercial auctions (Ritchie Bros, Michener Allen) | `auction_subtype='commercial'` and `auction_commercial × 1.10` channel multiplier reserved. Deferred because the user already follows these auctions manually given their size and visibility. |
 | Listing comp augmentation (Kijiji, AutoTrader.ca) | `sources/` accommodates `ListingSource` subclass; channel multipliers (private × 1.00, dealer × 0.92) ready in §4b |
 | Government surplus auctions (govdeals.ca, BC Auctions, Alberta surplus) | `auction_subtype='govt'` already in enum; `auction_govt × 1.15` channel multiplier reserved |
 | IAA / Copart salvage auctions | Different scoring entirely; deferred indefinitely |
@@ -689,7 +689,6 @@ The `sources/` package follows a plugin pattern (inspired by stephanlensky/hyaci
 
 These are deferred to plan-writing or implementation:
 
-- **Ritchie Bros and Michener Allen scraping feasibility** — HiBid + McDougall + farmauctionguide are confirmed scrapable from prior research. RB and Michener Allen are planned phase-1 sources but their platforms haven't been verified against. Validate before committing to them in the implementation plan.
 - **Comp-comparison match criteria for rare/classic vehicles** where exact comps don't exist. Default match (same make/model/trim, year ±2, mileage ±20%) will yield zero comps for a 1985 Land Cruiser FJ60 in our database. Fallback: broaden to make-and-class (`Land Cruiser`-family / `solid axle SUV`-class) with a "fuzzy comp" badge. May involve LLM judgment for class assignment.
 - **Desirability taxonomy initial population.** The `desirable_trim_or_spec` and `classic_or_collector` taxonomies need a starting list. Source: model-specific forums, BaT auction history, Hagerty's collector index, our own iterative tagging. Initial list at plan-write time; refined post-launch.
 - **Final decision on Postgres queue** (roll our own NOTIFY + SKIP LOCKED, or adopt Procrastinate). Default: roll our own for MVP, revisit if it gets unwieldy.
