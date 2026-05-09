@@ -642,6 +642,8 @@ class Auction(Base, TimestampMixin):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     discovery_confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="high")
+    needs_plugin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    routing_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     lots: Mapped[list["AuctionLot"]] = relationship(back_populates="auction", lazy="raise")
 
@@ -6063,7 +6065,468 @@ git commit -m "sources: farmauctionguide as primary platform-router; HiBid secon
 
 ---
 
-End of Phase 10. All three MVP sources are integrated.
+### Task 42: Alert on unknown-platform auctions (lead-time triage)
+
+When farmauctionguide finds an auction on a platform we don't have a plugin for, we need to flag it before the auction starts so the user can add the plugin and recover lot data. Lot data disappears at close — we can't retroactively scrape it. Alerting on discovery (typically days–weeks ahead) gives meaningful lead time.
+
+**Files:**
+- Modify: `src/carbuyer/apps/bot/channels.py` — add `needs_plugin` channel key
+- Modify: `src/carbuyer/apps/bot/messages.py` — add `render_needs_plugin_text`
+- Modify: `src/carbuyer/apps/auction_discoverer/discoverer.py` — emit `needs_plugin` NOTIFY
+- Modify: `src/carbuyer/apps/notifier/notifier.py` — add a parallel listener for `needs_plugin`
+- Modify: `src/carbuyer/apps/notifier/discord_post.py` — accept an optional `view` parameter (or `None` for plain posts)
+- Create: `tests/apps/test_needs_plugin.py`
+
+- [ ] **Step 1: Add `needs_plugin` channel key in `src/carbuyer/apps/bot/channels.py`**
+
+Replace the `select_channel` function with:
+
+```python
+def select_channel(*, trigger: str, score: float | None) -> ChannelKey:
+    if trigger == "early_warning":
+        return "early_warning"
+    if trigger == "going_cheap":
+        if score is not None and score >= 0.20:
+            return "hot_deals"
+        return "watchlist"
+    if trigger in {"closing_soon", "bid_trajectory", "lot_extended"}:
+        return "auction_closing"
+    if trigger == "vision_update":
+        return "vision_updates"
+    if trigger == "needs_plugin":
+        return "needs_plugin"
+    if trigger == "system":
+        return "system_health"
+    return "watchlist"
+```
+
+And update the `ChannelKey` literal to include `needs_plugin`:
+
+```python
+ChannelKey = Literal[
+    "early_warning", "hot_deals", "watchlist",
+    "auction_closing", "auction_watch", "vision_updates",
+    "needs_plugin", "system_health",
+]
+```
+
+- [ ] **Step 2: Add `render_needs_plugin_text` in `src/carbuyer/apps/bot/messages.py`**
+
+Append to the file:
+
+```python
+def render_needs_plugin_text(
+    *, auction_id: int, url: str, auctioneer_name: str | None,
+    pickup_city: str | None, pickup_province: str | None,
+    scheduled_start_at: datetime | None,
+) -> str:
+    location = ", ".join(filter(None, [pickup_city, pickup_province])) or "?"
+    when = scheduled_start_at.strftime("%b %d") if scheduled_start_at else "(start date unknown)"
+    return (
+        f"🔌 NEW PLATFORM — needs a scraper plugin\n"
+        f"Auctioneer: {auctioneer_name or '(unknown)'}\n"
+        f"Location: {location}\n"
+        f"Auction starts: {when}\n"
+        f"URL: {url}\n\n"
+        f"Add a plugin under src/carbuyer/sources/<name>/ before the auction closes "
+        f"to capture lot data. After deploying the plugin, click 'Retry routing' "
+        f"on /needs-plugin (auction id {auction_id}) to reprocess this auction."
+    )
+```
+
+- [ ] **Step 3: Update auction-discoverer to NOTIFY when an unknown-platform auction is stored**
+
+In `src/carbuyer/apps/auction_discoverer/discoverer.py`, replace the inner block of `discover_once` that handles persistence with:
+
+```python
+            async with async_session_maker() as session:
+                async with session.begin():
+                    auction = await upsert_auction(session, raw)
+                    await notify(session, "auction_pending", str(auction.id))
+                    if (
+                        ref.source == "farmauctionguide_unknown"
+                        and auction.needs_plugin_notified_at is None
+                    ):
+                        await notify(session, "needs_plugin", str(auction.id))
+            found += 1
+```
+
+- [ ] **Step 4: Add a parallel `needs_plugin` listener in the notifier**
+
+In `src/carbuyer/apps/notifier/notifier.py`, add:
+
+```python
+async def _process_needs_plugin(auction_id: int) -> None:
+    from datetime import datetime, timezone
+
+    from carbuyer.apps.bot.channels import select_channel
+    from carbuyer.apps.bot.messages import render_needs_plugin_text
+    from carbuyer.apps.notifier.discord_post import post_simple_message
+    from carbuyer.db.models import Auction
+    from carbuyer.db.session import async_session_maker
+    from carbuyer.shared.config import settings
+
+    async with async_session_maker() as session:
+        auction = await session.get(Auction, auction_id)
+        if auction is None or auction.needs_plugin_notified_at is not None:
+            return
+        if auction.source != "farmauctionguide_unknown":
+            return
+        channel_key = select_channel(trigger="needs_plugin", score=None)
+        channel_id = settings.discord_channels.get(channel_key)
+        if channel_id is None:
+            log.warning("no needs_plugin channel configured")
+            return
+        content = render_needs_plugin_text(
+            auction_id=auction.id, url=auction.url,
+            auctioneer_name=auction.auctioneer_name,
+            pickup_city=auction.pickup_city,
+            pickup_province=auction.pickup_province,
+            scheduled_start_at=auction.scheduled_start_at,
+        )
+        if await post_simple_message(channel_id, content):
+            auction.needs_plugin_notified_at = datetime.now(timezone.utc)
+            auction.last_notified_channel = channel_key
+            await session.commit()
+
+
+async def listen_needs_plugin() -> None:
+    async for payload in listen("needs_plugin"):
+        try:
+            auction_id = int(payload)
+        except ValueError:
+            continue
+        try:
+            await _process_needs_plugin(auction_id)
+        except Exception:
+            log.exception("needs_plugin processing failed")
+
+
+async def main() -> None:
+    import asyncio
+
+    async def lot_loop() -> None:
+        async for _ in listen("notification_pending"):
+            try:
+                await process_pending()
+            except Exception:
+                log.exception("notification batch failed")
+                await asyncio.sleep(5)
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(lot_loop())
+        tg.create_task(listen_needs_plugin())
+```
+
+(The previous `main()` function is replaced by the version above.)
+
+- [ ] **Step 5: Add `post_simple_message` (button-less) helper in `src/carbuyer/apps/notifier/discord_post.py`**
+
+Append to the existing file:
+
+```python
+async def post_simple_message(channel_id: int, content: str) -> bool:
+    """Post without action buttons (used for system / needs_plugin alerts)."""
+    intents = discord.Intents.none()
+    intents.guilds = True
+    client = discord.Client(intents=intents)
+
+    posted = False
+
+    @client.event
+    async def on_ready() -> None:
+        nonlocal posted
+        try:
+            channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+            if isinstance(channel, discord.TextChannel):
+                await channel.send(content=content)
+                posted = True
+        finally:
+            await client.close()
+
+    try:
+        await client.start(settings.discord_bot_token)
+    except Exception:
+        log.exception("discord post_simple failed", channel_id=channel_id)
+    return posted
+```
+
+- [ ] **Step 6: Write the test**
+
+```python
+# tests/apps/test_needs_plugin.py
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from carbuyer.apps.notifier.notifier import _process_needs_plugin
+from carbuyer.db.models import Auction
+from carbuyer.db.session import async_session_maker
+
+
+@pytest.mark.asyncio
+async def test_process_needs_plugin_marks_notified() -> None:
+    async with async_session_maker() as s:
+        a = Auction(
+            source="farmauctionguide_unknown",
+            source_auction_id="abc",
+            url="https://random-auctioneer.example.com/sale/abc",
+            auction_subtype="estate",
+            first_seen_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            pickup_province="AB", pickup_city="Calgary",
+            auctioneer_name="Random Co",
+        )
+        s.add(a)
+        await s.commit()
+        auction_id = a.id
+
+    with patch("carbuyer.apps.notifier.discord_post.post_simple_message",
+               new=AsyncMock(return_value=True)), \
+         patch("carbuyer.shared.config.settings.discord_channels",
+               {"needs_plugin": 99999}):
+        await _process_needs_plugin(auction_id)
+
+    async with async_session_maker() as s:
+        a = await s.get(Auction, auction_id)
+        assert a.needs_plugin_notified_at is not None
+```
+
+- [ ] **Step 7: Run test and commit**
+
+```bash
+uv run pytest tests/apps/test_needs_plugin.py -v
+git add src/carbuyer/apps/bot/channels.py src/carbuyer/apps/bot/messages.py src/carbuyer/apps/auction_discoverer/discoverer.py src/carbuyer/apps/notifier/notifier.py src/carbuyer/apps/notifier/discord_post.py tests/apps/test_needs_plugin.py
+git commit -m "needs-plugin: discord alert on unknown-platform auction discovery"
+```
+
+---
+
+### Task 43: Retry routing after a new plugin is deployed
+
+Once the user adds a plugin for a previously-unknown platform, they need to re-run platform detection on the existing auction rows so those auctions can be scraped end-to-end. The dashboard exposes a `/needs-plugin` view with a "Retry routing" button on each row.
+
+**Files:**
+- Create: `src/carbuyer/apps/dashboard/routers/needs_plugin.py`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/needs_plugin.html`
+- Modify: `src/carbuyer/apps/dashboard/app.py` — register the new router
+- Modify: `src/carbuyer/apps/dashboard/templates/base.html` — add nav link
+- Create: `tests/apps/dashboard/test_needs_plugin.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/dashboard/routers/needs_plugin.py`**
+
+```python
+from datetime import datetime, timezone
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.notify import notify
+from carbuyer.sources.farmauctionguide.source import resolve_platform
+
+
+router = APIRouter()
+
+
+@router.get("/needs-plugin", response_class=HTMLResponse)
+async def needs_plugin_view(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> HTMLResponse:
+    stmt = (
+        select(Auction)
+        .where(Auction.source == "farmauctionguide_unknown")
+        .order_by(Auction.scheduled_start_at.asc().nulls_last(), Auction.first_seen_at.asc())
+        .limit(200)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    now = datetime.now(timezone.utc)
+    return templates.TemplateResponse(
+        request, "pages/needs_plugin.html",
+        {"rows": rows, "now": now},
+    )
+
+
+@router.post("/admin/auctions/{auction_id}/retry_routing", status_code=204)
+async def retry_routing(
+    auction_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    auction = await session.get(Auction, auction_id)
+    if auction is None:
+        raise HTTPException(status_code=404)
+    new_source, new_ext_id = resolve_platform(auction.url)
+    if new_source == "farmauctionguide_unknown":
+        # No plugin matches yet; nothing to do.
+        return Response(status_code=204)
+
+    auction.source = new_source
+    auction.source_auction_id = new_ext_id
+    auction.routing_resolved_at = datetime.now(timezone.utc)
+
+    # Reset any lots already associated so they re-process under the new source.
+    # (Practically there should be zero lots since the source was unknown — but
+    # being explicit is cheap.)
+    from sqlalchemy import update
+    await session.execute(
+        update(AuctionLot)
+        .where(AuctionLot.auction_id == auction.id)
+        .values(enrichment_status="pending", valuation_status="pending",
+                vision_status="pending", notification_status="pending")
+    )
+    await notify(session, "auction_pending", str(auction.id))
+    await session.commit()
+    return Response(status_code=204)
+```
+
+- [ ] **Step 2: Write `templates/pages/needs_plugin.html`**
+
+```html
+{% extends "base.html" %}
+{% block title %}Needs plugin — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Auctions needing a plugin</h1>
+  <p class="muted">
+    farmauctionguide.com surfaced these auctions but their underlying platform
+    isn't covered by any of our scraper plugins yet. Add a plugin under
+    <code>src/carbuyer/sources/&lt;name&gt;/</code> and register it in the
+    discoverer + lot-scraper + bid-poller registries, then click
+    <strong>Retry routing</strong> below to reprocess.
+  </p>
+  {% if not rows %}
+    <p class="muted">Nothing waiting. New unknown-platform auctions will appear here as they're discovered.</p>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+        <th>URL</th>
+        <th>Auctioneer</th>
+        <th>Location</th>
+        <th>Starts</th>
+        <th>First seen</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in rows %}
+        <tr>
+          <td><a href="{{ a.url }}" target="_blank">{{ a.url[:60] }}…</a></td>
+          <td>{{ a.auctioneer_name or "(unknown)" }}</td>
+          <td>{{ a.pickup_city or "?" }}, {{ a.pickup_province or "?" }}</td>
+          <td>
+            {% if a.scheduled_start_at %}
+              {{ a.scheduled_start_at.strftime("%b %d") }}
+              {% set delta = (a.scheduled_start_at - now).total_seconds() // 86400 %}
+              ({{ delta|int }}d)
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>{{ a.first_seen_at.strftime("%Y-%m-%d") }}</td>
+          <td>
+            <button
+              hx-post="/admin/auctions/{{ a.id }}/retry_routing"
+              hx-swap="none"
+            >Retry routing</button>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
+```
+
+- [ ] **Step 3: Register the router in `src/carbuyer/apps/dashboard/app.py`**
+
+Update the `create_app` function's import + include block:
+
+```python
+    from carbuyer.apps.dashboard.routers import (
+        feed, closing, watched, lots, comps, sold, purchases, health, actions, needs_plugin,
+    )
+    for router in (feed, closing, watched, lots, comps, sold, purchases, health, actions, needs_plugin):
+        app.include_router(router.router)
+```
+
+- [ ] **Step 4: Add nav link in `templates/base.html`**
+
+Inside the `.topnav` block, add a link before `Health`:
+
+```html
+    <a href="/needs-plugin">Needs plugin</a>
+```
+
+- [ ] **Step 5: Write the test**
+
+```python
+# tests/apps/dashboard/test_needs_plugin.py
+from datetime import UTC, datetime
+
+import pytest
+from fastapi.testclient import TestClient
+
+from carbuyer.apps.dashboard.app import app
+from carbuyer.db.models import Auction
+from carbuyer.db.session import async_session_maker
+
+
+@pytest.mark.asyncio
+async def test_needs_plugin_view_renders() -> None:
+    async with async_session_maker() as s:
+        a = Auction(
+            source="farmauctionguide_unknown", source_auction_id="abc",
+            url="https://random.example.com/sale/abc",
+            auction_subtype="estate",
+            first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+            pickup_province="AB", auctioneer_name="Random Co",
+        )
+        s.add(a)
+        await s.commit()
+    with TestClient(app) as client:
+        r = client.get("/needs-plugin")
+    assert r.status_code == 200
+    assert "Random Co" in r.text
+
+
+@pytest.mark.asyncio
+async def test_retry_routing_reroutes_when_plugin_now_matches() -> None:
+    async with async_session_maker() as s:
+        a = Auction(
+            source="farmauctionguide_unknown", source_auction_id="700001",
+            url="https://terrymcdougall.hibid.com/catalog/700001/test",
+            auction_subtype="estate",
+            first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+        )
+        s.add(a)
+        await s.commit()
+        auction_id = a.id
+    with TestClient(app) as client:
+        r = client.post(f"/admin/auctions/{auction_id}/retry_routing")
+    assert r.status_code == 204
+    async with async_session_maker() as s:
+        a = await s.get(Auction, auction_id)
+        assert a.source == "hibid"
+        assert a.routing_resolved_at is not None
+```
+
+- [ ] **Step 6: Run tests and commit**
+
+```bash
+uv run pytest tests/apps/dashboard/test_needs_plugin.py -v
+git add src/carbuyer/apps/dashboard/routers/needs_plugin.py src/carbuyer/apps/dashboard/templates/pages/needs_plugin.html src/carbuyer/apps/dashboard/app.py src/carbuyer/apps/dashboard/templates/base.html tests/apps/dashboard/test_needs_plugin.py
+git commit -m "needs-plugin: dashboard view + retry-routing admin endpoint"
+```
+
+---
+
+End of Phase 10. All three MVP sources are integrated and unknown-platform auctions are flagged for manual plugin addition.
 
 ---
 
@@ -6071,7 +6534,7 @@ End of Phase 10. All three MVP sources are integrated.
 
 FastAPI + Jinja2 + HTMX served on `localhost:8000`. No auth in MVP; auth seam wired so it's a one-line addition later. HTMX vendored locally — no CDN.
 
-### Task 42: FastAPI skeleton + base template + HTMX
+### Task 44: FastAPI skeleton + base template + HTMX
 
 **Files:**
 - Create: `src/carbuyer/apps/dashboard/__init__.py`
@@ -6252,7 +6715,7 @@ git commit -m "dashboard: FastAPI skeleton + base template + HTMX vendoring"
 
 ---
 
-### Task 43: Auction feed view (default landing)
+### Task 45: Auction feed view (default landing)
 
 **Files:**
 - Modify: `src/carbuyer/apps/dashboard/routers/feed.py`
@@ -6453,7 +6916,7 @@ git commit -m "dashboard: auction feed view with filters and infinite scroll"
 
 ---
 
-### Task 44: Lot detail with comp comparison panel
+### Task 46: Lot detail with comp comparison panel
 
 **Files:**
 - Modify: `src/carbuyer/apps/dashboard/routers/lots.py`
@@ -6684,7 +7147,7 @@ git commit -m "dashboard: lot detail + comp comparison panel"
 
 ---
 
-### Task 45: Remaining views (closing-soon, watched, comps, sold, purchases, health)
+### Task 47: Remaining views (closing-soon, watched, comps, sold, purchases, health)
 
 These follow the same pattern as Task 43. For each: a router file, a page template, optionally an HTMX partial. Implementation listed compactly per view.
 
@@ -7127,7 +7590,7 @@ git commit -m "dashboard: closing / watched / comps / sold / purchases / health 
 
 ---
 
-### Task 46: Action endpoints (mark, notes, snooze, refresh, rescore)
+### Task 48: Action endpoints (mark, notes, snooze, refresh, rescore)
 
 **Files:**
 - Modify: `src/carbuyer/apps/dashboard/routers/actions.py`
@@ -7240,7 +7703,7 @@ End of Phase 11. Dashboard is complete with all views and HTMX-driven interactiv
 
 ## Phase 12 — Production deployment
 
-### Task 47: systemd unit files
+### Task 49: systemd unit files
 
 **Files:**
 - Create: `infra/systemd/carbuyer-postgres.service`
@@ -7385,7 +7848,7 @@ git commit -m "infra: systemd unit files for all workers + install script"
 
 ---
 
-### Task 48: Postgres backup script
+### Task 50: Postgres backup script
 
 **Files:**
 - Create: `infra/backup.sh`
@@ -7438,7 +7901,7 @@ git commit -m "infra: postgres backup script with 30-day retention"
 
 ---
 
-### Task 49: README + .env.example
+### Task 51: README + .env.example
 
 **Files:**
 - Create: `README.md`
@@ -7533,7 +7996,7 @@ git commit -m "docs: README + env example"
 
 ---
 
-### Task 50: End-to-end smoke test (manual checklist)
+### Task 52: End-to-end smoke test (manual checklist)
 
 This is the verification gate. Do it at the end of implementation.
 
@@ -7629,4 +8092,6 @@ git tag -a v0.1.0 -m "MVP: end-to-end auction deal-finder"
 
 **Type consistency check:** all schema field names match between Pydantic models, ORM models, and template usage. Worker module names match between systemd units and `python -m carbuyer.apps.<name>` paths.
 
-**Verification path:** Phase 12 Task 50 is the end-to-end smoke that proves the whole pipeline works on real data.
+**Verification path:** Phase 12 Task 52 is the end-to-end smoke that proves the whole pipeline works on real data.
+
+**Unknown-platform feedback loop:** Task 42 alerts on Discord whenever farmauctionguide finds an auction whose platform we can't parse. Task 43's `/needs-plugin` view + retry-routing endpoint lets the user add a plugin and reroute existing rows so the new plugin processes them. End-to-end: discovery → alert → user adds plugin → user clicks Retry routing → lot-scraper picks up the auction under the new source.
