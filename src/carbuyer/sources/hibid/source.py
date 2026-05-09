@@ -10,6 +10,8 @@ from typing import ClassVar, Self
 
 import httpx
 
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
 from carbuyer.sources.base import (
     AuctionRef,
     AuctionSource,
@@ -29,6 +31,8 @@ from carbuyer.sources.hibid.urls import catalog_url, lot_url, province_vehicles_
 from carbuyer.sources.http import jittered_sleep, make_client
 from carbuyer.sources.resolver import canonicalize_url
 from carbuyer.sources.retry import RetryTransport
+
+_log = get_logger("sources.hibid")
 
 _HIBID_CATALOG_URL = re.compile(
     r"^https?://(?:www\.)?hibid\.com/(?:[a-z\-]+/)?catalog/(\d+)",
@@ -96,9 +100,19 @@ class HibidSource(AuctionSource):
         seen: set[str] = set()
         for i, province in enumerate(self.provinces):
             url = province_vehicles_url(province)
-            resp = await self._http.get(url)
-            resp.raise_for_status()
-            for raw in extract_lot_models(resp.text):
+            try:
+                resp = await self._http.get(url)
+                resp.raise_for_status()
+                models = extract_lot_models(resp.text)
+            except Exception as exc:
+                # One failing province must NOT abort the whole sweep —
+                # log and continue so the remaining provinces still surface.
+                _log.warning(
+                    "discover_auctions province failed",
+                    province=province, url=url, error=str(exc),
+                )
+                continue
+            for raw in models:
                 summary = parse_lot_summary(raw)
                 auction_id = summary.auction_external_id
                 if not auction_id or auction_id in seen:
@@ -202,6 +216,5 @@ class HibidSource(AuctionSource):
 
 # Register at import time so the lot-scraper / discoverer worker / dashboard
 # health view can enumerate covered platforms via SOURCES (Phase 0 design #11).
-# Provinces default to AB/BC/SK/MB; phase-2 workers can re-instantiate with a
-# different list and call register() again with the same name to override.
-register(HibidSource(provinces=["AB", "BC", "SK", "MB"]))
+# Provinces come from settings.hibid_provinces (override via HIBID_PROVINCES env).
+register(HibidSource(provinces=list(settings.hibid_provinces)))

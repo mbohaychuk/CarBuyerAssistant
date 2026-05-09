@@ -30,7 +30,8 @@ log = get_logger("lot_scraper")
 
 
 # Fields that, when changed, invalidate downstream worker output.
-# Bid columns are deliberately NOT here — they're the bid-poller's domain.
+# Bid columns (current_high_bid_cad, bid_count_visible, lot_status, …) are
+# deliberately NOT here — they're the bid-poller's domain.
 _CONTENT_TRIGGER_FIELDS: tuple[str, ...] = (
     "title", "description", "photos",
     "year", "make", "model", "vin", "mileage_km",
@@ -48,6 +49,11 @@ async def _upsert_lot(
 
     Caller wraps in upsert_lot_with_status_cascade to apply the trigger-field
     cascade. This inner function is the pure SQL operation.
+
+    Note: ``RawLot.extra`` is not persisted to ``AuctionLot`` (no column for it
+    by design). It flows in-memory from scraper to enricher (Phase 3) so
+    source-specific fields like Carfax URLs / reserve status / buy-now price
+    can be promoted to canonical columns once 2+ sources surface the same key.
     """
     insert_values: dict[str, object] = {
         "auction_id": auction_id,
@@ -70,12 +76,15 @@ async def _upsert_lot(
     excluded = stmt.excluded
 
     # Per Phase 0 column-ownership: lot-scraper does NOT write bid columns.
-    # On conflict, the only mutations are content (with coalesce) + parser_version.
+    # `lot_status` belongs to the bid-poller after initial INSERT — leaving it
+    # out of `update_values` means lot-scraper sets the initial 'open' on
+    # creation, then never touches the column again. Bid-poller advances it
+    # to 'closing_soon' / 'extended' / 'closed' / 'sold' / 'unsold'.
     update_values: dict[str, object] = {
         "url": excluded.url,
         "lot_number": func.coalesce(excluded.lot_number, AuctionLot.lot_number),
         "parser_version": excluded.parser_version,
-        "lot_status": excluded.lot_status,
+        "updated_at": func.now(),
     }
     for field_name in (*_CONTENT_TRIGGER_FIELDS, "trim"):
         update_values[field_name] = func.coalesce(
@@ -130,7 +139,14 @@ async def upsert_lot_with_status_cascade(
     if content_changed or parser_changed:
         lot.enrichment_status = EnrichmentStatus.PENDING
         lot.valuation_status = ValuationStatus.PENDING
-        lot.vision_status = VisionStatus.PENDING
+        # vision_status='skipped' is set by the vision-batcher when a lot is
+        # outside the top-10% deal-score gate. Don't promote skipped → pending
+        # on a content rescrape — vision is score-gated, and re-running it
+        # burns OpenAI vision-API budget on lots already judged not-worth-it.
+        # The batcher itself will re-evaluate on its next nightly pass if the
+        # deal score has improved.
+        if lot.vision_status != VisionStatus.SKIPPED:
+            lot.vision_status = VisionStatus.PENDING
         lot.notification_status = NotificationStatus.PENDING
         await session.flush()
     return lot
