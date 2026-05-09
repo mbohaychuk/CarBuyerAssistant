@@ -119,6 +119,7 @@ async def upsert_auction(
             excluded.online_bidding_fee_pct, Auction.online_bidding_fee_pct,
         ),
         "last_seen_at": excluded.last_seen_at,
+        "updated_at": func.now(),  # ORM onupdate doesn't fire on ON CONFLICT
         # Atomic dedup-append: array || EXCLUDED.array, then DISTINCT.
         "discovered_via": text(
             "ARRAY(SELECT DISTINCT unnest("

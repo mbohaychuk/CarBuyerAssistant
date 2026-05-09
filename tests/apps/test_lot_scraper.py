@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.lot_scraper.scraper import upsert_lot_with_status_cascade
 from carbuyer.db.enums import (
     EnrichmentStatus,
+    LotStatus,
     NotificationStatus,
     ValuationStatus,
     VisionStatus,
@@ -120,6 +121,54 @@ async def test_upsert_lot_does_not_overwrite_with_none(
     )
     await session.flush()
     assert lot.title == "t1"
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_does_not_clobber_bid_poller_lot_status(
+    session: AsyncSession,
+) -> None:
+    """Bid-poller writes lot_status='closing_soon'/'extended'/'closed';
+    lot-scraper must NOT overwrite that on subsequent re-scrapes."""
+    a = _seed_auction(session)
+    await session.flush()
+    lot = await upsert_lot_with_status_cascade(
+        session, a.id, _lot_raw(), parser_version="v1",
+    )
+    assert lot.lot_status == LotStatus.OPEN
+    # Simulate bid-poller advancing the lot status.
+    lot.lot_status = LotStatus.CLOSING_SOON
+    await session.flush()
+    # Re-scrape: raw still says lot_status='open' (default from HiBid parser).
+    lot2 = await upsert_lot_with_status_cascade(
+        session, a.id, _lot_raw(), parser_version="v1",
+    )
+    await session.flush()
+    assert lot2.lot_status == LotStatus.CLOSING_SOON
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_preserves_vision_skipped_on_content_change(
+    session: AsyncSession,
+) -> None:
+    """vision_status='skipped' is set by the vision-batcher when a lot is
+    outside the top-10% deal-score gate. Don't reset it on content change —
+    re-running burns OpenAI vision-API budget on already-judged lots."""
+    a = _seed_auction(session)
+    await session.flush()
+    lot = await upsert_lot_with_status_cascade(
+        session, a.id, _lot_raw(), parser_version="v1",
+    )
+    lot.vision_status = VisionStatus.SKIPPED
+    lot.enrichment_status = EnrichmentStatus.DONE
+    await session.flush()
+    # Content-changing re-scrape.
+    lot2 = await upsert_lot_with_status_cascade(
+        session, a.id, _lot_raw(title="rev"), parser_version="v1",
+    )
+    await session.flush()
+    assert lot2.vision_status == VisionStatus.SKIPPED  # preserved
+    # But other statuses still reset on content change:
+    assert lot2.enrichment_status == EnrichmentStatus.PENDING
 
 
 @pytest.mark.asyncio

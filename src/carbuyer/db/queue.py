@@ -12,22 +12,29 @@ from carbuyer.db.enums import (
 )
 from carbuyer.db.models import AuctionLot
 
+# All status fields readable for catchup sweeps.
 StatusField = Literal[
     "enrichment_status", "valuation_status", "vision_status", "notification_status",
 ]
 
-_IN_PROGRESS_BY_FIELD: dict[StatusField, str] = {
+# Status fields with an IN_PROGRESS state — claimable via two-phase claim.
+# NotificationStatus has no IN_PROGRESS (notifier flips PENDING → DONE/SKIPPED
+# directly), so it's deliberately absent from this Literal.
+ClaimableStatusField = Literal[
+    "enrichment_status", "valuation_status", "vision_status",
+]
+
+_IN_PROGRESS_BY_FIELD: dict[ClaimableStatusField, str] = {
     "enrichment_status": EnrichmentStatus.IN_PROGRESS,
     "valuation_status": ValuationStatus.IN_PROGRESS,
     "vision_status": VisionStatus.IN_PROGRESS,
-    # NotificationStatus has no IN_PROGRESS — notifier flips PENDING → DONE/SKIPPED.
 }
 
 
 async def claim_pending_ids(
     session: AsyncSession,
     *,
-    status_field: StatusField,
+    status_field: ClaimableStatusField,
     limit: int = 50,
 ) -> list[int]:
     """Claim up to ``limit`` pending lot ids and flip them to in_progress.
@@ -39,11 +46,6 @@ async def claim_pending_ids(
     watchdog (Phase 2.5) flips 'in_progress' rows older than N minutes back to
     'pending' to recover from worker crashes mid-processing.
     """
-    if status_field not in _IN_PROGRESS_BY_FIELD:
-        raise ValueError(
-            f"{status_field} has no IN_PROGRESS state; "
-            "use the terminal-status enum directly (e.g. NotificationStatus.DONE)",
-        )
     column = getattr(AuctionLot, status_field)
     select_stmt = (
         select(AuctionLot.id)

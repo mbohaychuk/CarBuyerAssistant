@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     http_user_agent: str = DEFAULT_USER_AGENT
 
+    # HiBid plugin discovery target provinces. Override via env, e.g.
+    # `HIBID_PROVINCES='["AB","BC","SK"]'` to scope discovery for testing.
+    hibid_provinces: list[Province] = Field(
+        default_factory=lambda: ["AB", "BC", "SK", "MB"],
+    )
+
     @field_validator("discord_channels", mode="before")
     @classmethod
     def _parse_discord_channels(cls, value: Any) -> dict[str, int]:
