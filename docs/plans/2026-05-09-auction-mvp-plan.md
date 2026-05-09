@@ -1811,6 +1811,59 @@ End of Phase 0. Postgres is up, schema is migrated, ORM models exist, source ABC
 
 HiBid (`hibid.com`) is the primary source. Pages embed a `<script>` block of the form `var lotModels = [{...}, ...];`. Our parser extracts that JSON literal and walks it. No headless browser. Conservative pacing (4–8s jitter). Reference fixture: capture one real catalog page during implementation; commit the HTML to `tests/sources/fixtures/`.
 
+### Phase 1 — Design-decision overlay (post-deliberation 2026-05-09)
+
+Multi-discipline review (senior dev, scraping/web research) raised concrete realities and code issues against original Phase 1. **Tasks below have been updated to reflect these decisions; this overlay documents the *why*.**
+
+**Hard reality found via live investigation:**
+
+- **Cloudflare bot management is active on hibid.com.** Plain `curl` with full Chrome headers returns HTTP 403 (`__cf_bm` cookie set, "Sorry, you have been blocked"). Anthropic's WebFetch passes through (different IP/JA3 fingerprint), so the site is reachable in principle. **A self-hosted Python httpx scraper as designed in the original plan will not work.** Three viable strategies:
+  1. **`curl_cffi`** (or similar) — TLS fingerprint matching Chrome via libcurl-impersonate. Drop-in `requests`-like API. **Recommended for MVP** — minimal infra, works for sites with Bot Fight Mode (which HiBid is — no Turnstile interstitial was observed).
+  2. **Playwright** (headed/headless with stealth plugins) — heavier, slower, higher hosting cost.
+  3. **Residential proxy provider** — ongoing cost, simpler code.
+- The plan **defers the CF-bypass implementation to a follow-up** (Phase 1.5 below). Phase 1 builds the plumbing against a hand-written synthetic fixture so the parser, URL builders, and `AuctionSource` integration are correct and unit-tested. The live integration test (original Task 14) becomes a **deferred Cloudflare-bypass spike**, with detailed acceptance criteria captured in the new task description.
+
+**HiBid data realities discovered:**
+
+- **Real `lotModels` lot-summary keys** (per the only public scraper found, [jkoelmel/texas_auctions_scraper](https://github.com/jkoelmel/texas_auctions_scraper)):
+  - `eventItemId` (int) — per-auction lot id used in listing endpoints.
+  - `lead` (string) — headline / title.
+  - `quantity` (int).
+  - `companyName` (string) — auctioneer.
+  - `auctionCity`, `auctionState` (strings) — location.
+  - `lotStatus.highBid` (number) — **nested** under `lotStatus`.
+  - `lotStatus.bidCount` (int).
+  - `lotStatus.timeLeft` (countdown string).
+  - `shippingOffered` (bool).
+  - The plan's original guesses (`lotId/lotID/id`, `title/lotTitle`, flat `highBid`, `saleEnd`, `lotImages`, `auctionId`, `url/lotUrl`) **do not match** observed HiBid output. `HibidLotSummary` is rewritten below.
+- **Year/make/model are NOT separate fields** in `lotModels` — they're embedded in the `lead` text. Parsing them out is the description-enricher's job (Phase 3); leave `year/make/model = None` in `parse_lot_summary`.
+- **Public lot URL uses a different global lot id** (`/lot/300724160/peterbilt-389`) than `eventItemId`. Persist `eventItemId` as `source_lot_id` (it's the listing-scoped key); the URL field comes from `lotUrl` if present.
+- **Discovery URL.** The original plan's `/{province}/auctions/700006/cars-and-vehicles?status=OPEN` is the **catalogs view** (auction-event listing). For per-lot enumeration, `/{province}/lots/700006/cars-and-vehicles?status=open` is the lots view. The discoverer wants the catalogs view (we record auctions, the lot-scraper enumerates lots within an auction). Status query param is lowercase `open` in the rendered UI; either case works server-side.
+- **Cross-border lots:** the AB province auction list contains some BC-located auctioneers (border operators). Don't assume `province path = pickup province`; post-filter on `auctionState` if needed.
+
+**Must-fix code issues:**
+
+1. **Balanced-bracket extraction, not regex `\[.*?\]`.** Non-greedy `\[.*?\]` with `re.DOTALL` matches from first `[` to first `]` — truncates on every nested array (HiBid lots embed `images: [...]`, etc.). Replace with a string-aware depth scanner. (Task 12.)
+2. **`HibidSource` declares `version: ClassVar[str]`.** Phase 0 design decision #8 makes this a contract on every plugin. (Task 13.)
+3. **`HibidSource` calls `register()` at module import.** Phase 0 design decision #11. (Task 13.)
+4. **`_parse_dt` returns UTC-aware datetimes.** Phase 7's soft-close logic compares to `datetime.now(UTC)`; mixing aware/naive crashes. (Task 12.)
+5. **Defensive `_to_decimal` helper.** `Decimal(str(bid))` blows up on stringified currency (`"1,200.00"`, `"$1,200"`). Single bad lot must not crash the whole catalog parse. (Task 12.)
+
+**Should-fix code issues:**
+
+6. **Retry transport in this phase.** Phase 0's HTTP wrapper already has a `transport=` seam; the comment promises Phase 1 will fill it. New module `src/carbuyer/sources/retry.py` with `RetryTransport` that honors Retry-After + jittered exponential backoff on `{429, 502, 503, 504}`. Used by HibidSource via `make_client(transport=RetryTransport(...))`. (New Task 11.5.)
+7. **`HibidSource` is an async context manager owning one client.** Phase 7 will poll continuously — per-call `make_client()` thrashes TLS handshakes. Workers wrap their main loop in `async with HibidSource(...) as src:`. (Task 13.)
+8. **Populate `RawLot.extra` with HiBid-specific fields:** `bidIncrement`, `reserveStatus`, `buyNowPrice`, `lotState`. The valuator (Phase 4) and soft-close detector (Phase 7) want them; capturing now is one line. (Task 13.)
+9. **Hand-written synthetic fixture in addition to (or instead of) a live capture.** `tests/sources/fixtures/hibid_catalog_synthetic.html` is the contract; if a live capture lands later, it's the canary. Synthetic fixture exercises: nested array in lot, `}],{` quirk, two lots with known ids/bids/end-times. (Task 12.)
+
+**Deferred (acknowledged, captured as Phase 1.5):**
+
+- **Cloudflare bypass** — Task 14 rewritten as Phase 1.5 spike: evaluate `curl_cffi` first, fall back to Playwright if 403'd. Acceptance: one real Alberta auction discovered + one lot fetched. Until done, the auction-discoverer worker (Phase 2) cannot run against live HiBid; it can run against a local mock for end-to-end-pipeline testing.
+
+End of overlay.
+
+---
+
 ### Task 11: HiBid constants and URL builders
 
 **Files:**
@@ -1823,38 +1876,79 @@ HiBid (`hibid.com`) is the primary source. Pages embed a `<script>` block of the
 
 ```python
 # tests/sources/hibid/test_urls.py
-from carbuyer.sources.hibid.urls import province_vehicles_url, lot_url, catalog_url
+from carbuyer.sources.hibid.urls import (
+    catalog_url,
+    lot_url,
+    province_lots_url,
+    province_vehicles_url,
+)
 
 
 def test_province_vehicles_url() -> None:
-    assert province_vehicles_url("AB") == "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=OPEN"
+    # Catalogs/events view — used by auction-discoverer to enumerate auctions.
+    assert (
+        province_vehicles_url("AB")
+        == "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=open"
+    )
+
+
+def test_province_lots_url() -> None:
+    # Per-lot listing view — used when scraping lots without a known auction.
+    assert (
+        province_lots_url("BC")
+        == "https://hibid.com/british-columbia/lots/700006/cars-and-vehicles?status=open"
+    )
 
 
 def test_lot_url() -> None:
     assert lot_url("12345", "1995-ford-f150") == "https://hibid.com/lot/12345/1995-ford-f150"
 
 
+def test_lot_url_no_slug() -> None:
+    assert lot_url("12345") == "https://hibid.com/lot/12345"
+
+
 def test_catalog_url() -> None:
-    assert catalog_url("740236", "vehicle-equipment-with-nl-power-auction") == \
-        "https://hibid.com/catalog/740236/vehicle-equipment-with-nl-power-auction"
+    assert (
+        catalog_url("740236", "vehicle-equipment-with-nl-power-auction")
+        == "https://hibid.com/catalog/740236/vehicle-equipment-with-nl-power-auction"
+    )
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/sources/hibid/urls.py`**
 
 ```python
-PROVINCE_PATH = {
+from __future__ import annotations
+
+# Western Canadian provinces. Other provinces (ON, QC, etc.) follow the same
+# slug pattern but are out-of-scope for the MVP.
+PROVINCE_PATH: dict[str, str] = {
     "AB": "alberta",
     "BC": "british-columbia",
     "SK": "saskatchewan",
     "MB": "manitoba",
 }
 
+# HiBid's "Cars & Vehicles" category id.
 CARS_VEHICLES_CATEGORY = "700006"
 
 
 def province_vehicles_url(province: str) -> str:
+    """URL for the catalogs/events view (auctions hosting vehicle lots)."""
     path = PROVINCE_PATH[province]
-    return f"https://hibid.com/{path}/auctions/{CARS_VEHICLES_CATEGORY}/cars-and-vehicles?status=OPEN"
+    return (
+        f"https://hibid.com/{path}/auctions/{CARS_VEHICLES_CATEGORY}"
+        f"/cars-and-vehicles?status=open"
+    )
+
+
+def province_lots_url(province: str) -> str:
+    """URL for the per-lot view (individual lots flattened across auctions)."""
+    path = PROVINCE_PATH[province]
+    return (
+        f"https://hibid.com/{path}/lots/{CARS_VEHICLES_CATEGORY}"
+        f"/cars-and-vehicles?status=open"
+    )
 
 
 def lot_url(lot_id: str, slug: str = "") -> str:
@@ -1887,91 +1981,371 @@ git commit -m "hibid: URL builders and constants"
 
 ---
 
+### Task 11.5: RetryTransport (httpx) for transient errors
+
+**Why this task is here:** Phase 0 carved a `transport=` seam in `make_client()` and the docstring promised Phase 1 would add a retry transport. Every real scraper Phase 7 will run hits transient 429/503; without retry, the workers crash-loop on the first hiccup.
+
+**Files:**
+- Create: `src/carbuyer/sources/retry.py`
+- Create: `tests/sources/test_retry.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/sources/test_retry.py
+import httpx
+import pytest
+
+from carbuyer.sources.http import make_client
+from carbuyer.sources.retry import RetryTransport
+
+
+@pytest.mark.asyncio
+async def test_retry_transport_retries_503_then_succeeds() -> None:
+    call_count = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(200, text="ok")
+
+    inner = httpx.MockTransport(handler)
+    transport = RetryTransport(inner, max_retries=4, base=0.01, cap=0.05)
+    async with make_client(transport=transport) as client:
+        r = await client.get("https://example.test/")
+    assert r.status_code == 200
+    assert call_count["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_transport_gives_up_after_max() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, headers={"Retry-After": "0"})
+
+    transport = RetryTransport(httpx.MockTransport(handler), max_retries=2, base=0.01, cap=0.05)
+    async with make_client(transport=transport) as client:
+        r = await client.get("https://example.test/")
+    assert r.status_code == 503  # exhausted retries; final response returned
+
+
+@pytest.mark.asyncio
+async def test_retry_transport_does_not_retry_404() -> None:
+    call_count = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(404)
+
+    transport = RetryTransport(httpx.MockTransport(handler), max_retries=4, base=0.01, cap=0.05)
+    async with make_client(transport=transport) as client:
+        r = await client.get("https://example.test/")
+    assert r.status_code == 404
+    assert call_count["n"] == 1  # 404 is terminal
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/sources/retry.py`**
+
+```python
+from __future__ import annotations
+
+import asyncio
+import random
+from email.utils import parsedate_to_datetime
+from datetime import UTC, datetime
+
+import httpx
+
+
+RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+
+
+def _parse_retry_after(value: str) -> float | None:
+    # RFC 7231: Retry-After is either delta-seconds (int) or HTTP-date.
+    s = value.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return float(s)
+    try:
+        when = parsedate_to_datetime(s)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
+class RetryTransport(httpx.AsyncBaseTransport):
+    """Wrap an inner transport; retry transient errors with backoff.
+
+    Honors Retry-After when present; otherwise uses jittered exponential
+    backoff capped at `cap` seconds. Status codes outside RETRYABLE_STATUS
+    are returned to the caller without retry.
+    """
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        *,
+        max_retries: int = 4,
+        base: float = 1.0,
+        cap: float = 30.0,
+    ) -> None:
+        self._inner = inner
+        self._max_retries = max_retries
+        self._base = base
+        self._cap = cap
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        last: httpx.Response | None = None
+        for attempt in range(self._max_retries + 1):
+            response = await self._inner.handle_async_request(request)
+            if response.status_code not in RETRYABLE_STATUS:
+                return response
+            last = response
+            if attempt == self._max_retries:
+                return response
+            # Drain and close the body before retrying so the connection can
+            # be reused.
+            await response.aread()
+            await response.aclose()
+            ra = response.headers.get("Retry-After")
+            delay = _parse_retry_after(ra) if ra else None
+            if delay is None:
+                delay = min(self._cap, self._base * (2 ** attempt))
+            delay = delay + random.uniform(0, max(delay * 0.25, 0.05))  # jitter
+            await asyncio.sleep(delay)
+        # Unreachable, but keep mypy/pyright happy.
+        assert last is not None
+        return last
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+```
+
+- [ ] **Step 3: Run test**
+
+```bash
+uv run pytest tests/sources/test_retry.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/sources/retry.py tests/sources/test_retry.py
+git commit -m "sources: RetryTransport — Retry-After + jittered exponential backoff"
+```
+
+---
+
 ### Task 12: HiBid `lotModels` JSON extractor
 
 **Files:**
 - Create: `src/carbuyer/sources/hibid/parser.py`
 - Create: `tests/sources/hibid/test_parser.py`
-- Create: `tests/sources/fixtures/hibid_catalog_sample.html`
+- Create: `tests/sources/fixtures/hibid_catalog_synthetic.html`
 
-- [ ] **Step 1: Capture a fixture (manual; run once to seed tests)**
+- [ ] **Step 1: Hand-write a synthetic fixture**
 
-This is the only manual step in the plan. Save a real catalog page HTML to the fixture path:
+The original plan called for capturing a real HiBid page. The Cloudflare bot
+management investigation (see Phase 1 overlay) means a self-hosted curl/httpx
+cannot fetch the page; the live capture is deferred to Phase 1.5. Instead, we
+hand-write a synthetic fixture that exercises the parser's contract:
+nested arrays, the `}],{` quirk, two lots with known ids/bids/end-times, and
+the real HiBid schema (`eventItemId`, `lead`, `lotStatus.*`).
 
-```bash
-curl -s "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=OPEN" \
-  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
-  > tests/sources/fixtures/hibid_catalog_sample.html
-```
+Create `tests/sources/fixtures/hibid_catalog_synthetic.html` (see test below
+for the exact expected fields).
 
-Then verify it contains `lotModels`:
-
-```bash
-grep -c "lotModels" tests/sources/fixtures/hibid_catalog_sample.html
-```
-
-Expected: at least 1.
-
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing test (and the synthetic fixture inline)**
 
 ```python
 # tests/sources/hibid/test_parser.py
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
-from carbuyer.sources.hibid.parser import extract_lot_models, parse_lot_summary
+import pytest
+
+from carbuyer.sources.hibid.parser import (
+    extract_lot_models,
+    parse_lot_summary,
+    raw_lot_id,
+)
+
+FIXTURE_PATH = Path("tests/sources/fixtures/hibid_catalog_synthetic.html")
 
 
-FIXTURE = Path("tests/sources/fixtures/hibid_catalog_sample.html").read_text()
+def test_extract_lot_models_handles_nested_arrays() -> None:
+    html = """
+    <html><body><script>
+    var lotModels = [
+      {"eventItemId": 1, "lead": "Truck A", "images": ["a.jpg", "b.jpg"]},
+      {"eventItemId": 2, "lead": "Truck B", "images": []}
+    ];
+    </script></body></html>
+    """
+    lots = extract_lot_models(html)
+    assert len(lots) == 2
+    assert lots[0]["eventItemId"] == 1
+    assert lots[0]["images"] == ["a.jpg", "b.jpg"]
 
 
-def test_extract_lot_models_returns_list() -> None:
-    lots = extract_lot_models(FIXTURE)
-    assert isinstance(lots, list)
-    assert len(lots) > 0
-    first = lots[0]
-    assert "id" in first or "lotId" in first or "lotID" in first
+def test_extract_lot_models_no_match() -> None:
+    assert extract_lot_models("<html>no script here</html>") == []
 
 
-def test_parse_lot_summary_normalizes_keys() -> None:
-    lots = extract_lot_models(FIXTURE)
-    summary = parse_lot_summary(lots[0])
-    assert summary.source_lot_id
-    assert summary.title is not None
+def test_extract_lot_models_handles_string_with_brackets() -> None:
+    # Strings containing brackets must NOT confuse the bracket scanner.
+    html = 'var lotModels = [{"lead": "Hood [scratched]", "eventItemId": 7}];'
+    lots = extract_lot_models(html)
+    assert lots == [{"lead": "Hood [scratched]", "eventItemId": 7}]
+
+
+def test_parse_lot_summary_real_keys() -> None:
+    raw = {
+        "eventItemId": 4242,
+        "lotNumber": "12B",
+        "lead": "1995 Ford F-150 4x4",
+        "description": "runs and drives",
+        "lotUrl": "/alberta/lot/300724160/1995-ford-f150",
+        "lotStatus": {
+            "highBid": "1500.00",
+            "bidCount": 7,
+        },
+        "auctionEnd": "2026-06-01T18:30:00Z",
+        "auctionId": 740236,
+        "bidIncrement": 25,
+        "reserveStatus": "no_reserve",
+        "lotState": "open",
+    }
+    summary = parse_lot_summary(raw)
+    assert summary.source_lot_id == "4242"
+    assert summary.lot_number == "12B"
+    assert summary.title == "1995 Ford F-150 4x4"
+    assert summary.description == "runs and drives"
+    assert summary.current_high_bid_cad == Decimal("1500.00")
+    assert summary.bid_count_visible == 7
+    assert summary.url == "/alberta/lot/300724160/1995-ford-f150"
+    assert summary.auction_external_id == "740236"
+    assert summary.end_at == datetime(2026, 6, 1, 18, 30, 0, tzinfo=UTC)
+    # Year/make/model are NOT separate fields in HiBid; left None for enricher.
+    assert summary.year is None
+    assert summary.make is None
+    # Extra fields captured for downstream consumers.
+    assert summary.extra["bidIncrement"] == 25
+    assert summary.extra["reserveStatus"] == "no_reserve"
+    assert summary.extra["lotState"] == "open"
+
+
+def test_parse_lot_summary_handles_messy_currency() -> None:
+    raw = {"eventItemId": 1, "lead": "x", "lotStatus": {"highBid": "$1,200.00"}}
+    summary = parse_lot_summary(raw)
+    assert summary.current_high_bid_cad == Decimal("1200.00")
+
+
+def test_parse_lot_summary_handles_missing_lot_status() -> None:
+    raw = {"eventItemId": 1, "lead": "x"}
+    summary = parse_lot_summary(raw)
+    assert summary.current_high_bid_cad is None
+    assert summary.bid_count_visible is None
+
+
+def test_raw_lot_id_falls_through_key_variants() -> None:
+    assert raw_lot_id({"eventItemId": 5}) == "5"
+    assert raw_lot_id({"lotId": 6}) == "6"
+    assert raw_lot_id({"id": 7}) == "7"
+    assert raw_lot_id({}) is None
+
+
+def test_extract_lot_models_against_synthetic_fixture() -> None:
+    if not FIXTURE_PATH.exists():
+        pytest.skip(f"synthetic fixture missing: {FIXTURE_PATH}")
+    html = FIXTURE_PATH.read_text()
+    lots = extract_lot_models(html)
+    assert len(lots) >= 2
+    s = parse_lot_summary(lots[0])
+    assert s.source_lot_id
+    assert s.title is not None
 ```
 
 - [ ] **Step 3: Implement `src/carbuyer/sources/hibid/parser.py`**
 
 ```python
-import json
+from __future__ import annotations
+
 import re
-from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
+import json
 
 
-_LOT_MODELS_RE = re.compile(
-    r"var\s+lotModels\s*=\s*(\[.*?\])\s*;", re.DOTALL
-)
+_LOT_MODELS_START = re.compile(r"var\s+lotModels\s*=\s*\[")
 
 
 def extract_lot_models(html: str) -> list[dict[str, Any]]:
     """Extract the embedded `var lotModels = [...];` array from a HiBid page.
 
-    Uses a tolerant cleanup pass: HiBid sometimes emits malformed comma sequences
-    (`}],{` instead of `},{`) when serializing nested objects; we patch those
-    before json.loads.
+    Uses a string-aware balanced-bracket scan rather than a non-greedy regex,
+    because lot objects embed nested arrays (images, categories) which a
+    simple `\\[.*?\\]` regex would truncate at the first inner `]`.
     """
-    m = _LOT_MODELS_RE.search(html)
+    m = _LOT_MODELS_START.search(html)
     if not m:
         return []
-    blob = m.group(1)
-    blob = blob.replace("}],{", "},{")  # tolerated HiBid quirk
-    try:
-        result = json.loads(blob)
-    except json.JSONDecodeError:
-        return []
-    return result if isinstance(result, list) else []
+    start = m.end() - 1  # index of the opening `[`
+    depth = 0
+    in_str = False
+    escape = False
+    quote = ""
+    for i in range(start, len(html)):
+        c = html[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == quote:
+                in_str = False
+            continue
+        if c in ('"', "'"):
+            in_str = True
+            quote = c
+            continue
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                blob = html[start : i + 1]
+                try:
+                    parsed = json.loads(blob)
+                except json.JSONDecodeError:
+                    return []
+                return parsed if isinstance(parsed, list) else []
+    return []
+
+
+# Keys we copy from raw lotModels entries into RawLot.extra so the valuator and
+# soft-close detector can use them without re-scraping.
+_EXTRA_KEYS = (
+    "bidIncrement",
+    "reserveStatus",
+    "buyNowPrice",
+    "lotState",
+    "saleType",
+    "shippingOffered",
+    "auctionCity",
+    "auctionState",
+    "companyName",
+)
 
 
 @dataclass(slots=True)
@@ -1980,66 +2354,133 @@ class HibidLotSummary:
     lot_number: str | None
     title: str | None
     description: str | None
+    # year/make/model are NOT separate fields in HiBid lotModels; the description
+    # enricher (Phase 3) parses them out of the title text.
     year: int | None
     make: str | None
     model: str | None
     current_high_bid_cad: Decimal | None
+    bid_count_visible: int | None
     photos: list[str]
     end_at: datetime | None
     auction_external_id: str | None
     url: str | None
+    extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
 
 
 def _get(obj: dict[str, Any], *keys: str) -> Any:
     for k in keys:
-        if k in obj:
+        if k in obj and obj[k] is not None:
             return obj[k]
     return None
 
 
-def parse_lot_summary(raw: dict[str, Any]) -> HibidLotSummary:
-    lot_id = str(_get(raw, "lotId", "lotID", "id") or "")
-    bid = _get(raw, "highBid", "currentBid", "bidAmount")
-    end = _get(raw, "saleEnd", "endTime", "scheduledEnd")
+def raw_lot_id(raw: dict[str, Any]) -> str | None:
+    """Return the lot id from a raw lotModels entry, falling through key variants."""
+    value = _get(raw, "eventItemId", "lotId", "lotID", "id")
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _to_decimal(v: Any) -> Decimal | None:
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return v
+    if isinstance(v, (int, float)):
+        return Decimal(str(v))
+    if isinstance(v, str):
+        cleaned = re.sub(r"[^\d.\-]", "", v)
+        if not cleaned or cleaned in {"-", "."}:
+            return None
+        try:
+            return Decimal(cleaned)
+        except InvalidOperation:
+            return None
+    return None
+
+
+def _to_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse the various date shapes HiBid emits, always returning UTC-aware."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        # Heuristic: > 1e11 implies milliseconds since epoch.
+        seconds = value / 1000 if value > 1e11 else value
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    if isinstance(value, str):
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d %H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+            return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+    return None
+
+
+def _extract_photos(raw: dict[str, Any]) -> list[str]:
     photos_raw = _get(raw, "lotImages", "images") or []
-    photos = []
-    for p in photos_raw if isinstance(photos_raw, list) else []:
+    if not isinstance(photos_raw, list):
+        return []
+    photos: list[str] = []
+    for p in photos_raw:  # type: ignore[reportUnknownVariableType]
         if isinstance(p, str):
             photos.append(p)
         elif isinstance(p, dict):
             url = p.get("url") or p.get("imageUrl") or p.get("largeUrl")
             if isinstance(url, str):
                 photos.append(url)
+    return photos
+
+
+def parse_lot_summary(raw: dict[str, Any]) -> HibidLotSummary:
+    lot_status = raw.get("lotStatus") if isinstance(raw.get("lotStatus"), dict) else {}
+    bid = _get(lot_status, "highBid", "currentBid") if lot_status else None
+    if bid is None:
+        bid = _get(raw, "highBid", "currentBid", "bidAmount")
+    bid_count = _get(lot_status, "bidCount") if lot_status else None
+    end = _get(raw, "auctionEnd", "saleEnd", "endTime", "scheduledEnd")
+    extra = {k: raw[k] for k in _EXTRA_KEYS if k in raw and raw[k] is not None}
     return HibidLotSummary(
-        source_lot_id=lot_id,
+        source_lot_id=raw_lot_id(raw) or "",
         lot_number=str(_get(raw, "lotNumber", "lotNum") or "") or None,
-        title=_get(raw, "title", "lotTitle"),
+        title=_get(raw, "lead", "title", "lotTitle"),
         description=_get(raw, "description", "longDescription"),
-        year=_get(raw, "year"),
-        make=_get(raw, "make"),
-        model=_get(raw, "model"),
-        current_high_bid_cad=Decimal(str(bid)) if bid is not None else None,
-        photos=photos,
+        year=None,
+        make=None,
+        model=None,
+        current_high_bid_cad=_to_decimal(bid),
+        bid_count_visible=_to_int(bid_count),
+        photos=_extract_photos(raw),
         end_at=_parse_dt(end),
         auction_external_id=str(_get(raw, "auctionId", "auctionID") or "") or None,
-        url=_get(raw, "url", "lotUrl"),
+        url=_get(raw, "lotUrl", "url"),
+        extra=extra,
     )
-
-
-def _parse_dt(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value / 1000 if value > 1e11 else value)
-    if isinstance(value, str):
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                pass
-    return None
 ```
 
 - [ ] **Step 4: Run test**
@@ -2065,85 +2506,192 @@ git commit -m "hibid: lotModels JSON extractor"
 - Create: `src/carbuyer/sources/hibid/source.py`
 - Create: `tests/sources/hibid/test_source.py`
 
+**Notes from Phase 1 deliberation:**
+- `HibidSource` declares `version: ClassVar[str]` (Phase 0 contract).
+- Calls `register(...)` at module import.
+- Async context manager owning a single httpx client wired with `RetryTransport`.
+- Per-call `make_client()` was removed — the source owns the client lifecycle.
+- Live integration is deferred to Phase 1.5 (Cloudflare bypass). Tests use a
+  MockTransport against the synthetic fixture.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/sources/hibid/test_source.py
 from pathlib import Path
 
+import httpx
 import pytest
-import respx
-from httpx import Response
 
+from carbuyer.sources.base import SOURCES, AuctionRef, LotRef
 from carbuyer.sources.hibid.source import HibidSource
 
 
-FIXTURE = Path("tests/sources/fixtures/hibid_catalog_sample.html").read_text()
+FIXTURE = Path("tests/sources/fixtures/hibid_catalog_synthetic.html").read_text()
+
+
+def _mock_transport(*, body: str = FIXTURE, status: int = 200) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body)
+    return httpx.MockTransport(handler)
+
+
+def test_hibid_source_registered_at_import() -> None:
+    assert "hibid" in SOURCES
+    src = SOURCES["hibid"]
+    assert src.name == "hibid"
+    assert src.version  # any non-empty string
+
+
+def test_hibid_source_has_classvar_name_and_version() -> None:
+    assert HibidSource.name == "hibid"
+    assert HibidSource.version  # ClassVar
 
 
 @pytest.mark.asyncio
 async def test_discover_auctions_yields_unique_refs() -> None:
-    src = HibidSource(provinces=["AB"])
-    with respx.mock(base_url="https://hibid.com") as mock:
-        mock.get(url__regex=r"/alberta/auctions/700006/.*").mock(
-            return_value=Response(200, text=FIXTURE)
-        )
-        refs = []
-        async for ref in src.discover_auctions():
-            refs.append(ref)
-            if len(refs) >= 5:
-                break
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        refs = [ref async for ref in src.discover_auctions()]
     assert len(refs) > 0
     assert all(r.source == "hibid" for r in refs)
     assert len({r.source_auction_id for r in refs}) == len(refs)
+
+
+@pytest.mark.asyncio
+async def test_fetch_lots_yields_lot_refs() -> None:
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        ref = AuctionRef(source="hibid", source_auction_id="740236", url="https://hibid.com/catalog/740236")
+        lots = [r async for r in src.fetch_lots(ref)]
+    assert len(lots) >= 2
+    assert all(r.source_auction_id == "740236" for r in lots)
+
+
+@pytest.mark.asyncio
+async def test_fetch_lot_returns_raw_lot_with_extra() -> None:
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        ref = LotRef(
+            source="hibid", source_auction_id="740236",
+            source_lot_id="4242", url="https://hibid.com/lot/4242",
+        )
+        raw = await src.fetch_lot(ref)
+    assert raw.title is not None and "Ford" in raw.title
+    assert raw.extra.get("bidIncrement") == 25
+    assert raw.extra.get("reserveStatus") == "no_reserve"
+
+
+@pytest.mark.asyncio
+async def test_poll_bid_returns_observation() -> None:
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        ref = LotRef(
+            source="hibid", source_auction_id="740236",
+            source_lot_id="4242", url="https://hibid.com/lot/4242",
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.current_high_bid_cad is not None
+    assert obs.observed_at.tzinfo is not None
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/sources/hibid/source.py`**
 
 ```python
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import TracebackType
+from typing import ClassVar, Self
+
+import httpx
 
 from carbuyer.sources.base import (
-    AuctionRef, AuctionSource, BidObservation, LotRef, RawAuction, RawLot,
+    AuctionRef,
+    AuctionSource,
+    BidObservation,
+    LotRef,
+    RawAuction,
+    RawLot,
+    register,
 )
-from carbuyer.sources.hibid.parser import extract_lot_models, parse_lot_summary
+from carbuyer.sources.hibid.parser import (
+    extract_lot_models,
+    parse_lot_summary,
+    raw_lot_id,
+)
 from carbuyer.sources.hibid.urls import catalog_url, lot_url, province_vehicles_url
 from carbuyer.sources.http import jittered_sleep, make_client
+from carbuyer.sources.retry import RetryTransport
 
 
 class HibidSource(AuctionSource):
-    name = "hibid"
+    name: ClassVar[str] = "hibid"
+    # Bump when parse_lot_summary or discover/fetch contracts change.
+    version: ClassVar[str] = "1"
 
-    def __init__(self, provinces: list[str]) -> None:
+    def __init__(
+        self,
+        provinces: list[str],
+        *,
+        _transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.provinces = provinces
+        # Tests inject a MockTransport; production wires a RetryTransport
+        # around an httpx.AsyncHTTPTransport in __aenter__.
+        self._injected_transport = _transport
+        self._client_cm: AbstractAsyncContextManager[httpx.AsyncClient] | None = None
+        self._client: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> Self:
+        transport = self._injected_transport or RetryTransport(
+            httpx.AsyncHTTPTransport()
+        )
+        self._client_cm = make_client(transport=transport)
+        self._client = await self._client_cm.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if self._client_cm is not None:
+            await self._client_cm.__aexit__(exc_type, exc, tb)
+        self._client_cm = None
+        self._client = None
+
+    @property
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None:
+            raise RuntimeError(
+                "HibidSource used outside `async with` — wrap in context manager",
+            )
+        return self._client
 
     async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
         seen: set[str] = set()
-        async with make_client() as client:
-            for province in self.provinces:
-                url = province_vehicles_url(province)
-                resp = await client.get(url)
-                resp.raise_for_status()
-                lots = extract_lot_models(resp.text)
-                for raw in lots:
-                    summary = parse_lot_summary(raw)
-                    auction_id = summary.auction_external_id
-                    if not auction_id or auction_id in seen:
-                        continue
-                    seen.add(auction_id)
-                    yield AuctionRef(
-                        source="hibid",
-                        source_auction_id=auction_id,
-                        url=catalog_url(auction_id),
-                    )
+        for i, province in enumerate(self.provinces):
+            url = province_vehicles_url(province)
+            resp = await self._http.get(url)
+            resp.raise_for_status()
+            for raw in extract_lot_models(resp.text):
+                summary = parse_lot_summary(raw)
+                auction_id = summary.auction_external_id
+                if not auction_id or auction_id in seen:
+                    continue
+                seen.add(auction_id)
+                yield AuctionRef(
+                    source="hibid",
+                    source_auction_id=auction_id,
+                    url=catalog_url(auction_id),
+                )
+            if i < len(self.provinces) - 1:
                 await jittered_sleep()
 
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
         # The catalog page contains both auction-level metadata (in the page
         # header) and lotModels. For MVP, we record minimum metadata; richer
         # extraction (BP, terms_text) is left to a follow-up.
@@ -2159,37 +2707,30 @@ class HibidSource(AuctionSource):
             pickup_city=None,
             pickup_province=None,
             pickup_window_text=None,
-            buyer_premium_pct=Decimal("0.10"),  # conservative default; refined per-source later
+            buyer_premium_pct=Decimal("0.10"),  # conservative default
             online_bidding_fee_pct=None,
             terms_text=None,
             auction_subtype="estate",
         )
 
     async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-            for raw in extract_lot_models(resp.text):
-                summary = parse_lot_summary(raw)
-                if not summary.source_lot_id:
-                    continue
-                yield LotRef(
-                    source="hibid",
-                    source_auction_id=ref.source_auction_id,
-                    source_lot_id=summary.source_lot_id,
-                    url=summary.url or lot_url(summary.source_lot_id),
-                )
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
+        for raw in extract_lot_models(resp.text):
+            summary = parse_lot_summary(raw)
+            if not summary.source_lot_id:
+                continue
+            yield LotRef(
+                source="hibid",
+                source_auction_id=ref.source_auction_id,
+                source_lot_id=summary.source_lot_id,
+                url=summary.url or lot_url(summary.source_lot_id),
+            )
 
     async def fetch_lot(self, ref: LotRef) -> RawLot:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-        lots = extract_lot_models(resp.text)
-        target = next(
-            (parse_lot_summary(r) for r in lots
-             if str(r.get("lotId") or r.get("lotID") or r.get("id") or "") == ref.source_lot_id),
-            None,
-        )
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
+        target = self._find_summary(resp.text, ref.source_lot_id)
         if target is None:
             raise ValueError(f"lot {ref.source_lot_id} not found at {ref.url}")
         return RawLot(
@@ -2202,24 +2743,22 @@ class HibidSource(AuctionSource):
             make=target.make,
             model=target.model,
             current_high_bid_cad=target.current_high_bid_cad,
+            bid_count_visible=target.bid_count_visible,
             scheduled_end_at=target.end_at,
             lot_status="open",
+            extra=target.extra,
         )
 
     async def poll_bid(self, ref: LotRef) -> BidObservation:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-        lots = extract_lot_models(resp.text)
-        target = next(
-            (parse_lot_summary(r) for r in lots
-             if str(r.get("lotId") or r.get("lotID") or r.get("id") or "") == ref.source_lot_id),
-            None,
-        )
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
+        target = self._find_summary(resp.text, ref.source_lot_id)
         if target is None:
             return BidObservation(
-                ref=ref, observed_at=datetime.now(UTC),
-                current_high_bid_cad=None, end_time_at_observation=None,
+                ref=ref,
+                observed_at=datetime.now(UTC),
+                current_high_bid_cad=None,
+                end_time_at_observation=None,
                 status_at_observation="missing",
             )
         return BidObservation(
@@ -2229,6 +2768,20 @@ class HibidSource(AuctionSource):
             end_time_at_observation=target.end_at,
             status_at_observation="open",
         )
+
+    @staticmethod
+    def _find_summary(html: str, source_lot_id: str):
+        for raw in extract_lot_models(html):
+            if raw_lot_id(raw) == source_lot_id:
+                return parse_lot_summary(raw)
+        return None
+
+
+# Register at import time so the lot-scraper / discoverer worker / dashboard
+# health view can enumerate covered platforms via SOURCES (Phase 0 design #11).
+# Provinces default to AB/BC/SK/MB; phase-2 workers can re-instantiate with a
+# different list and call register() again with the same name to override.
+register(HibidSource(provinces=["AB", "BC", "SK", "MB"]))
 ```
 
 - [ ] **Step 3: Run test**
@@ -2248,12 +2801,23 @@ git commit -m "hibid: AuctionSource implementation (discover + fetch + poll)"
 
 ---
 
-### Task 14: HiBidSource integration smoke test (live network, opt-in)
+### Task 14: HiBidSource integration smoke test (DEFERRED — Phase 1.5 spike)
 
-**Files:**
-- Create: `tests/sources/hibid/test_source_live.py`
+**Status:** Deferred. The original plan called for a live opt-in smoke test that runs `HibidSource(provinces=["AB"]).discover_auctions()` against real HiBid. The Phase 1 deliberation discovered that **Cloudflare bot management on hibid.com 403s plain Python httpx** regardless of headers (any combination of UA, sec-fetch-*, accept-language, etc.). The structural plumbing (URL builders, parser, AuctionSource integration, RetryTransport) is complete and tested against a synthetic fixture; the missing piece is the CF bypass.
 
-- [ ] **Step 1: Write the test (skipped by default)**
+**Phase 1.5 scope (separate spike):**
+
+1. **Evaluate `curl_cffi`** as a drop-in replacement for `httpx.AsyncClient`. It uses libcurl-impersonate to match Chrome/Firefox TLS fingerprints and is the lowest-friction option for sites with Cloudflare Bot Fight Mode. No JS execution needed (HiBid is server-rendered).
+2. **If `curl_cffi` is 403'd**, fall back to **Playwright** (headed or headless-with-stealth). Slower; higher infra footprint.
+3. **Acceptance criteria:**
+   - Fetch one Alberta catalog page (`https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=open`), confirm response contains `lotModels`.
+   - Run `HibidSource.discover_auctions()` and confirm at least one `AuctionRef` is yielded.
+   - Run `HibidSource.fetch_lot()` against one yielded lot and confirm `RawLot` is populated.
+4. **Wiring:** the chosen backend becomes the default `_transport` in production; tests still use `httpx.MockTransport` against fixtures.
+
+**Phase 1.5 unblocks:** the auction-discoverer worker (Phase 2) running against live HiBid. Phase 2 plumbing can be built and tested without it (mocked transport against synthetic fixtures), so the project is not blocked.
+
+**Skipped test placeholder (committed for documentation only):**
 
 ```python
 # tests/sources/hibid/test_source_live.py
@@ -2267,36 +2831,36 @@ from carbuyer.sources.hibid.source import HibidSource
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     os.getenv("RUN_LIVE_SCRAPE_TESTS") != "1",
-    reason="live scrape — opt in with RUN_LIVE_SCRAPE_TESTS=1",
+    reason=(
+        "live scrape — opt in with RUN_LIVE_SCRAPE_TESTS=1; "
+        "currently 403'd by Cloudflare. Phase 1.5 spike adds a CF-bypass transport."
+    ),
 )
 async def test_live_discover_at_least_one_alberta_auction() -> None:
-    src = HibidSource(provinces=["AB"])
-    refs = []
-    async for ref in src.discover_auctions():
-        refs.append(ref)
-        if len(refs) >= 1:
-            break
+    """When run with RUN_LIVE_SCRAPE_TESTS=1, discovers ≥1 Alberta auction.
+
+    As of 2026-05-09 this fails with HTTP 403 from Cloudflare bot management.
+    See Phase 1 overlay for the deferred bypass spike.
+    """
+    async with HibidSource(provinces=["AB"]) as src:
+        refs = []
+        async for ref in src.discover_auctions():
+            refs.append(ref)
+            if len(refs) >= 1:
+                break
     assert len(refs) >= 1
 ```
 
-- [ ] **Step 2: Run opt-in (manual; one-time check that real scrape works)**
-
-```bash
-RUN_LIVE_SCRAPE_TESTS=1 uv run pytest tests/sources/hibid/test_source_live.py -v
-```
-
-Expected: PASS (one Alberta auction found).
-
-- [ ] **Step 3: Commit (regardless of live test outcome — the skip path is what's checked-in)**
+- [ ] **Step 1: Commit the placeholder test**
 
 ```bash
 git add tests/sources/hibid/test_source_live.py
-git commit -m "hibid: opt-in live scrape smoke test"
+git commit -m "hibid: placeholder live test (deferred to phase 1.5 — CF bypass)"
 ```
 
 ---
 
-End of Phase 1. HiBid source plugin is fully implemented and tested against a captured fixture and against the live network.
+End of Phase 1. HiBid source plugin plumbing is implemented and tested against a synthetic fixture; live integration deferred to Phase 1.5 once a Cloudflare-bypass strategy is chosen.
 
 ---
 
