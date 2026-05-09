@@ -5,7 +5,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, ClassVar, Literal
+from types import TracebackType
+from typing import Any, ClassVar, Literal, Self
 
 SourceType = Literal["listing", "auction"]
 
@@ -114,6 +115,20 @@ class Source(ABC):
         """
         del url  # default impl ignores
         return None
+
+    async def __aenter__(self) -> Self:
+        """Default no-op; HibidSource and other plugins with HTTP-client
+        lifecycle override this to acquire resources."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Default no-op; subclasses override to release resources."""
+        del exc_type, exc, tb
 
 
 class AuctionDiscoverer(Source):
