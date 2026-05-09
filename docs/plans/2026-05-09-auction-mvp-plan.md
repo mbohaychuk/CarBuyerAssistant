@@ -37,6 +37,49 @@
 
 ## Phase 0 — Foundation
 
+### Phase 0 — Design-decision overlay (post-deliberation 2026-05-09)
+
+Multi-discipline review (senior Python dev, DevOps/SRE, systems architect) raised the following concrete changes against the original Phase 0 plan. **The task code blocks below have been updated to reflect these decisions; this overlay documents the *why*.**
+
+**Must-fix (locked in to avoid Phase 7+ pain):**
+
+1. **Lazy DB engine, not module-level.** `engine = make_engine()` at import time creates a connection pool against the prod URL the moment any module imports `db.session` — even from a test that wants `carbuyer_test`. Replaced with `get_engine()` / `get_session_maker()` + `set_engine_for_testing()` so the conftest can install a test pool that all `get_session()` callers see. (Task 5, Task 8.)
+2. **Source ABC abstract async-generators must be `def`, not `async def`.** Pyright-strict treats `async def f() -> AsyncIterator[T]: ...` (with `...` body) as a coroutine returning the type, not a generator yielding it; concrete implementations would have to lie about their type. Abstract definitions use `def f(self) -> AsyncIterator[T]: ...`; concrete implementations are `async def + yield`, which is the idiomatic async-generator form. (Task 9.)
+3. **Strict-mode type annotations everywhere.** All function signatures get explicit parameter and return types. Bare `AsyncIterator` (no parameter) is invalid under strict — fixtures use `AsyncIterator[AsyncEngine]` etc. (Tasks 5, 8, 10.)
+4. **Per-worker pool ≤ Postgres `max_connections`.** `pool_size=5, max_overflow=5` × 11 workers = 110 connections, exceeding Postgres default `max_connections=100`. Pool defaults shrink to `pool_size=2, max_overflow=3` (≤55 baseline ceiling) and the docker-compose Postgres command bumps `max_connections=200`. (Task 2, Task 5.)
+5. **Postgres bound to `127.0.0.1`.** `0.0.0.0:5432` is open to the LAN. (Task 2.)
+6. **AsyncIterator abstract methods syntactically correct.** See item 2 above. (Task 9.)
+
+**Should-fix:**
+
+7. **Source ABC split.** `AuctionSource` lumps discovery + fetch + bid polling. The bid-poller and the farmauctionguide router need different subsets. Split into `AuctionDiscoverer / AuctionFetcher / BidPoller` mixins; `AuctionSource = AuctionDiscoverer + AuctionFetcher + BidPoller` for HiBid/McDougall. The Phase-10 router will only implement `AuctionDiscoverer`. (Task 9.)
+8. **`parser_version` on every plugin and on `auction_lots`.** When a parser changes, downstream rows have no way to know. Add `version: ClassVar[str]` to `Source`; add `parser_version: str | None` column to `auction_lots`. Cheap now, retroactive backfill later. (Task 6, Task 9.)
+9. **`StrEnum` for status fields, plain `String(16)` on the DB.** Magic-string comparisons are typo footguns; native PG enums are migration-painful. `StrEnum` gets type-safety on the Python side, no migration friction. Statuses: `EnrichmentStatus`, `ValuationStatus`, `VisionStatus`, `NotificationStatus`, `LotStatus`, `AuctionStatus`, `UserAction`. (Task 6.)
+10. **`extra: dict[str, Any]` escape hatch on `RawLot` and `RawAuction`.** Source-specific fields (Carfax URLs, reserve-met semantics, platform metadata) flow through enrichment without bloating the canonical schema. (Task 9.)
+11. **`SOURCES` registry.** Two-line registry + `register()` so the dashboard "needs-plugin" view (Phase 10) and the router (Phase 10) can enumerate covered platforms. (Task 9.)
+12. **Server-side defaults on non-nullable JSONB columns.** Python-side `default=list` doesn't apply to raw SQL inserts or migrations; `server_default=text("'[]'::jsonb")` does. (Task 6.)
+13. **Test DB created via `/docker-entrypoint-initdb.d/`.** Manual `docker exec ... CREATE DATABASE` is forgotten on every fresh volume. (Task 2, Task 8.)
+14. **Session-scoped engine + per-test savepoint rollback.** Per-test `drop_all/create_all` is ~150ms × N — tax that compounds. Schema built once; each test runs inside a transaction that rolls back. (Task 8.)
+15. **Drop `pytest-postgresql` dep.** Listed but unused; we're committed to docker-compose Postgres. (Task 1.)
+16. **Drop the no-op `get_sync_url()` Alembic helper.** psycopg3's `postgresql+psycopg://` URL works for both sync and async engines. (Task 7.)
+17. **Logger return type matches `make_filtering_bound_logger` output.** That returns `structlog.types.FilteringBoundLogger`, not `structlog.stdlib.BoundLogger`. Strict mode catches this. (Task 4.)
+18. **`configure_logging(level=None)` reads from `settings.log_level`.** Worker entrypoints call once with no args; per-unit `Environment=LOG_LEVEL=DEBUG` works. (Task 4.)
+19. **Postgres 17.** GA since Sept 2024; pin to `postgres:17`. (Task 2.)
+20. **`POSTGRES_PASSWORD` no fallback at runtime, only in `.env`.** Compose default of `local` makes it easy to ship the dev password. Compose still provides `${POSTGRES_PASSWORD:-local}` for the local dev case (paired with `.env` — gitignored), but the prod systemd unit will source from `infra/.env.prod` (Phase 12) with no fallback. (Task 2.)
+21. **Healthcheck `start_period: 30s`.** Initdb on slow disks can exceed the 5×10 retry window. (Task 2.)
+22. **HTTP client transport injection seam.** Phase 1 will add Retry-After + jittered exponential backoff. Wrapper accepts `transport` and merged headers now so the seam exists. UA pulled from `settings.http_user_agent` so the hardcoded "Chrome 126 / macOS 14.5" doesn't date the codebase. (Task 10.)
+23. **Column ownership documented in `models.py`.** Each column block in `AuctionLot` is labeled with the worker that writes it (`# Owned by: lot-scraper (initial), bid-poller (updates)`). Coding rule: workers `UPDATE` only their own columns; no whole-object `merge`. (Task 6.)
+
+**Deferred (acknowledged, not done in Phase 0):**
+
+- **`ListingSource` ABC** — phase 2 only. Task 9 title trimmed to `Source / AuctionSource (ListingSource deferred)`.
+- **Per-source rate-limiter / throttler** — first transient-error wave will tell us where this is needed. Phase 1 (HiBid) builds the first one.
+- **Native PG enum types** — see decision 9 above.
+
+End of overlay. Tasks below are the modified plan.
+
+---
+
 ### Task 1: Repo scaffolding (pyproject.toml + tooling configs)
 
 **Files:**
@@ -74,7 +117,6 @@ dependencies = [
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
-    "pytest-postgresql>=6.0",
     "ruff>=0.5",
     "pyright>=1.1.370",
     "respx>=0.21",
@@ -150,52 +192,76 @@ git commit -m "scaffold project: pyproject.toml, ruff, pyright"
 **Files:**
 - Create: `infra/docker-compose.yml`
 - Create: `infra/.env.example`
+- Create: `infra/initdb/01-create-test-db.sql`
 
 - [ ] **Step 1: Write `infra/docker-compose.yml`**
 
 ```yaml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     container_name: carbuyer-pg
     environment:
       POSTGRES_USER: carbuyer
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local}
       POSTGRES_DB: carbuyer
+    # 11 worker pools × (2 + 3 overflow) = ~55 connections worst case;
+    # bump max_connections to 200 to leave headroom for ops/dashboard/Alembic.
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "effective_cache_size=2GB"
     ports:
-      - "5432:5432"
+      # Bound to localhost only — never expose Postgres on LAN.
+      - "127.0.0.1:5432:5432"
     volumes:
       - carbuyer-pg-data:/var/lib/postgresql/data
+      # Runs on first volume init only; idempotent CREATE DATABASE for tests.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "carbuyer"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
 volumes:
   carbuyer-pg-data:
 ```
 
-- [ ] **Step 2: Write `infra/.env.example`**
+- [ ] **Step 2: Write `infra/initdb/01-create-test-db.sql`**
+
+```sql
+-- Runs once on first Postgres init (when carbuyer-pg-data volume is empty).
+-- Creates the test database used by pytest fixtures.
+CREATE DATABASE carbuyer_test OWNER carbuyer;
+```
+
+- [ ] **Step 3: Write `infra/.env.example`**
 
 ```
 POSTGRES_PASSWORD=local
 ```
 
-- [ ] **Step 3: Start Postgres and verify**
+- [ ] **Step 4: Start Postgres and verify**
 
 ```bash
 cd infra && docker compose up -d
 docker exec carbuyer-pg pg_isready -U carbuyer
+docker exec carbuyer-pg psql -U carbuyer -lqt | grep -E '^\s+carbuyer(_test)?\s'
 ```
 
-Expected: `accepting connections`.
+Expected: `accepting connections`; both `carbuyer` and `carbuyer_test` listed.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add infra/docker-compose.yml infra/.env.example
-git commit -m "infra: local Postgres via docker compose"
+git add infra/docker-compose.yml infra/.env.example infra/initdb/01-create-test-db.sql
+git commit -m "infra: local Postgres 17 via docker compose"
 ```
 
 ---
@@ -241,12 +307,23 @@ Expected: ImportError or ModuleNotFoundError on `carbuyer.shared.config`.
 - [ ] **Step 3: Write `src/carbuyer/shared/config.py`**
 
 ```python
-from typing import Literal
-from pydantic import Field
+from __future__ import annotations
+
+import json
+from typing import Any, Literal
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 Province = Literal["AB", "BC", "SK", "MB", "ON", "QC", "NS", "NB", "NL", "PE", "YT", "NT", "NU"]
+
+
+# Default UA. Update each quarter; can be overridden via HTTP_USER_AGENT env.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 class Settings(BaseSettings):
@@ -280,6 +357,21 @@ class Settings(BaseSettings):
     flip_margin_pct: float = 0.10
 
     log_level: str = "INFO"
+    http_user_agent: str = DEFAULT_USER_AGENT
+
+    @field_validator("discord_channels", mode="before")
+    @classmethod
+    def _parse_discord_channels(cls, value: Any) -> dict[str, int]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise ValueError("DISCORD_CHANNELS must be a JSON object of name→channel_id")
+            return {str(k): int(v) for k, v in parsed.items()}
+        if isinstance(value, dict):
+            return {str(k): int(v) for k, v in value.items()}
+        raise TypeError(f"discord_channels: unexpected type {type(value).__name__}")
 
 
 settings = Settings()
@@ -326,6 +418,13 @@ def test_get_logger_returns_bound_logger() -> None:
     log = get_logger("test")
     assert log is not None
     log.info("hello", key="value")  # should not raise
+
+
+def test_configure_logging_default_reads_settings() -> None:
+    # Calling with no level argument falls back to settings.log_level (default INFO).
+    configure_logging()
+    log = get_logger("test")
+    log.info("ok")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -339,18 +438,25 @@ Expected: ImportError on `carbuyer.shared.logging`.
 - [ ] **Step 3: Implement `src/carbuyer/shared/logging.py`**
 
 ```python
+from __future__ import annotations
+
 import logging
 import sys
 from typing import Any
 
 import structlog
+from structlog.types import FilteringBoundLogger
+
+from carbuyer.shared.config import settings
 
 
-def configure_logging(level: str = "INFO") -> None:
+# stdout JSON only — systemd captures via journald in prod; do not add FileHandler.
+def configure_logging(level: str | None = None) -> None:
+    effective = (level or settings.log_level).upper()
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
-        level=getattr(logging, level.upper()),
+        level=getattr(logging, effective),
     )
     structlog.configure(
         processors=[
@@ -362,13 +468,13 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper())
+            getattr(logging, effective)
         ),
         cache_logger_on_first_use=True,
     )
 
 
-def get_logger(name: str, **initial_values: Any) -> structlog.stdlib.BoundLogger:
+def get_logger(name: str, **initial_values: Any) -> FilteringBoundLogger:
     return structlog.get_logger(name).bind(**initial_values)
 ```
 
@@ -405,16 +511,29 @@ git commit -m "shared: structlog JSON logging"
 import pytest
 from sqlalchemy import text
 
-from carbuyer.db.session import async_session_maker, engine
+from carbuyer.db.session import get_session, make_engine
 
 
 @pytest.mark.asyncio
-async def test_session_can_select_one() -> None:
-    async with async_session_maker() as session:
-        result = await session.execute(text("SELECT 1 AS x"))
-        row = result.one()
-        assert row.x == 1
-    await engine.dispose()
+async def test_make_engine_can_select_one() -> None:
+    # Throwaway engine for direct connectivity check; conftest's session-scoped
+    # engine fixture (Task 8) replaces the singleton without conflict.
+    eng = make_engine()
+    try:
+        async with eng.connect() as conn:
+            result = await conn.execute(text("SELECT 1 AS x"))
+            assert result.scalar_one() == 1
+    finally:
+        await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_session_yields_async_session() -> None:
+    # Validates the singleton accessor path; does NOT dispose, since other
+    # tests (post-Task-8) share the same engine via the conftest fixture.
+    async with get_session() as session:
+        result = await session.execute(text("SELECT 2 AS x"))
+        assert result.scalar_one() == 2
 ```
 
 - [ ] **Step 2: Verify it fails**
@@ -428,6 +547,8 @@ Expected: ImportError.
 - [ ] **Step 3: Implement `src/carbuyer/db/base.py`**
 
 ```python
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any
 
@@ -436,7 +557,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
 
-NAMING_CONVENTION = {
+NAMING_CONVENTION: dict[str, str] = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
     "ck": "ck_%(table_name)s_%(constraint_name)s",
@@ -465,6 +586,8 @@ class TimestampMixin:
 - [ ] **Step 4: Implement `src/carbuyer/db/session.py`**
 
 ```python
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -478,7 +601,17 @@ from sqlalchemy.ext.asyncio import (
 from carbuyer.shared.config import settings
 
 
-def make_engine(url: str | None = None, *, pool_size: int = 5, max_overflow: int = 5) -> AsyncEngine:
+# Pool sizing rationale: 11 worker processes; each opens its own pool. With
+# pool_size=2, max_overflow=3 the absolute upper bound is 5 × 11 = 55 sessions.
+# Postgres is configured for max_connections=200 (see infra/docker-compose.yml),
+# leaving headroom for ops, dashboard, and Alembic. Workers that do bursty DB
+# I/O can override per-process via make_engine(pool_size=..., max_overflow=...).
+def make_engine(
+    url: str | None = None,
+    *,
+    pool_size: int = 2,
+    max_overflow: int = 3,
+) -> AsyncEngine:
     return create_async_engine(
         url or settings.database_url,
         pool_size=pool_size,
@@ -486,20 +619,58 @@ def make_engine(url: str | None = None, *, pool_size: int = 5, max_overflow: int
         pool_pre_ping=True,
         pool_recycle=1800,
         connect_args={
-            "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000 -c lock_timeout=5000",
+            # statement_timeout=30s catches stuck OLTP queries; long-running
+            # comp aggregates in the valuator/distiller must SET LOCAL their own
+            # higher limit inside their transaction.
+            "options": (
+                "-c statement_timeout=30000 "
+                "-c idle_in_transaction_session_timeout=60000 "
+                "-c lock_timeout=5000"
+            ),
         },
     )
 
 
-engine: AsyncEngine = make_engine()
-async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    engine, expire_on_commit=False, autoflush=False
-)
+_engine: AsyncEngine | None = None
+_session_maker: async_sessionmaker[AsyncSession] | None = None
+
+
+def get_engine() -> AsyncEngine:
+    """Return the process-wide async engine (created lazily on first call)."""
+    global _engine
+    if _engine is None:
+        _engine = make_engine()
+    return _engine
+
+
+def get_session_maker() -> async_sessionmaker[AsyncSession]:
+    """Return the process-wide AsyncSession factory bound to get_engine()."""
+    global _session_maker
+    if _session_maker is None:
+        _session_maker = async_sessionmaker(
+            get_engine(), expire_on_commit=False, autoflush=False
+        )
+    return _session_maker
+
+
+async def set_engine_for_testing(engine: AsyncEngine) -> None:
+    """Test-only: replace the cached engine and session factory with a test pool.
+
+    Disposes any previously cached engine. After this call, every callsite that
+    uses get_session() / get_session_maker() / get_engine() will see the test
+    engine, including modules that imported the names earlier (since they are
+    looked up via these accessors, not module-level globals).
+    """
+    global _engine, _session_maker
+    if _engine is not None and _engine is not engine:
+        await _engine.dispose()
+    _engine = engine
+    _session_maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
-    async with async_session_maker() as session:
+    async with get_session_maker()() as session:
         yield session
 ```
 
@@ -529,6 +700,7 @@ git commit -m "db: SQLAlchemy async base + session factory"
 ### Task 6: ORM models for all MVP tables
 
 **Files:**
+- Create: `src/carbuyer/db/enums.py`
 - Create: `src/carbuyer/db/models.py`
 - Create: `tests/db/test_models.py`
 
@@ -536,10 +708,19 @@ git commit -m "db: SQLAlchemy async base + session factory"
 
 ```python
 # tests/db/test_models.py
+from carbuyer.db.enums import (
+    AuctionStatus,
+    EnrichmentStatus,
+    LotStatus,
+    NotificationStatus,
+    UserAction,
+    ValuationStatus,
+    VisionStatus,
+)
 from carbuyer.db.models import (
     Auction,
-    AuctionLot,
     AuctionBidHistory,
+    AuctionLot,
     HistoricalSale,
     Purchase,
     Search,
@@ -555,10 +736,22 @@ def test_models_importable() -> None:
     assert Search.__tablename__ == "searches"
 
 
+def test_status_enums_have_expected_values() -> None:
+    # StrEnum: comparable to plain strings; persisted as String(16) in DB.
+    assert EnrichmentStatus.PENDING == "pending"
+    assert ValuationStatus.DONE == "done"
+    assert VisionStatus.SKIPPED == "skipped"
+    assert NotificationStatus.PENDING == "pending"
+    assert LotStatus.OPEN == "open"
+    assert AuctionStatus.UPCOMING == "upcoming"
+    assert UserAction.INTERESTED == "interested"
+
+
 def test_auction_lot_has_required_columns() -> None:
     cols = {c.name for c in AuctionLot.__table__.columns}
     expected = {
         "id", "auction_id", "source_lot_id", "lot_number", "url",
+        "parser_version",
         "title", "description", "photos",
         "year", "make", "model", "trim", "engine", "transmission", "drivetrain",
         "mileage_km", "vin", "title_status", "province_of_origin",
@@ -596,16 +789,94 @@ uv run pytest tests/db/test_models.py -v
 
 Expected: ImportError.
 
-- [ ] **Step 3: Implement `src/carbuyer/db/models.py`**
+- [ ] **Step 3: Implement `src/carbuyer/db/enums.py`**
 
 ```python
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+# Worker-pipeline stage statuses (one column per stage on auction_lots).
+# StrEnum compares equal to plain strings so existing string queries keep working
+# without TypeDecorator boilerplate; the DB column is still String(16).
+class EnrichmentStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class ValuationStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    FAILED = "failed"
+    INSUFFICIENT_COMPS = "insufficient_comps"
+
+
+class VisionStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+class NotificationStatus(StrEnum):
+    PENDING = "pending"
+    DONE = "done"
+    SKIPPED = "skipped"
+
+
+class LotStatus(StrEnum):
+    OPEN = "open"
+    CLOSING_SOON = "closing_soon"
+    EXTENDED = "extended"
+    CLOSED = "closed"
+    UNSOLD = "unsold"
+    SOLD = "sold"
+
+
+class AuctionStatus(StrEnum):
+    UPCOMING = "upcoming"
+    LIVE = "live"
+    CLOSING = "closing"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
+
+
+class UserAction(StrEnum):
+    INTERESTED = "interested"
+    MAYBE = "maybe"
+    NOT_INTERESTED = "not_interested"
+
+
+class AuctionSubtype(StrEnum):
+    ESTATE = "estate"
+    COMMERCIAL = "commercial"  # phase-2 RB / Michener Allen
+```
+
+- [ ] **Step 4: Implement `src/carbuyer/db/models.py`**
+
+> **Worker column-ownership rule:** Each block under `AuctionLot` is annotated
+> with the worker that owns the columns. Workers UPDATE only their own columns;
+> never `session.merge(lot)` the whole row back. Bid-poller updates bid-state;
+> enricher updates enrichment + rarity (LLM); valuator updates valuation +
+> historical_comp_count; vision-batcher updates vision_*; notifier updates
+> *_notified_at; user actions come from the dashboard.
+
+```python
+from __future__ import annotations
+
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, JSON,
-    Numeric, String, Text, UniqueConstraint,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer,
+    Numeric, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -620,7 +891,9 @@ class Auction(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     source_auction_id: Mapped[str] = mapped_column(String(128), nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    auction_subtype: Mapped[str] = mapped_column(String(32), nullable=False, default="estate")
+    auction_subtype: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="estate", server_default="estate",
+    )
     auctioneer_name: Mapped[str | None] = mapped_column(String(255))
     auctioneer_external_id: Mapped[str | None] = mapped_column(String(128))
     title: Mapped[str | None] = mapped_column(Text)
@@ -638,10 +911,14 @@ class Auction(Base, TimestampMixin):
     online_bidding_fee_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     gst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     pst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="upcoming", index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="upcoming", server_default="upcoming", index=True,
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    discovery_confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="high")
+    discovery_confidence: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="high", server_default="high",
+    )
     needs_plugin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     routing_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -655,16 +932,23 @@ class Auction(Base, TimestampMixin):
 class AuctionLot(Base, TimestampMixin):
     __tablename__ = "auction_lots"
 
+    # ── Owned by: lot-scraper (initial insert + URL/photo refresh) ──────────
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     auction_id: Mapped[int] = mapped_column(ForeignKey("auctions.id", ondelete="CASCADE"), index=True)
     source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
     lot_number: Mapped[str | None] = mapped_column(String(64))
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    # parser_version: the source plugin's parser version at the time this row
+    # was scraped. Used to detect rows that need re-enrichment after a parser
+    # change (Source.version on the plugin → propagated here on every upsert).
+    parser_version: Mapped[str | None] = mapped_column(String(32))
     title: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
-    photos: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, nullable=False)
+    photos: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+    )
 
-    # Normalized vehicle facts
+    # ── Owned by: lot-scraper (initial), description-enricher (LLM normalization) ──
     year: Mapped[int | None] = mapped_column(Integer)
     make: Mapped[str | None] = mapped_column(String(64), index=True)
     model: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -674,44 +958,66 @@ class AuctionLot(Base, TimestampMixin):
     drivetrain: Mapped[str | None] = mapped_column(String(16))
     mileage_km: Mapped[int | None] = mapped_column(Integer)
     vin: Mapped[str | None] = mapped_column(String(32))
-    title_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    title_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+    )
     province_of_origin: Mapped[str | None] = mapped_column(String(8))
 
-    # LLM enrichment
+    # ── Owned by: description-enricher (LLM description pass) ───────────────
     condition_categorical: Mapped[str | None] = mapped_column(String(16))
     condition_confidence: Mapped[float | None] = mapped_column()
-    red_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
-    green_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
-    showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    red_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    green_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
     summary: Mapped[str | None] = mapped_column(Text)
     carfax_url: Mapped[str | None] = mapped_column(Text)
     carfax_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    # Rarity
-    desirable_trim_or_spec: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    classic_or_collector: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    desirability_signals: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    desirability_evidence: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    # ── Owned by: description-enricher (rarity/desirability fields, LLM) ────
+    desirable_trim_or_spec: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    classic_or_collector: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    desirability_signals: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    desirability_evidence: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    # historical_comp_count: written by valuator (DB-derived signal).
     historical_comp_count: Mapped[int | None] = mapped_column(Integer)
     recent_appreciation: Mapped[float | None] = mapped_column()
+    # rarity_score: combined LLM + DB; written by valuator.
     rarity_score: Mapped[float | None] = mapped_column()
 
-    # Vision (filled by vision-batcher)
+    # ── Owned by: vision-batcher (nightly two-pass) ─────────────────────────
     vision_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     vision_condition_overall: Mapped[str | None] = mapped_column(String(16))
     vision_confidence: Mapped[float | None] = mapped_column()
-    vision_contradictions: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    vision_contradictions: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
 
-    # Bid state
+    # ── Owned by: bid-poller (continuous tiered cadence) ────────────────────
     current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     last_bid_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bid_count_visible: Mapped[int | None] = mapped_column(Integer)
     reserve_met: Mapped[bool | None] = mapped_column(Boolean)
-    lot_status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
+    lot_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="open", server_default="open", index=True,
+    )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
-    # Valuation
+    # ── Owned by: valuator ──────────────────────────────────────────────────
     comp_count: Mapped[int | None] = mapped_column(Integer)
     value_low_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     value_mid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -723,18 +1029,30 @@ class AuctionLot(Base, TimestampMixin):
     price_deal_score: Mapped[float | None] = mapped_column()
     flag_score: Mapped[int | None] = mapped_column(Integer)
     confidence_bucket: Mapped[str | None] = mapped_column(String(16))
-    suspicious_underprice_flag: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    suspicious_underprice_flag: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
     scoring_version: Mapped[str | None] = mapped_column(String(32))
     weights_hash: Mapped[str | None] = mapped_column(String(64))
 
-    # Worker statuses
-    enrichment_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
-    valuation_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
-    vision_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
-    notification_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    # ── Owned by: pipeline workers (each writes its own status column) ──────
+    # See carbuyer.db.enums for valid values; column is String(16) so PG enum
+    # migration churn is avoided. Workers compare against StrEnum members.
+    enrichment_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
+    valuation_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
+    vision_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
+    notification_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
     enrichment_version: Mapped[str | None] = mapped_column(String(32))
 
-    # Per-trigger notification timestamps
+    # ── Owned by: notifier (one timestamp per trigger type) ─────────────────
     early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cheap_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closing_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -742,10 +1060,12 @@ class AuctionLot(Base, TimestampMixin):
     extended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_notified_channel: Mapped[str | None] = mapped_column(String(64))
 
-    # User action
+    # ── Owned by: dashboard (user input) ────────────────────────────────────
     user_action: Mapped[str | None] = mapped_column(String(16), index=True)
     notes: Mapped[str | None] = mapped_column(Text)
-    was_purchased_by_us: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    was_purchased_by_us: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False, index=True,
+    )
 
     auction: Mapped["Auction"] = relationship(back_populates="lots", lazy="raise")
     bid_history: Mapped[list["AuctionBidHistory"]] = relationship(
@@ -790,7 +1110,9 @@ class HistoricalSale(Base, TimestampMixin):
     drivetrain: Mapped[str | None] = mapped_column(String(16))
     mileage_km: Mapped[int | None] = mapped_column(Integer)
     vin: Mapped[str | None] = mapped_column(String(32))
-    title_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    title_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+    )
     province_of_origin: Mapped[str | None] = mapped_column(String(8))
     condition_categorical: Mapped[str | None] = mapped_column(String(16))
     final_listed_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -803,11 +1125,19 @@ class HistoricalSale(Base, TimestampMixin):
     seller_city: Mapped[str | None] = mapped_column(String(128))
     observed_first_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    disposition_reason: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
-    was_notified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    was_purchased_by_us: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    disposition_reason: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown", server_default="unknown",
+    )
+    was_notified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    was_purchased_by_us: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
     notes: Mapped[str | None] = mapped_column(Text)
-    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1"),
+    )
 
 
 class Purchase(Base, TimestampMixin):
@@ -834,13 +1164,19 @@ class Search(Base, TimestampMixin):
     __tablename__ = "searches"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, default="me")
+    user_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="me", server_default="me",
+    )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"),
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False,
+    )
 ```
 
-- [ ] **Step 4: Run test**
+- [ ] **Step 5: Run test**
 
 ```bash
 uv run pytest tests/db/test_models.py -v
@@ -848,11 +1184,11 @@ uv run pytest tests/db/test_models.py -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/carbuyer/db/models.py tests/db/test_models.py
-git commit -m "db: ORM models for all MVP tables"
+git add src/carbuyer/db/enums.py src/carbuyer/db/models.py tests/db/test_models.py
+git commit -m "db: ORM models + status StrEnums for all MVP tables"
 ```
 
 ---
@@ -883,15 +1219,21 @@ sqlalchemy.url =
 - [ ] **Step 3: Replace `alembic/env.py` with:**
 
 ```python
+from __future__ import annotations
+
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
+from carbuyer.db import models  # noqa: F401  -- ensure models register with metadata
 from carbuyer.db.base import Base
-from carbuyer.db import models  # noqa: F401  -- ensure models are imported
 from carbuyer.shared.config import settings
 
+
+# psycopg3's "postgresql+psycopg" URL is consumed by both create_engine (sync)
+# and create_async_engine (async). Alembic only needs a sync engine, so we use
+# create_engine directly with the same URL — no rewrite required.
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -899,14 +1241,9 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def get_sync_url() -> str:
-    # Alembic uses sync; convert async URL
-    return settings.database_url.replace("+psycopg", "+psycopg")
-
-
 def run_migrations_offline() -> None:
     context.configure(
-        url=get_sync_url(),
+        url=settings.database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -916,9 +1253,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    cfg = config.get_section(config.config_ini_section) or {}
-    cfg["sqlalchemy.url"] = get_sync_url()
-    connectable = engine_from_config(cfg, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    connectable = create_engine(settings.database_url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
@@ -972,53 +1307,97 @@ git commit -m "db: alembic init + initial migration"
 - [ ] **Step 1: Write `tests/conftest.py`**
 
 ```python
+from __future__ import annotations
+
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
 
 from carbuyer.db.base import Base
-from carbuyer.db.session import make_engine
+from carbuyer.db.session import set_engine_for_testing
 from carbuyer.shared.config import settings
 
 
+def _test_url() -> str:
+    # Append _test to the DB name. Test DB is auto-created by the
+    # /docker-entrypoint-initdb.d/ script in infra/docker-compose.yml.
+    url = settings.database_url
+    if url.endswith("/carbuyer"):
+        return url[: -len("/carbuyer")] + "/carbuyer_test"
+    if url.endswith("/carbuyer_test"):
+        return url
+    raise RuntimeError(
+        f"Refusing to run tests against non-carbuyer database URL: {url}"
+    )
+
+
 @pytest.fixture(scope="session")
-def event_loop_policy():
-    import asyncio
+def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
     return asyncio.DefaultEventLoopPolicy()
 
 
-@pytest_asyncio.fixture(scope="function")
-async def engine() -> AsyncIterator:
-    # Use a separate test schema by appending _test to the DB name in the URL
-    test_url = settings.database_url
-    if "/carbuyer" in test_url and not test_url.endswith("_test"):
-        test_url = test_url.replace("/carbuyer", "/carbuyer_test")
-    eng = make_engine(test_url, pool_size=1, max_overflow=0)
+@pytest_asyncio.fixture(scope="session")
+async def engine() -> AsyncIterator[AsyncEngine]:
+    # NullPool: each connection is fresh — no pool deadlocks, no cross-test
+    # connection state. Schema is built once per session; tests use savepoints
+    # for isolation (see `session` fixture).
+    eng = create_async_engine(_test_url(), poolclass=NullPool)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    # Make get_session() / get_session_maker() in production code resolve to
+    # this test engine for every test in the session.
+    await set_engine_for_testing(eng)
     yield eng
     await eng.dispose()
 
 
 @pytest_asyncio.fixture
-async def session(engine) -> AsyncIterator[AsyncSession]:
-    maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
-    async with maker() as s:
-        yield s
+async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """Per-test AsyncSession that rolls back on teardown.
+
+    Pattern: open one outer connection, begin an outer transaction, bind a
+    sessionmaker to that connection with `join_transaction_mode='create_savepoint'`
+    so every commit inside a test becomes a SAVEPOINT release; the outer
+    rollback at teardown undoes everything. No drop/create per test.
+    """
+    conn: AsyncConnection
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        maker = async_sessionmaker(
+            bind=conn,
+            expire_on_commit=False,
+            autoflush=False,
+            join_transaction_mode="create_savepoint",
+        )
+        async with maker() as s:
+            yield s
+        await outer.rollback()
 ```
 
-- [ ] **Step 2: Create the test database**
+- [ ] **Step 2: Verify the test DB exists (created on first compose up)**
+
+```bash
+docker exec carbuyer-pg psql -U carbuyer -lqt | grep carbuyer_test
+```
+
+Expected: a line for `carbuyer_test`. If missing (older volume), recreate it:
 
 ```bash
 docker exec carbuyer-pg psql -U carbuyer -c "CREATE DATABASE carbuyer_test;"
 ```
 
-Expected: `CREATE DATABASE` (or "already exists" if rerun — that's fine).
-
-- [ ] **Step 3: Verify with a smoke test (run existing test_session.py — it should still pass against the main DB)**
+- [ ] **Step 3: Verify with a smoke test (run existing test_session.py — it now points at carbuyer_test via the engine fixture)**
 
 ```bash
 uv run pytest tests/db/test_session.py -v
@@ -1030,12 +1409,12 @@ Expected: PASS.
 
 ```bash
 git add tests/conftest.py
-git commit -m "tests: shared fixtures (test DB, async session)"
+git commit -m "tests: session-scoped test engine + per-test savepoint isolation"
 ```
 
 ---
 
-### Task 9: Source plugin ABCs (Source / AuctionSource / ListingSource)
+### Task 9: Source plugin ABCs (Source / AuctionSource — ListingSource deferred)
 
 **Files:**
 - Create: `src/carbuyer/sources/__init__.py`
@@ -1047,20 +1426,60 @@ git commit -m "tests: shared fixtures (test DB, async session)"
 
 ```python
 # tests/sources/test_base.py
+import dataclasses
+import inspect
+
+import pytest
+
 from carbuyer.sources.base import (
-    AuctionRef, LotRef, BidObservation, RawAuction, RawLot,
+    SOURCES,
+    AuctionDiscoverer,
+    AuctionFetcher,
+    AuctionRef,
     AuctionSource,
+    BidPoller,
+    LotRef,
+    RawLot,
+    Source,
+    register,
 )
 
 
-def test_auction_ref_is_constructible() -> None:
+def test_auction_ref_is_constructible_and_frozen() -> None:
     ref = AuctionRef(source="hibid", source_auction_id="A123", url="https://x")
     assert ref.source == "hibid"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ref.source = "other"  # type: ignore[misc]
 
 
-def test_auction_source_is_abstract() -> None:
-    import inspect
+def test_raw_lot_has_extra_escape_hatch() -> None:
+    raw = RawLot(
+        ref=LotRef(source="hibid", source_auction_id="A1", source_lot_id="L1", url="https://x"),
+        lot_number="1", title="Truck", description=None,
+    )
+    assert raw.extra == {}
+    raw.extra["carfax_url"] = "https://carfax/abc"
+    assert raw.extra["carfax_url"].endswith("abc")
+
+
+def test_role_abcs_are_abstract() -> None:
+    assert inspect.isabstract(AuctionDiscoverer)
+    assert inspect.isabstract(AuctionFetcher)
+    assert inspect.isabstract(BidPoller)
     assert inspect.isabstract(AuctionSource)
+
+
+def test_register_adds_source_to_registry() -> None:
+    SOURCES.clear()
+
+    class _StubSource(Source):
+        name = "stub"
+        version = "0.0.1"
+
+    src = _StubSource()
+    register(src)
+    assert SOURCES["stub"] is src
+    SOURCES.clear()
 ```
 
 - [ ] **Step 2: Verify it fails**
@@ -1074,16 +1493,20 @@ Expected: ImportError.
 - [ ] **Step 3: Implement `src/carbuyer/sources/base.py`**
 
 ```python
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, ClassVar, Literal
 
 
 SourceType = Literal["listing", "auction"]
 
+
+# ── Reference / value objects ───────────────────────────────────────────────
 
 @dataclass(frozen=True, slots=True)
 class AuctionRef:
@@ -1117,6 +1540,9 @@ class RawAuction:
     online_bidding_fee_pct: Decimal | None
     terms_text: str | None
     auction_subtype: str = "estate"
+    # Source-specific fields that don't yet warrant a canonical column.
+    # Promote to a real field once 2+ sources surface the same key.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1137,6 +1563,9 @@ class RawLot:
     reserve_met: bool | None = None
     scheduled_end_at: datetime | None = None
     lot_status: str = "open"
+    # See RawAuction.extra. Common uses today: carfax_url, reserve_price_cad,
+    # buy_now_price_cad, raw HTML for downstream parsers.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1145,31 +1574,70 @@ class BidObservation:
     observed_at: datetime
     current_high_bid_cad: Decimal | None
     end_time_at_observation: datetime | None
-    status_at_observation: str
+    status_at_observation: str  # See db.enums.LotStatus for canonical values.
 
+
+# ── Plugin role ABCs ────────────────────────────────────────────────────────
+# Roles split so that a router (Phase 10) can implement only AuctionDiscoverer
+# while a full plugin (HiBid, McDougall) implements all three via AuctionSource.
+#
+# NOTE: abstract async-generator methods are declared `def f(...) -> AsyncIterator[T]`
+# (not `async def`). Concrete implementations are async generators
+# (`async def f(...) -> AsyncIterator[T]: yield ...`); pyright accepts that
+# pairing under strict mode. `async def f() -> AsyncIterator[T]: ...` (with `...`
+# body) would be a coroutine returning an iterator — wrong shape, runtime bug.
 
 class Source(ABC):
-    type: SourceType
-    name: str
+    """Marker base for all sources. Subclasses must define `name` and `version`."""
+
+    name: ClassVar[str]
+    # Bumped when the parser/discovery contract changes. Persisted to
+    # `auction_lots.parser_version` so the enricher / valuator can re-run on
+    # rows scraped by a stale version.
+    version: ClassVar[str]
 
 
-class AuctionSource(Source):
-    type = "auction"
+class AuctionDiscoverer(Source):
+    kind: ClassVar[SourceType] = "auction"
 
     @abstractmethod
-    async def discover_auctions(self) -> AsyncIterator[AuctionRef]: ...
+    def discover_auctions(self) -> AsyncIterator[AuctionRef]: ...
+
+
+class AuctionFetcher(Source):
+    kind: ClassVar[SourceType] = "auction"
 
     @abstractmethod
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction: ...
 
     @abstractmethod
-    async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]: ...
+    def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]: ...
 
     @abstractmethod
     async def fetch_lot(self, ref: LotRef) -> RawLot: ...
 
+
+class BidPoller(Source):
+    kind: ClassVar[SourceType] = "auction"
+
     @abstractmethod
     async def poll_bid(self, ref: LotRef) -> BidObservation: ...
+
+
+class AuctionSource(AuctionDiscoverer, AuctionFetcher, BidPoller):
+    """Convenience union for plugins that implement all three auction roles."""
+
+
+# ── Registry ────────────────────────────────────────────────────────────────
+# Plugins call `register(self)` at module import time; the lot-scraper /
+# discoverer / dashboard read SOURCES to enumerate covered platforms (used by
+# the Phase-10 "needs-plugin" alerting and the dashboard health view).
+
+SOURCES: dict[str, Source] = {}
+
+
+def register(source: Source) -> None:
+    SOURCES[source.name] = source
 ```
 
 - [ ] **Step 4: Create `__init__.py` files**
@@ -1205,11 +1673,10 @@ git commit -m "sources: AuctionSource ABC and dataclasses"
 
 ```python
 # tests/sources/test_http.py
-import httpx
 import pytest
 import respx
 
-from carbuyer.sources.http import make_client
+from carbuyer.sources.http import build_default_headers, make_client
 
 
 @pytest.mark.asyncio
@@ -1222,6 +1689,30 @@ async def test_make_client_sends_browser_headers() -> None:
         sent = route.calls.last.request
         assert "Mozilla" in sent.headers["User-Agent"]
         assert "Accept-Language" in sent.headers
+
+
+@pytest.mark.asyncio
+async def test_make_client_merges_custom_headers() -> None:
+    async with respx.mock(base_url="https://example.test") as mock:
+        route = mock.get("/").respond(200)
+        async with make_client(headers={"X-Plugin": "hibid"}) as client:
+            await client.get("https://example.test/")
+        sent = route.calls.last.request
+        assert sent.headers["X-Plugin"] == "hibid"
+        assert "Mozilla" in sent.headers["User-Agent"]
+
+
+def test_build_default_headers_uses_settings_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_USER_AGENT", "TestUA/1.0")
+    # Reload settings to pick up the env var override.
+    from importlib import reload
+
+    import carbuyer.shared.config as config_mod
+    reload(config_mod)
+    import carbuyer.sources.http as http_mod
+    reload(http_mod)
+    headers = http_mod.build_default_headers()
+    assert headers["User-Agent"] == "TestUA/1.0"
 ```
 
 - [ ] **Step 2: Verify it fails**
@@ -1233,6 +1724,8 @@ uv run pytest tests/sources/test_http.py -v
 - [ ] **Step 3: Implement `src/carbuyer/sources/http.py`**
 
 ```python
+from __future__ import annotations
+
 import asyncio
 import random
 from collections.abc import AsyncIterator
@@ -1240,33 +1733,49 @@ from contextlib import asynccontextmanager
 
 import httpx
 
+from carbuyer.shared.config import settings
 
-DEFAULT_HEADERS: dict[str, str] = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-CA,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-}
+
+# HTTP/2 is disabled by default: HTTP/2 fingerprinting (h2c settings frame
+# ordering, etc.) is more revealing than UA, and httpx's H2 backend requires
+# the `httpx[http2]` extra which we don't depend on.
+#
+# Phase 1 wraps this with a RetryTransport that honors Retry-After and applies
+# jittered exponential backoff on {429, 502, 503, 504}. The `transport`
+# parameter is the seam.
+
+def build_default_headers() -> dict[str, str]:
+    return {
+        "User-Agent": settings.http_user_agent,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-CA,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+    }
 
 
 @asynccontextmanager
 async def make_client(
-    *, timeout: float = 30.0, follow_redirects: bool = True
+    *,
+    timeout: float = 30.0,
+    follow_redirects: bool = True,
+    headers: dict[str, str] | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
+    merged_headers = build_default_headers()
+    if headers:
+        merged_headers.update(headers)
     async with httpx.AsyncClient(
-        headers=DEFAULT_HEADERS,
+        headers=merged_headers,
         timeout=timeout,
         follow_redirects=follow_redirects,
         http2=False,
+        transport=transport,
     ) as client:
         yield client
 
