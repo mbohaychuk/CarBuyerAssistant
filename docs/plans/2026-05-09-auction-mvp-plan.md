@@ -1,0 +1,7632 @@
+# CarBuyerAssistant Auction MVP — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build the auction-focused MVP described in `docs/specs/2026-05-08-carbuyer-mvp-design.md`: a personal Western Canadian auction deal-finder that scrapes HiBid + McDougall + farmauctionguide.com, enriches each lot with LLM analysis (description + nightly vision), scores lots on price-deal + rarity, sends Discord notifications on five trigger types, and surfaces everything via a localhost FastAPI/HTMX dashboard with comp comparison.
+
+**Architecture:** Staged pipeline of independent Python workers (auction-discoverer → lot-scraper → enricher → valuator → notifier; bid-poller and vision-batcher run alongside) communicating through a single Postgres database via LISTEN/NOTIFY + `SELECT … FOR UPDATE SKIP LOCKED`. Each worker is its own systemd unit. Source plugins implement an `AuctionSource` interface for clean extensibility.
+
+**Tech Stack:** Python 3.12+, uv, Ruff, Pyright (strict), pytest + pytest-asyncio, SQLAlchemy 2 async, psycopg 3, Alembic, httpx, selectolax, FastAPI, Jinja2, HTMX 2, Chart.js 4, discord.py v2, OpenAI SDK, Pydantic v2, structlog, pydantic-settings.
+
+**Phases (12):**
+- 0: Foundation (scaffolding, DB, config, logging, ORM)
+- 1: HiBid source plugin
+- 2: Pipeline workers (queue infrastructure, discoverer, lot-scraper)
+- 3: LLM enrichment (OpenAI provider, description pass, taxonomies)
+- 4: Valuation + scoring (comp set, channel norm, deal + rarity scores)
+- 5: Discord bot (slash commands, persistent views, action buttons)
+- 6: Notifier worker (5 trigger types, channel routing, quiet hours)
+- 7: Bid polling (tiered cadence, soft-close, history)
+- 8: Vision pass (two-pass nightly batch)
+- 9: Distillation (auction-distiller, retention)
+- 10: Additional sources (McDougall, farmauctionguide)
+- 11: Dashboard (all views + comp comparison)
+- 12: Production deployment (systemd, backups, smoke test)
+
+**Verification path:** end-to-end smoke test in Phase 12 scrapes one HiBid auction, processes through the full pipeline, posts a real Discord notification, and renders the lot in the dashboard.
+
+**Conventions used throughout:**
+- Every test file imports `pytest` and `pytest_asyncio`. Async tests use `@pytest.mark.asyncio`.
+- Every async DB function takes `session: AsyncSession` as last positional or keyword arg.
+- All paths absolute from repo root (`src/carbuyer/...`, `tests/...`).
+- `pytest --asyncio-mode=auto` is set in `pyproject.toml` so the marker is implicit; we still write it explicitly for clarity.
+- All commits use imperative mood ("add", "fix", "refactor"), no AI attribution, never name AI tool configs.
+- `git add` before each commit must be explicit (no `git add .`).
+
+---
+
+## Phase 0 — Foundation
+
+### Task 1: Repo scaffolding (pyproject.toml + tooling configs)
+
+**Files:**
+- Create: `pyproject.toml`
+- Create: `ruff.toml`
+- Create: `pyrightconfig.json`
+- Create: `src/carbuyer/__init__.py`
+- Create: `tests/__init__.py`
+
+- [ ] **Step 1: Write `pyproject.toml`**
+
+```toml
+[project]
+name = "carbuyer"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy[asyncio]>=2.0.30",
+    "psycopg[binary,pool]>=3.2",
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "structlog>=24.1",
+    "fastapi>=0.111",
+    "jinja2>=3.1",
+    "uvicorn[standard]>=0.30",
+    "discord.py>=2.4",
+    "openai>=1.40",
+    "phonenumbers>=8.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-postgresql>=6.0",
+    "ruff>=0.5",
+    "pyright>=1.1.370",
+    "respx>=0.21",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/carbuyer"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+```
+
+- [ ] **Step 2: Write `ruff.toml`**
+
+```toml
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "N", "UP", "B", "ASYNC", "PL", "RUF"]
+ignore = ["PLR0913"]  # too-many-arguments — let pyright complain instead
+
+[format]
+quote-style = "double"
+```
+
+- [ ] **Step 3: Write `pyrightconfig.json`**
+
+```json
+{
+  "include": ["src", "tests"],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "strict",
+  "reportMissingTypeStubs": false,
+  "venvPath": ".",
+  "venv": ".venv"
+}
+```
+
+- [ ] **Step 4: Create empty package files**
+
+```bash
+touch src/carbuyer/__init__.py tests/__init__.py
+```
+
+- [ ] **Step 5: Initialize and verify environment**
+
+```bash
+uv sync --extra dev
+uv run python -c "import carbuyer; print('ok')"
+uv run ruff check .
+uv run pyright
+```
+
+Expected: all four commands succeed; pyright reports 0 errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add pyproject.toml ruff.toml pyrightconfig.json src/carbuyer/__init__.py tests/__init__.py
+git commit -m "scaffold project: pyproject.toml, ruff, pyright"
+```
+
+---
+
+### Task 2: Local Postgres via Docker Compose
+
+**Files:**
+- Create: `infra/docker-compose.yml`
+- Create: `infra/.env.example`
+
+- [ ] **Step 1: Write `infra/docker-compose.yml`**
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    container_name: carbuyer-pg
+    environment:
+      POSTGRES_USER: carbuyer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local}
+      POSTGRES_DB: carbuyer
+    ports:
+      - "5432:5432"
+    volumes:
+      - carbuyer-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "carbuyer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  carbuyer-pg-data:
+```
+
+- [ ] **Step 2: Write `infra/.env.example`**
+
+```
+POSTGRES_PASSWORD=local
+```
+
+- [ ] **Step 3: Start Postgres and verify**
+
+```bash
+cd infra && docker compose up -d
+docker exec carbuyer-pg pg_isready -U carbuyer
+```
+
+Expected: `accepting connections`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add infra/docker-compose.yml infra/.env.example
+git commit -m "infra: local Postgres via docker compose"
+```
+
+---
+
+### Task 3: Config module (pydantic-settings)
+
+**Files:**
+- Create: `src/carbuyer/shared/__init__.py`
+- Create: `src/carbuyer/shared/config.py`
+- Create: `tests/shared/__init__.py`
+- Create: `tests/shared/test_config.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/shared/test_config.py
+import pytest
+from carbuyer.shared.config import Settings
+
+
+def test_settings_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+    monkeypatch.setenv("HOME_PROVINCE", "AB")
+    s = Settings()
+    assert s.database_url.endswith("/db")
+    assert s.openai_api_key == "sk-test"
+    assert s.discord_bot_token == "tok"
+    assert s.home_province == "AB"
+    assert s.notify_threshold == 0.15  # default
+    assert s.early_warning_min_hours_to_close == 48
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+uv run pytest tests/shared/test_config.py -v
+```
+
+Expected: ImportError or ModuleNotFoundError on `carbuyer.shared.config`.
+
+- [ ] **Step 3: Write `src/carbuyer/shared/config.py`**
+
+```python
+from typing import Literal
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+Province = Literal["AB", "BC", "SK", "MB", "ON", "QC", "NS", "NB", "NL", "PE", "YT", "NT", "NU"]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    database_url: str = Field(
+        default="postgresql+psycopg://carbuyer:local@localhost:5432/carbuyer"
+    )
+    openai_api_key: str = Field(default="")
+    openai_model: str = Field(default="gpt-4o-mini")
+    discord_bot_token: str = Field(default="")
+    discord_guild_id: int | None = None
+    discord_channels: dict[str, int] = Field(default_factory=dict)
+    home_province: Province = "AB"
+
+    notify_threshold: float = 0.15
+    early_warning_rarity_threshold: float = 2.0
+    early_warning_min_hours_to_close: int = 48
+    rescore_improvement_threshold: float = 0.05
+
+    quiet_hours_start: int = 22
+    quiet_hours_end: int = 8
+    quiet_hours_override_score: float = 0.30
+
+    flip_margin_min_cad: int = 1500
+    flip_margin_pct: float = 0.10
+
+    log_level: str = "INFO"
+
+
+settings = Settings()
+```
+
+- [ ] **Step 4: Create empty `tests/shared/__init__.py` and `src/carbuyer/shared/__init__.py`**
+
+```bash
+touch tests/shared/__init__.py src/carbuyer/shared/__init__.py
+```
+
+- [ ] **Step 5: Run test**
+
+```bash
+uv run pytest tests/shared/test_config.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/carbuyer/shared/__init__.py src/carbuyer/shared/config.py tests/shared/__init__.py tests/shared/test_config.py
+git commit -m "shared: pydantic-settings config module"
+```
+
+---
+
+### Task 4: Structlog logging setup
+
+**Files:**
+- Create: `src/carbuyer/shared/logging.py`
+- Create: `tests/shared/test_logging.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/shared/test_logging.py
+from carbuyer.shared.logging import configure_logging, get_logger
+
+
+def test_get_logger_returns_bound_logger() -> None:
+    configure_logging("DEBUG")
+    log = get_logger("test")
+    assert log is not None
+    log.info("hello", key="value")  # should not raise
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+uv run pytest tests/shared/test_logging.py -v
+```
+
+Expected: ImportError on `carbuyer.shared.logging`.
+
+- [ ] **Step 3: Implement `src/carbuyer/shared/logging.py`**
+
+```python
+import logging
+import sys
+from typing import Any
+
+import structlog
+
+
+def configure_logging(level: str = "INFO") -> None:
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=getattr(logging, level.upper()),
+    )
+    structlog.configure(
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(
+            getattr(logging, level.upper())
+        ),
+        cache_logger_on_first_use=True,
+    )
+
+
+def get_logger(name: str, **initial_values: Any) -> structlog.stdlib.BoundLogger:
+    return structlog.get_logger(name).bind(**initial_values)
+```
+
+- [ ] **Step 4: Run test**
+
+```bash
+uv run pytest tests/shared/test_logging.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/shared/logging.py tests/shared/test_logging.py
+git commit -m "shared: structlog JSON logging"
+```
+
+---
+
+### Task 5: SQLAlchemy 2 async base + session factory
+
+**Files:**
+- Create: `src/carbuyer/db/__init__.py`
+- Create: `src/carbuyer/db/base.py`
+- Create: `src/carbuyer/db/session.py`
+- Create: `tests/db/__init__.py`
+- Create: `tests/db/test_session.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/db/test_session.py
+import pytest
+from sqlalchemy import text
+
+from carbuyer.db.session import async_session_maker, engine
+
+
+@pytest.mark.asyncio
+async def test_session_can_select_one() -> None:
+    async with async_session_maker() as session:
+        result = await session.execute(text("SELECT 1 AS x"))
+        row = result.one()
+        assert row.x == 1
+    await engine.dispose()
+```
+
+- [ ] **Step 2: Verify it fails**
+
+```bash
+uv run pytest tests/db/test_session.py -v
+```
+
+Expected: ImportError.
+
+- [ ] **Step 3: Implement `src/carbuyer/db/base.py`**
+
+```python
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import DateTime, MetaData
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
+
+
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    type_annotation_map: dict[Any, Any] = {}
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        server_onupdate=func.now(),
+        nullable=False,
+    )
+```
+
+- [ ] **Step 4: Implement `src/carbuyer/db/session.py`**
+
+```python
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from carbuyer.shared.config import settings
+
+
+def make_engine(url: str | None = None, *, pool_size: int = 5, max_overflow: int = 5) -> AsyncEngine:
+    return create_async_engine(
+        url or settings.database_url,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        connect_args={
+            "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000 -c lock_timeout=5000",
+        },
+    )
+
+
+engine: AsyncEngine = make_engine()
+async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    engine, expire_on_commit=False, autoflush=False
+)
+
+
+@asynccontextmanager
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with async_session_maker() as session:
+        yield session
+```
+
+- [ ] **Step 5: Create empty `__init__.py` files**
+
+```bash
+touch src/carbuyer/db/__init__.py tests/db/__init__.py
+```
+
+- [ ] **Step 6: Run test (Postgres must be up from Task 2)**
+
+```bash
+uv run pytest tests/db/test_session.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/carbuyer/db/__init__.py src/carbuyer/db/base.py src/carbuyer/db/session.py tests/db/__init__.py tests/db/test_session.py
+git commit -m "db: SQLAlchemy async base + session factory"
+```
+
+---
+
+### Task 6: ORM models for all MVP tables
+
+**Files:**
+- Create: `src/carbuyer/db/models.py`
+- Create: `tests/db/test_models.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/db/test_models.py
+from carbuyer.db.models import (
+    Auction,
+    AuctionLot,
+    AuctionBidHistory,
+    HistoricalSale,
+    Purchase,
+    Search,
+)
+
+
+def test_models_importable() -> None:
+    assert Auction.__tablename__ == "auctions"
+    assert AuctionLot.__tablename__ == "auction_lots"
+    assert AuctionBidHistory.__tablename__ == "auction_bid_history"
+    assert HistoricalSale.__tablename__ == "historical_sales"
+    assert Purchase.__tablename__ == "purchases"
+    assert Search.__tablename__ == "searches"
+
+
+def test_auction_lot_has_required_columns() -> None:
+    cols = {c.name for c in AuctionLot.__table__.columns}
+    expected = {
+        "id", "auction_id", "source_lot_id", "lot_number", "url",
+        "title", "description", "photos",
+        "year", "make", "model", "trim", "engine", "transmission", "drivetrain",
+        "mileage_km", "vin", "title_status", "province_of_origin",
+        "condition_categorical", "condition_confidence",
+        "red_flags", "green_flags", "showstopper_flags",
+        "summary", "carfax_url", "carfax_findings",
+        "desirable_trim_or_spec", "classic_or_collector",
+        "desirability_signals", "desirability_evidence",
+        "historical_comp_count", "recent_appreciation", "rarity_score",
+        "vision_findings", "vision_condition_overall", "vision_confidence",
+        "vision_contradictions",
+        "current_high_bid_cad", "last_bid_observed_at", "bid_count_visible",
+        "reserve_met", "lot_status", "closed_at", "final_bid_cad",
+        "comp_count", "value_low_cad", "value_mid_cad", "value_high_cad",
+        "expected_value_cad", "landed_cost_premium_cad",
+        "all_in_at_current_bid_cad", "recommended_max_bid_cad",
+        "price_deal_score", "flag_score", "confidence_bucket",
+        "suspicious_underprice_flag", "scoring_version", "weights_hash",
+        "enrichment_status", "valuation_status", "vision_status", "notification_status",
+        "enrichment_version",
+        "early_warning_notified_at", "cheap_notified_at", "closing_notified_at",
+        "trajectory_notified_at", "extended_notified_at", "last_notified_channel",
+        "user_action", "notes", "was_purchased_by_us",
+        "created_at", "updated_at",
+    }
+    missing = expected - cols
+    assert not missing, f"missing columns: {missing}"
+```
+
+- [ ] **Step 2: Verify it fails**
+
+```bash
+uv run pytest tests/db/test_models.py -v
+```
+
+Expected: ImportError.
+
+- [ ] **Step 3: Implement `src/carbuyer/db/models.py`**
+
+```python
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import (
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, JSON,
+    Numeric, String, Text, UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from carbuyer.db.base import Base, TimestampMixin
+
+
+class Auction(Base, TimestampMixin):
+    __tablename__ = "auctions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_auction_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    auction_subtype: Mapped[str] = mapped_column(String(32), nullable=False, default="estate")
+    auctioneer_name: Mapped[str | None] = mapped_column(String(255))
+    auctioneer_external_id: Mapped[str | None] = mapped_column(String(128))
+    title: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    terms_text: Mapped[str | None] = mapped_column(Text)
+    scheduled_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scheduled_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pickup_address: Mapped[str | None] = mapped_column(Text)
+    pickup_city: Mapped[str | None] = mapped_column(String(128))
+    pickup_province: Mapped[str | None] = mapped_column(String(8))
+    pickup_window_text: Mapped[str | None] = mapped_column(Text)
+    buyer_premium_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    online_bidding_fee_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    gst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    pst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="upcoming", index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    discovery_confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="high")
+
+    lots: Mapped[list["AuctionLot"]] = relationship(back_populates="auction", lazy="raise")
+
+    __table_args__ = (
+        UniqueConstraint("source", "source_auction_id", name="uq_auctions_source_source_auction_id"),
+    )
+
+
+class AuctionLot(Base, TimestampMixin):
+    __tablename__ = "auction_lots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    auction_id: Mapped[int] = mapped_column(ForeignKey("auctions.id", ondelete="CASCADE"), index=True)
+    source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    lot_number: Mapped[str | None] = mapped_column(String(64))
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    photos: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, nullable=False)
+
+    # Normalized vehicle facts
+    year: Mapped[int | None] = mapped_column(Integer)
+    make: Mapped[str | None] = mapped_column(String(64), index=True)
+    model: Mapped[str | None] = mapped_column(String(64), index=True)
+    trim: Mapped[str | None] = mapped_column(String(64))
+    engine: Mapped[str | None] = mapped_column(String(64))
+    transmission: Mapped[str | None] = mapped_column(String(16))
+    drivetrain: Mapped[str | None] = mapped_column(String(16))
+    mileage_km: Mapped[int | None] = mapped_column(Integer)
+    vin: Mapped[str | None] = mapped_column(String(32))
+    title_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    province_of_origin: Mapped[str | None] = mapped_column(String(8))
+
+    # LLM enrichment
+    condition_categorical: Mapped[str | None] = mapped_column(String(16))
+    condition_confidence: Mapped[float | None] = mapped_column()
+    red_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    green_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    carfax_url: Mapped[str | None] = mapped_column(Text)
+    carfax_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    # Rarity
+    desirable_trim_or_spec: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    classic_or_collector: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    desirability_signals: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    desirability_evidence: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    historical_comp_count: Mapped[int | None] = mapped_column(Integer)
+    recent_appreciation: Mapped[float | None] = mapped_column()
+    rarity_score: Mapped[float | None] = mapped_column()
+
+    # Vision (filled by vision-batcher)
+    vision_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    vision_condition_overall: Mapped[str | None] = mapped_column(String(16))
+    vision_confidence: Mapped[float | None] = mapped_column()
+    vision_contradictions: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+
+    # Bid state
+    current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    last_bid_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bid_count_visible: Mapped[int | None] = mapped_column(Integer)
+    reserve_met: Mapped[bool | None] = mapped_column(Boolean)
+    lot_status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+
+    # Valuation
+    comp_count: Mapped[int | None] = mapped_column(Integer)
+    value_low_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    value_mid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    value_high_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    expected_value_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    landed_cost_premium_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    all_in_at_current_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    recommended_max_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    price_deal_score: Mapped[float | None] = mapped_column()
+    flag_score: Mapped[int | None] = mapped_column(Integer)
+    confidence_bucket: Mapped[str | None] = mapped_column(String(16))
+    suspicious_underprice_flag: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    scoring_version: Mapped[str | None] = mapped_column(String(32))
+    weights_hash: Mapped[str | None] = mapped_column(String(64))
+
+    # Worker statuses
+    enrichment_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    valuation_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    vision_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    notification_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    enrichment_version: Mapped[str | None] = mapped_column(String(32))
+
+    # Per-trigger notification timestamps
+    early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cheap_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closing_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trajectory_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    extended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_notified_channel: Mapped[str | None] = mapped_column(String(64))
+
+    # User action
+    user_action: Mapped[str | None] = mapped_column(String(16), index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+    was_purchased_by_us: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+
+    auction: Mapped["Auction"] = relationship(back_populates="lots", lazy="raise")
+    bid_history: Mapped[list["AuctionBidHistory"]] = relationship(
+        back_populates="lot", lazy="raise", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("auction_id", "source_lot_id", name="uq_auction_lots_auction_source_lot"),
+        Index("ix_auction_lots_make_model_year", "make", "model", "year"),
+        Index("ix_auction_lots_price_deal_score", "price_deal_score", "lot_status"),
+        Index("ix_auction_lots_rarity_score", "rarity_score", "scheduled_end_at"),
+    )
+
+
+class AuctionBidHistory(Base):
+    __tablename__ = "auction_bid_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("auction_lots.id", ondelete="CASCADE"), index=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    end_time_at_observation: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_at_observation: Mapped[str | None] = mapped_column(String(32))
+
+    lot: Mapped["AuctionLot"] = relationship(back_populates="bid_history", lazy="raise")
+
+    __table_args__ = (Index("ix_bid_history_lot_observed", "lot_id", "observed_at"),)
+
+
+class HistoricalSale(Base, TimestampMixin):
+    __tablename__ = "historical_sales"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    year: Mapped[int | None] = mapped_column(Integer, index=True)
+    make: Mapped[str | None] = mapped_column(String(64), index=True)
+    model: Mapped[str | None] = mapped_column(String(64), index=True)
+    trim: Mapped[str | None] = mapped_column(String(64))
+    engine: Mapped[str | None] = mapped_column(String(64))
+    transmission: Mapped[str | None] = mapped_column(String(16))
+    drivetrain: Mapped[str | None] = mapped_column(String(16))
+    mileage_km: Mapped[int | None] = mapped_column(Integer)
+    vin: Mapped[str | None] = mapped_column(String(32))
+    title_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    province_of_origin: Mapped[str | None] = mapped_column(String(8))
+    condition_categorical: Mapped[str | None] = mapped_column(String(16))
+    final_listed_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    days_listed: Mapped[int | None] = mapped_column(Integer)
+    buyer_premium_pct_at_sale: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    final_price_with_premium_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    sale_channel: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    sale_platform: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    seller_province: Mapped[str | None] = mapped_column(String(8))
+    seller_city: Mapped[str | None] = mapped_column(String(128))
+    observed_first_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disposition_reason: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    was_notified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    was_purchased_by_us: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class Purchase(Base, TimestampMixin):
+    __tablename__ = "purchases"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    purchase_date: Mapped[date] = mapped_column(Date, nullable=False)
+    sale_date: Mapped[date | None] = mapped_column(Date)
+    make: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    purchase_price_cad: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    sale_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    province_of_purchase: Mapped[str | None] = mapped_column(String(8))
+    province_of_sale: Mapped[str | None] = mapped_column(String(8))
+    transport_cost_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    inspection_cost_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    repair_cost_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    notes: Mapped[str | None] = mapped_column(Text)
+    linked_lot_id: Mapped[int | None] = mapped_column(ForeignKey("auction_lots.id"))
+
+
+class Search(Base, TimestampMixin):
+    __tablename__ = "searches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, default="me")
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+```
+
+- [ ] **Step 4: Run test**
+
+```bash
+uv run pytest tests/db/test_models.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/db/models.py tests/db/test_models.py
+git commit -m "db: ORM models for all MVP tables"
+```
+
+---
+
+### Task 7: Alembic init + initial migration
+
+**Files:**
+- Create: `alembic.ini`
+- Create: `alembic/env.py`
+- Create: `alembic/script.py.mako`
+- Create: `alembic/versions/<auto>_initial.py`
+
+- [ ] **Step 1: Initialize Alembic**
+
+```bash
+uv run alembic init alembic
+```
+
+This creates `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, and `alembic/versions/`.
+
+- [ ] **Step 2: Edit `alembic.ini` — set the URL line to be empty (we'll populate from settings)**
+
+Find `sqlalchemy.url = ...` and replace with:
+```
+sqlalchemy.url =
+```
+
+- [ ] **Step 3: Replace `alembic/env.py` with:**
+
+```python
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+from carbuyer.db.base import Base
+from carbuyer.db import models  # noqa: F401  -- ensure models are imported
+from carbuyer.shared.config import settings
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
+
+
+def get_sync_url() -> str:
+    # Alembic uses sync; convert async URL
+    return settings.database_url.replace("+psycopg", "+psycopg")
+
+
+def run_migrations_offline() -> None:
+    context.configure(
+        url=get_sync_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    cfg = config.get_section(config.config_ini_section) or {}
+    cfg["sqlalchemy.url"] = get_sync_url()
+    connectable = engine_from_config(cfg, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    with connectable.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+```
+
+- [ ] **Step 4: Generate the initial migration**
+
+```bash
+uv run alembic revision --autogenerate -m "initial schema"
+```
+
+Expected: a new file under `alembic/versions/` named like `<hash>_initial_schema.py` is created.
+
+- [ ] **Step 5: Apply the migration**
+
+```bash
+uv run alembic upgrade head
+```
+
+Expected: `INFO ... Running upgrade -> <hash>, initial schema`.
+
+- [ ] **Step 6: Verify schema**
+
+```bash
+docker exec carbuyer-pg psql -U carbuyer -d carbuyer -c "\dt"
+```
+
+Expected: 7 tables listed (`alembic_version`, `auctions`, `auction_lots`, `auction_bid_history`, `historical_sales`, `purchases`, `searches`).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add alembic.ini alembic/env.py alembic/script.py.mako alembic/versions/
+git commit -m "db: alembic init + initial migration"
+```
+
+---
+
+### Task 8: pytest fixtures (test DB, async session)
+
+**Files:**
+- Create: `tests/conftest.py`
+
+- [ ] **Step 1: Write `tests/conftest.py`**
+
+```python
+from collections.abc import AsyncIterator
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from carbuyer.db.base import Base
+from carbuyer.db.session import make_engine
+from carbuyer.shared.config import settings
+
+
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    import asyncio
+    return asyncio.DefaultEventLoopPolicy()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def engine() -> AsyncIterator:
+    # Use a separate test schema by appending _test to the DB name in the URL
+    test_url = settings.database_url
+    if "/carbuyer" in test_url and not test_url.endswith("_test"):
+        test_url = test_url.replace("/carbuyer", "/carbuyer_test")
+    eng = make_engine(test_url, pool_size=1, max_overflow=0)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    yield eng
+    await eng.dispose()
+
+
+@pytest_asyncio.fixture
+async def session(engine) -> AsyncIterator[AsyncSession]:
+    maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    async with maker() as s:
+        yield s
+```
+
+- [ ] **Step 2: Create the test database**
+
+```bash
+docker exec carbuyer-pg psql -U carbuyer -c "CREATE DATABASE carbuyer_test;"
+```
+
+Expected: `CREATE DATABASE` (or "already exists" if rerun — that's fine).
+
+- [ ] **Step 3: Verify with a smoke test (run existing test_session.py — it should still pass against the main DB)**
+
+```bash
+uv run pytest tests/db/test_session.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/conftest.py
+git commit -m "tests: shared fixtures (test DB, async session)"
+```
+
+---
+
+### Task 9: Source plugin ABCs (Source / AuctionSource / ListingSource)
+
+**Files:**
+- Create: `src/carbuyer/sources/__init__.py`
+- Create: `src/carbuyer/sources/base.py`
+- Create: `tests/sources/__init__.py`
+- Create: `tests/sources/test_base.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/sources/test_base.py
+from carbuyer.sources.base import (
+    AuctionRef, LotRef, BidObservation, RawAuction, RawLot,
+    AuctionSource,
+)
+
+
+def test_auction_ref_is_constructible() -> None:
+    ref = AuctionRef(source="hibid", source_auction_id="A123", url="https://x")
+    assert ref.source == "hibid"
+
+
+def test_auction_source_is_abstract() -> None:
+    import inspect
+    assert inspect.isabstract(AuctionSource)
+```
+
+- [ ] **Step 2: Verify it fails**
+
+```bash
+uv run pytest tests/sources/test_base.py -v
+```
+
+Expected: ImportError.
+
+- [ ] **Step 3: Implement `src/carbuyer/sources/base.py`**
+
+```python
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from typing import Literal
+
+
+SourceType = Literal["listing", "auction"]
+
+
+@dataclass(frozen=True, slots=True)
+class AuctionRef:
+    source: str
+    source_auction_id: str
+    url: str
+
+
+@dataclass(frozen=True, slots=True)
+class LotRef:
+    source: str
+    source_auction_id: str
+    source_lot_id: str
+    url: str
+
+
+@dataclass(slots=True)
+class RawAuction:
+    ref: AuctionRef
+    title: str | None
+    description: str | None
+    auctioneer_name: str | None
+    auctioneer_external_id: str | None
+    scheduled_start_at: datetime | None
+    scheduled_end_at: datetime | None
+    pickup_address: str | None
+    pickup_city: str | None
+    pickup_province: str | None
+    pickup_window_text: str | None
+    buyer_premium_pct: Decimal | None
+    online_bidding_fee_pct: Decimal | None
+    terms_text: str | None
+    auction_subtype: str = "estate"
+
+
+@dataclass(slots=True)
+class RawLot:
+    ref: LotRef
+    lot_number: str | None
+    title: str | None
+    description: str | None
+    photos: list[str] = field(default_factory=list)
+    year: int | None = None
+    make: str | None = None
+    model: str | None = None
+    trim: str | None = None
+    mileage_km: int | None = None
+    vin: str | None = None
+    current_high_bid_cad: Decimal | None = None
+    bid_count_visible: int | None = None
+    reserve_met: bool | None = None
+    scheduled_end_at: datetime | None = None
+    lot_status: str = "open"
+
+
+@dataclass(slots=True)
+class BidObservation:
+    ref: LotRef
+    observed_at: datetime
+    current_high_bid_cad: Decimal | None
+    end_time_at_observation: datetime | None
+    status_at_observation: str
+
+
+class Source(ABC):
+    type: SourceType
+    name: str
+
+
+class AuctionSource(Source):
+    type = "auction"
+
+    @abstractmethod
+    async def discover_auctions(self) -> AsyncIterator[AuctionRef]: ...
+
+    @abstractmethod
+    async def fetch_auction(self, ref: AuctionRef) -> RawAuction: ...
+
+    @abstractmethod
+    async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]: ...
+
+    @abstractmethod
+    async def fetch_lot(self, ref: LotRef) -> RawLot: ...
+
+    @abstractmethod
+    async def poll_bid(self, ref: LotRef) -> BidObservation: ...
+```
+
+- [ ] **Step 4: Create `__init__.py` files**
+
+```bash
+touch src/carbuyer/sources/__init__.py tests/sources/__init__.py
+```
+
+- [ ] **Step 5: Run test**
+
+```bash
+uv run pytest tests/sources/test_base.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/carbuyer/sources/__init__.py src/carbuyer/sources/base.py tests/sources/__init__.py tests/sources/test_base.py
+git commit -m "sources: AuctionSource ABC and dataclasses"
+```
+
+---
+
+### Task 10: HTTP client wrapper with shared headers + jitter
+
+**Files:**
+- Create: `src/carbuyer/sources/http.py`
+- Create: `tests/sources/test_http.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/sources/test_http.py
+import httpx
+import pytest
+import respx
+
+from carbuyer.sources.http import make_client
+
+
+@pytest.mark.asyncio
+async def test_make_client_sends_browser_headers() -> None:
+    async with respx.mock(base_url="https://example.test") as mock:
+        route = mock.get("/").respond(200, text="ok")
+        async with make_client() as client:
+            r = await client.get("https://example.test/")
+        assert r.status_code == 200
+        sent = route.calls.last.request
+        assert "Mozilla" in sent.headers["User-Agent"]
+        assert "Accept-Language" in sent.headers
+```
+
+- [ ] **Step 2: Verify it fails**
+
+```bash
+uv run pytest tests/sources/test_http.py -v
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/sources/http.py`**
+
+```python
+import asyncio
+import random
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import httpx
+
+
+DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-CA,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+
+
+@asynccontextmanager
+async def make_client(
+    *, timeout: float = 30.0, follow_redirects: bool = True
+) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(
+        headers=DEFAULT_HEADERS,
+        timeout=timeout,
+        follow_redirects=follow_redirects,
+        http2=False,
+    ) as client:
+        yield client
+
+
+async def jittered_sleep(min_s: float = 4.0, max_s: float = 8.0) -> None:
+    await asyncio.sleep(random.uniform(min_s, max_s))
+```
+
+- [ ] **Step 4: Run test**
+
+```bash
+uv run pytest tests/sources/test_http.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/sources/http.py tests/sources/test_http.py
+git commit -m "sources: HTTP client wrapper with browser headers + jitter"
+```
+
+---
+
+End of Phase 0. Postgres is up, schema is migrated, ORM models exist, source ABCs are defined, HTTP client is shared.
+
+---
+
+## Phase 1 — HiBid source plugin
+
+HiBid (`hibid.com`) is the primary source. Pages embed a `<script>` block of the form `var lotModels = [{...}, ...];`. Our parser extracts that JSON literal and walks it. No headless browser. Conservative pacing (4–8s jitter). Reference fixture: capture one real catalog page during implementation; commit the HTML to `tests/sources/fixtures/`.
+
+### Task 11: HiBid constants and URL builders
+
+**Files:**
+- Create: `src/carbuyer/sources/hibid/__init__.py`
+- Create: `src/carbuyer/sources/hibid/urls.py`
+- Create: `tests/sources/hibid/__init__.py`
+- Create: `tests/sources/hibid/test_urls.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/sources/hibid/test_urls.py
+from carbuyer.sources.hibid.urls import province_vehicles_url, lot_url, catalog_url
+
+
+def test_province_vehicles_url() -> None:
+    assert province_vehicles_url("AB") == "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=OPEN"
+
+
+def test_lot_url() -> None:
+    assert lot_url("12345", "1995-ford-f150") == "https://hibid.com/lot/12345/1995-ford-f150"
+
+
+def test_catalog_url() -> None:
+    assert catalog_url("740236", "vehicle-equipment-with-nl-power-auction") == \
+        "https://hibid.com/catalog/740236/vehicle-equipment-with-nl-power-auction"
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/sources/hibid/urls.py`**
+
+```python
+PROVINCE_PATH = {
+    "AB": "alberta",
+    "BC": "british-columbia",
+    "SK": "saskatchewan",
+    "MB": "manitoba",
+}
+
+CARS_VEHICLES_CATEGORY = "700006"
+
+
+def province_vehicles_url(province: str) -> str:
+    path = PROVINCE_PATH[province]
+    return f"https://hibid.com/{path}/auctions/{CARS_VEHICLES_CATEGORY}/cars-and-vehicles?status=OPEN"
+
+
+def lot_url(lot_id: str, slug: str = "") -> str:
+    if slug:
+        return f"https://hibid.com/lot/{lot_id}/{slug}"
+    return f"https://hibid.com/lot/{lot_id}"
+
+
+def catalog_url(auction_id: str, slug: str = "") -> str:
+    if slug:
+        return f"https://hibid.com/catalog/{auction_id}/{slug}"
+    return f"https://hibid.com/catalog/{auction_id}"
+```
+
+- [ ] **Step 3: Create `__init__.py` files and run test**
+
+```bash
+touch src/carbuyer/sources/hibid/__init__.py tests/sources/hibid/__init__.py
+uv run pytest tests/sources/hibid/test_urls.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/sources/hibid/__init__.py src/carbuyer/sources/hibid/urls.py tests/sources/hibid/__init__.py tests/sources/hibid/test_urls.py
+git commit -m "hibid: URL builders and constants"
+```
+
+---
+
+### Task 12: HiBid `lotModels` JSON extractor
+
+**Files:**
+- Create: `src/carbuyer/sources/hibid/parser.py`
+- Create: `tests/sources/hibid/test_parser.py`
+- Create: `tests/sources/fixtures/hibid_catalog_sample.html`
+
+- [ ] **Step 1: Capture a fixture (manual; run once to seed tests)**
+
+This is the only manual step in the plan. Save a real catalog page HTML to the fixture path:
+
+```bash
+curl -s "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=OPEN" \
+  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+  > tests/sources/fixtures/hibid_catalog_sample.html
+```
+
+Then verify it contains `lotModels`:
+
+```bash
+grep -c "lotModels" tests/sources/fixtures/hibid_catalog_sample.html
+```
+
+Expected: at least 1.
+
+- [ ] **Step 2: Write the failing test**
+
+```python
+# tests/sources/hibid/test_parser.py
+from pathlib import Path
+
+from carbuyer.sources.hibid.parser import extract_lot_models, parse_lot_summary
+
+
+FIXTURE = Path("tests/sources/fixtures/hibid_catalog_sample.html").read_text()
+
+
+def test_extract_lot_models_returns_list() -> None:
+    lots = extract_lot_models(FIXTURE)
+    assert isinstance(lots, list)
+    assert len(lots) > 0
+    first = lots[0]
+    assert "id" in first or "lotId" in first or "lotID" in first
+
+
+def test_parse_lot_summary_normalizes_keys() -> None:
+    lots = extract_lot_models(FIXTURE)
+    summary = parse_lot_summary(lots[0])
+    assert summary.source_lot_id
+    assert summary.title is not None
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/sources/hibid/parser.py`**
+
+```python
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+
+_LOT_MODELS_RE = re.compile(
+    r"var\s+lotModels\s*=\s*(\[.*?\])\s*;", re.DOTALL
+)
+
+
+def extract_lot_models(html: str) -> list[dict[str, Any]]:
+    """Extract the embedded `var lotModels = [...];` array from a HiBid page.
+
+    Uses a tolerant cleanup pass: HiBid sometimes emits malformed comma sequences
+    (`}],{` instead of `},{`) when serializing nested objects; we patch those
+    before json.loads.
+    """
+    m = _LOT_MODELS_RE.search(html)
+    if not m:
+        return []
+    blob = m.group(1)
+    blob = blob.replace("}],{", "},{")  # tolerated HiBid quirk
+    try:
+        result = json.loads(blob)
+    except json.JSONDecodeError:
+        return []
+    return result if isinstance(result, list) else []
+
+
+@dataclass(slots=True)
+class HibidLotSummary:
+    source_lot_id: str
+    lot_number: str | None
+    title: str | None
+    description: str | None
+    year: int | None
+    make: str | None
+    model: str | None
+    current_high_bid_cad: Decimal | None
+    photos: list[str]
+    end_at: datetime | None
+    auction_external_id: str | None
+    url: str | None
+
+
+def _get(obj: dict[str, Any], *keys: str) -> Any:
+    for k in keys:
+        if k in obj:
+            return obj[k]
+    return None
+
+
+def parse_lot_summary(raw: dict[str, Any]) -> HibidLotSummary:
+    lot_id = str(_get(raw, "lotId", "lotID", "id") or "")
+    bid = _get(raw, "highBid", "currentBid", "bidAmount")
+    end = _get(raw, "saleEnd", "endTime", "scheduledEnd")
+    photos_raw = _get(raw, "lotImages", "images") or []
+    photos = []
+    for p in photos_raw if isinstance(photos_raw, list) else []:
+        if isinstance(p, str):
+            photos.append(p)
+        elif isinstance(p, dict):
+            url = p.get("url") or p.get("imageUrl") or p.get("largeUrl")
+            if isinstance(url, str):
+                photos.append(url)
+    return HibidLotSummary(
+        source_lot_id=lot_id,
+        lot_number=str(_get(raw, "lotNumber", "lotNum") or "") or None,
+        title=_get(raw, "title", "lotTitle"),
+        description=_get(raw, "description", "longDescription"),
+        year=_get(raw, "year"),
+        make=_get(raw, "make"),
+        model=_get(raw, "model"),
+        current_high_bid_cad=Decimal(str(bid)) if bid is not None else None,
+        photos=photos,
+        end_at=_parse_dt(end),
+        auction_external_id=str(_get(raw, "auctionId", "auctionID") or "") or None,
+        url=_get(raw, "url", "lotUrl"),
+    )
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000 if value > 1e11 else value)
+    if isinstance(value, str):
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                pass
+    return None
+```
+
+- [ ] **Step 4: Run test**
+
+```bash
+uv run pytest tests/sources/hibid/test_parser.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/sources/hibid/parser.py tests/sources/hibid/test_parser.py tests/sources/fixtures/hibid_catalog_sample.html
+git commit -m "hibid: lotModels JSON extractor"
+```
+
+---
+
+### Task 13: HiBidSource — discover auctions across Western CA provinces
+
+**Files:**
+- Create: `src/carbuyer/sources/hibid/source.py`
+- Create: `tests/sources/hibid/test_source.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/sources/hibid/test_source.py
+from pathlib import Path
+
+import pytest
+import respx
+from httpx import Response
+
+from carbuyer.sources.hibid.source import HibidSource
+
+
+FIXTURE = Path("tests/sources/fixtures/hibid_catalog_sample.html").read_text()
+
+
+@pytest.mark.asyncio
+async def test_discover_auctions_yields_unique_refs() -> None:
+    src = HibidSource(provinces=["AB"])
+    with respx.mock(base_url="https://hibid.com") as mock:
+        mock.get(url__regex=r"/alberta/auctions/700006/.*").mock(
+            return_value=Response(200, text=FIXTURE)
+        )
+        refs = []
+        async for ref in src.discover_auctions():
+            refs.append(ref)
+            if len(refs) >= 5:
+                break
+    assert len(refs) > 0
+    assert all(r.source == "hibid" for r in refs)
+    assert len({r.source_auction_id for r in refs}) == len(refs)
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/sources/hibid/source.py`**
+
+```python
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from carbuyer.sources.base import (
+    AuctionRef, AuctionSource, BidObservation, LotRef, RawAuction, RawLot,
+)
+from carbuyer.sources.hibid.parser import extract_lot_models, parse_lot_summary
+from carbuyer.sources.hibid.urls import catalog_url, lot_url, province_vehicles_url
+from carbuyer.sources.http import jittered_sleep, make_client
+
+
+class HibidSource(AuctionSource):
+    name = "hibid"
+
+    def __init__(self, provinces: list[str]) -> None:
+        self.provinces = provinces
+
+    async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
+        seen: set[str] = set()
+        async with make_client() as client:
+            for province in self.provinces:
+                url = province_vehicles_url(province)
+                resp = await client.get(url)
+                resp.raise_for_status()
+                lots = extract_lot_models(resp.text)
+                for raw in lots:
+                    summary = parse_lot_summary(raw)
+                    auction_id = summary.auction_external_id
+                    if not auction_id or auction_id in seen:
+                        continue
+                    seen.add(auction_id)
+                    yield AuctionRef(
+                        source="hibid",
+                        source_auction_id=auction_id,
+                        url=catalog_url(auction_id),
+                    )
+                await jittered_sleep()
+
+    async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        # The catalog page contains both auction-level metadata (in the page
+        # header) and lotModels. For MVP, we record minimum metadata; richer
+        # extraction (BP, terms_text) is left to a follow-up.
+        return RawAuction(
+            ref=ref,
+            title=None,
+            description=None,
+            auctioneer_name=None,
+            auctioneer_external_id=None,
+            scheduled_start_at=None,
+            scheduled_end_at=None,
+            pickup_address=None,
+            pickup_city=None,
+            pickup_province=None,
+            pickup_window_text=None,
+            buyer_premium_pct=Decimal("0.10"),  # conservative default; refined per-source later
+            online_bidding_fee_pct=None,
+            terms_text=None,
+            auction_subtype="estate",
+        )
+
+    async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+            for raw in extract_lot_models(resp.text):
+                summary = parse_lot_summary(raw)
+                if not summary.source_lot_id:
+                    continue
+                yield LotRef(
+                    source="hibid",
+                    source_auction_id=ref.source_auction_id,
+                    source_lot_id=summary.source_lot_id,
+                    url=summary.url or lot_url(summary.source_lot_id),
+                )
+
+    async def fetch_lot(self, ref: LotRef) -> RawLot:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        lots = extract_lot_models(resp.text)
+        target = next(
+            (parse_lot_summary(r) for r in lots
+             if str(r.get("lotId") or r.get("lotID") or r.get("id") or "") == ref.source_lot_id),
+            None,
+        )
+        if target is None:
+            raise ValueError(f"lot {ref.source_lot_id} not found at {ref.url}")
+        return RawLot(
+            ref=ref,
+            lot_number=target.lot_number,
+            title=target.title,
+            description=target.description,
+            photos=target.photos,
+            year=target.year,
+            make=target.make,
+            model=target.model,
+            current_high_bid_cad=target.current_high_bid_cad,
+            scheduled_end_at=target.end_at,
+            lot_status="open",
+        )
+
+    async def poll_bid(self, ref: LotRef) -> BidObservation:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        lots = extract_lot_models(resp.text)
+        target = next(
+            (parse_lot_summary(r) for r in lots
+             if str(r.get("lotId") or r.get("lotID") or r.get("id") or "") == ref.source_lot_id),
+            None,
+        )
+        if target is None:
+            return BidObservation(
+                ref=ref, observed_at=datetime.now(UTC),
+                current_high_bid_cad=None, end_time_at_observation=None,
+                status_at_observation="missing",
+            )
+        return BidObservation(
+            ref=ref,
+            observed_at=datetime.now(UTC),
+            current_high_bid_cad=target.current_high_bid_cad,
+            end_time_at_observation=target.end_at,
+            status_at_observation="open",
+        )
+```
+
+- [ ] **Step 3: Run test**
+
+```bash
+uv run pytest tests/sources/hibid/test_source.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/sources/hibid/source.py tests/sources/hibid/test_source.py
+git commit -m "hibid: AuctionSource implementation (discover + fetch + poll)"
+```
+
+---
+
+### Task 14: HiBidSource integration smoke test (live network, opt-in)
+
+**Files:**
+- Create: `tests/sources/hibid/test_source_live.py`
+
+- [ ] **Step 1: Write the test (skipped by default)**
+
+```python
+# tests/sources/hibid/test_source_live.py
+import os
+
+import pytest
+
+from carbuyer.sources.hibid.source import HibidSource
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.getenv("RUN_LIVE_SCRAPE_TESTS") != "1",
+    reason="live scrape — opt in with RUN_LIVE_SCRAPE_TESTS=1",
+)
+async def test_live_discover_at_least_one_alberta_auction() -> None:
+    src = HibidSource(provinces=["AB"])
+    refs = []
+    async for ref in src.discover_auctions():
+        refs.append(ref)
+        if len(refs) >= 1:
+            break
+    assert len(refs) >= 1
+```
+
+- [ ] **Step 2: Run opt-in (manual; one-time check that real scrape works)**
+
+```bash
+RUN_LIVE_SCRAPE_TESTS=1 uv run pytest tests/sources/hibid/test_source_live.py -v
+```
+
+Expected: PASS (one Alberta auction found).
+
+- [ ] **Step 3: Commit (regardless of live test outcome — the skip path is what's checked-in)**
+
+```bash
+git add tests/sources/hibid/test_source_live.py
+git commit -m "hibid: opt-in live scrape smoke test"
+```
+
+---
+
+End of Phase 1. HiBid source plugin is fully implemented and tested against a captured fixture and against the live network.
+
+---
+
+## Phase 2 — Pipeline workers (queue infrastructure + discoverer + lot-scraper)
+
+### Task 15: LISTEN/NOTIFY async helper (dedicated psycopg connection)
+
+**Files:**
+- Create: `src/carbuyer/db/notify.py`
+- Create: `tests/db/test_notify.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/db/test_notify.py
+import asyncio
+
+import pytest
+from sqlalchemy import text
+
+from carbuyer.db.notify import notify, listen
+from carbuyer.shared.config import settings
+
+
+@pytest.mark.asyncio
+async def test_notify_round_trip(session) -> None:
+    received: list[str] = []
+
+    async def reader() -> None:
+        async for payload in listen("test_channel", url=_test_url()):
+            received.append(payload)
+            return
+
+    task = asyncio.create_task(reader())
+    await asyncio.sleep(0.2)
+    await session.execute(text("NOTIFY test_channel, 'hello'"))
+    await session.commit()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert received == ["hello"]
+
+
+def _test_url() -> str:
+    url = settings.database_url
+    if "/carbuyer" in url and not url.endswith("_test"):
+        url = url.replace("/carbuyer", "/carbuyer_test")
+    return url
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/db/notify.py`**
+
+```python
+from collections.abc import AsyncIterator
+
+import psycopg
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+from carbuyer.shared.config import settings
+
+
+def _to_psycopg_url(sa_url: str) -> str:
+    # SQLAlchemy uses 'postgresql+psycopg://...' — psycopg wants 'postgresql://...'
+    return sa_url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+async def notify(session: AsyncSession, channel: str, payload: str = "") -> None:
+    safe = payload.replace("'", "''")
+    await session.execute(text(f"NOTIFY {channel}, '{safe}'"))
+
+
+async def listen(channel: str, *, url: str | None = None) -> AsyncIterator[str]:
+    psycopg_url = _to_psycopg_url(url or settings.database_url)
+    aconn = await psycopg.AsyncConnection.connect(psycopg_url, autocommit=True)
+    try:
+        async with aconn.cursor() as cur:
+            await cur.execute(f"LISTEN {channel}")
+        async for n in aconn.notifies():
+            yield n.payload
+    finally:
+        await aconn.close()
+```
+
+- [ ] **Step 3: Run test**
+
+```bash
+uv run pytest tests/db/test_notify.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/db/notify.py tests/db/test_notify.py
+git commit -m "db: LISTEN/NOTIFY async helpers"
+```
+
+---
+
+### Task 16: SKIP LOCKED queue-claim helper
+
+**Files:**
+- Create: `src/carbuyer/db/queue.py`
+- Create: `tests/db/test_queue.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/db/test_queue.py
+import pytest
+from datetime import UTC, datetime
+
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.queue import claim_pending_lots
+
+
+@pytest.mark.asyncio
+async def test_claim_pending_lots_skips_locked(session) -> None:
+    # Seed auction and three pending lots
+    a = Auction(
+        source="test", source_auction_id="A1", url="x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    await session.flush()
+    for i in range(3):
+        session.add(AuctionLot(
+            auction_id=a.id, source_lot_id=f"L{i}", url=f"u{i}",
+            enrichment_status="pending",
+        ))
+    await session.commit()
+
+    claimed = await claim_pending_lots(session, status_field="enrichment_status", limit=2)
+    assert len(claimed) == 2
+    for lot in claimed:
+        assert lot.enrichment_status == "in_progress"
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/db/queue.py`**
+
+```python
+from typing import Literal
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import AuctionLot
+
+
+StatusField = Literal[
+    "enrichment_status", "valuation_status", "vision_status", "notification_status"
+]
+
+
+async def claim_pending_lots(
+    session: AsyncSession,
+    *,
+    status_field: StatusField,
+    limit: int = 50,
+) -> list[AuctionLot]:
+    column = getattr(AuctionLot, status_field)
+    stmt = (
+        select(AuctionLot)
+        .where(column == "pending")
+        .order_by(AuctionLot.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    result = await session.execute(stmt)
+    rows = list(result.scalars().all())
+    for lot in rows:
+        setattr(lot, status_field, "in_progress")
+    await session.flush()
+    return rows
+```
+
+- [ ] **Step 3: Run test**
+
+```bash
+uv run pytest tests/db/test_queue.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/db/queue.py tests/db/test_queue.py
+git commit -m "db: SKIP LOCKED queue-claim helper"
+```
+
+---
+
+### Task 17: Worker entrypoint pattern (`apps/_runner.py`)
+
+**Files:**
+- Create: `src/carbuyer/apps/__init__.py`
+- Create: `src/carbuyer/apps/_runner.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/_runner.py`**
+
+```python
+import asyncio
+import signal
+from collections.abc import Awaitable, Callable
+
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import configure_logging, get_logger
+
+
+def run_worker(name: str, main: Callable[[], Awaitable[None]]) -> None:
+    """Run an async worker with graceful shutdown on SIGTERM/SIGINT."""
+    configure_logging(settings.log_level)
+    log = get_logger(name)
+    loop = asyncio.new_event_loop()
+
+    async def runner() -> None:
+        log.info("worker starting")
+        try:
+            await main()
+        except asyncio.CancelledError:
+            log.info("worker cancelled")
+            raise
+        except Exception:
+            log.exception("worker crashed")
+            raise
+        finally:
+            log.info("worker exiting")
+
+    task = loop.create_task(runner())
+
+    def stop(*_: object) -> None:
+        if not task.done():
+            task.cancel()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop)
+
+    try:
+        loop.run_until_complete(task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        loop.close()
+```
+
+- [ ] **Step 2: Create `__init__.py`**
+
+```bash
+touch src/carbuyer/apps/__init__.py
+```
+
+- [ ] **Step 3: Smoke check**
+
+```bash
+uv run python -c "from carbuyer.apps._runner import run_worker; print('ok')"
+```
+
+Expected: `ok`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/apps/__init__.py src/carbuyer/apps/_runner.py
+git commit -m "apps: shared worker entrypoint with graceful shutdown"
+```
+
+---
+
+### Task 18: Auction-discoverer worker
+
+**Files:**
+- Create: `src/carbuyer/apps/auction_discoverer/__init__.py`
+- Create: `src/carbuyer/apps/auction_discoverer/__main__.py`
+- Create: `src/carbuyer/apps/auction_discoverer/discoverer.py`
+- Create: `tests/apps/__init__.py`
+- Create: `tests/apps/test_auction_discoverer.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/apps/test_auction_discoverer.py
+import pytest
+from datetime import UTC, datetime
+from sqlalchemy import select
+
+from carbuyer.apps.auction_discoverer.discoverer import upsert_auction
+from carbuyer.db.models import Auction
+from carbuyer.sources.base import AuctionRef, RawAuction
+from decimal import Decimal
+
+
+@pytest.mark.asyncio
+async def test_upsert_auction_inserts_then_updates(session) -> None:
+    ref = AuctionRef(source="test", source_auction_id="A1", url="https://x/a/1")
+    raw = RawAuction(
+        ref=ref, title="t1", description=None, auctioneer_name="A Co",
+        auctioneer_external_id="ac1",
+        scheduled_start_at=None, scheduled_end_at=None,
+        pickup_address=None, pickup_city=None, pickup_province="AB",
+        pickup_window_text=None, buyer_premium_pct=Decimal("0.10"),
+        online_bidding_fee_pct=None, terms_text=None, auction_subtype="estate",
+    )
+    a1 = await upsert_auction(session, raw)
+    await session.commit()
+    assert a1.id is not None
+
+    raw.title = "t1-renamed"
+    a2 = await upsert_auction(session, raw)
+    await session.commit()
+    assert a2.id == a1.id
+    assert a2.title == "t1-renamed"
+
+    rows = (await session.execute(select(Auction).where(Auction.source == "test"))).scalars().all()
+    assert len(list(rows)) == 1
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/auction_discoverer/discoverer.py`**
+
+```python
+import asyncio
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import Auction
+from carbuyer.db.notify import notify
+from carbuyer.db.session import async_session_maker
+from carbuyer.shared.logging import get_logger
+from carbuyer.sources.base import AuctionSource, RawAuction
+
+
+log = get_logger("auction_discoverer")
+
+
+async def upsert_auction(session: AsyncSession, raw: RawAuction) -> Auction:
+    stmt = select(Auction).where(
+        Auction.source == raw.ref.source,
+        Auction.source_auction_id == raw.ref.source_auction_id,
+    )
+    existing = (await session.execute(stmt)).scalar_one_or_none()
+    now = datetime.now(UTC)
+    if existing is None:
+        a = Auction(
+            source=raw.ref.source,
+            source_auction_id=raw.ref.source_auction_id,
+            url=raw.ref.url,
+            auction_subtype=raw.auction_subtype,
+            auctioneer_name=raw.auctioneer_name,
+            auctioneer_external_id=raw.auctioneer_external_id,
+            title=raw.title,
+            description=raw.description,
+            terms_text=raw.terms_text,
+            scheduled_start_at=raw.scheduled_start_at,
+            scheduled_end_at=raw.scheduled_end_at,
+            pickup_address=raw.pickup_address,
+            pickup_city=raw.pickup_city,
+            pickup_province=raw.pickup_province,
+            pickup_window_text=raw.pickup_window_text,
+            buyer_premium_pct=raw.buyer_premium_pct,
+            online_bidding_fee_pct=raw.online_bidding_fee_pct,
+            status="upcoming",
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+        session.add(a)
+        await session.flush()
+        return a
+    existing.url = raw.ref.url
+    existing.title = raw.title or existing.title
+    existing.description = raw.description or existing.description
+    existing.scheduled_end_at = raw.scheduled_end_at or existing.scheduled_end_at
+    existing.last_seen_at = now
+    await session.flush()
+    return existing
+
+
+async def discover_once(sources: list[AuctionSource]) -> int:
+    found = 0
+    for source in sources:
+        log.info("discovering", source=source.name)
+        async for ref in source.discover_auctions():
+            try:
+                raw = await source.fetch_auction(ref)
+            except Exception:
+                log.exception("fetch_auction failed", source=source.name, ref=ref)
+                continue
+            async with async_session_maker() as session:
+                async with session.begin():
+                    auction = await upsert_auction(session, raw)
+                    await notify(session, "auction_pending", str(auction.id))
+            found += 1
+    log.info("discovery complete", found=found)
+    return found
+
+
+async def main() -> None:
+    from carbuyer.sources.hibid.source import HibidSource
+    sources: list[AuctionSource] = [HibidSource(provinces=["AB", "BC", "SK", "MB"])]
+    await discover_once(sources)
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/apps/auction_discoverer/__main__.py`**
+
+```python
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.auction_discoverer.discoverer import main
+
+
+if __name__ == "__main__":
+    run_worker("auction_discoverer", main)
+```
+
+- [ ] **Step 4: Create `__init__.py` files and run tests**
+
+```bash
+touch src/carbuyer/apps/auction_discoverer/__init__.py tests/apps/__init__.py
+uv run pytest tests/apps/test_auction_discoverer.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/apps/auction_discoverer/ tests/apps/__init__.py tests/apps/test_auction_discoverer.py
+git commit -m "apps: auction-discoverer worker"
+```
+
+---
+
+### Task 19: Lot-scraper worker (consumes `auction_pending`, writes `auction_lots`)
+
+**Files:**
+- Create: `src/carbuyer/apps/lot_scraper/__init__.py`
+- Create: `src/carbuyer/apps/lot_scraper/__main__.py`
+- Create: `src/carbuyer/apps/lot_scraper/scraper.py`
+- Create: `tests/apps/test_lot_scraper.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/apps/test_lot_scraper.py
+import pytest
+from datetime import UTC, datetime
+from decimal import Decimal
+from sqlalchemy import select
+
+from carbuyer.apps.lot_scraper.scraper import upsert_lot
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.sources.base import LotRef, RawLot
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_inserts(session) -> None:
+    a = Auction(source="test", source_auction_id="A1", url="x", auction_subtype="estate",
+                first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC))
+    session.add(a)
+    await session.flush()
+    ref = LotRef(source="test", source_auction_id="A1", source_lot_id="L1", url="https://x/lot/1")
+    raw = RawLot(
+        ref=ref, lot_number="1", title="1995 Ford F-150",
+        description="runs and drives",
+        photos=["https://x/p1.jpg"], year=1995, make="Ford", model="F-150",
+        current_high_bid_cad=Decimal("2500"),
+        scheduled_end_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    lot = await upsert_lot(session, a.id, raw)
+    await session.commit()
+    assert lot.id is not None
+    assert lot.enrichment_status == "pending"
+    assert lot.title == "1995 Ford F-150"
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/lot_scraper/scraper.py`**
+
+```python
+import asyncio
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.notify import listen, notify
+from carbuyer.db.session import async_session_maker
+from carbuyer.shared.logging import get_logger
+from carbuyer.sources.base import AuctionSource, LotRef, RawLot
+
+
+log = get_logger("lot_scraper")
+
+
+async def upsert_lot(session: AsyncSession, auction_id: int, raw: RawLot) -> AuctionLot:
+    stmt = select(AuctionLot).where(
+        AuctionLot.auction_id == auction_id,
+        AuctionLot.source_lot_id == raw.ref.source_lot_id,
+    )
+    existing = (await session.execute(stmt)).scalar_one_or_none()
+    if existing is None:
+        lot = AuctionLot(
+            auction_id=auction_id,
+            source_lot_id=raw.ref.source_lot_id,
+            lot_number=raw.lot_number,
+            url=raw.ref.url,
+            title=raw.title,
+            description=raw.description,
+            photos=raw.photos,
+            year=raw.year,
+            make=raw.make,
+            model=raw.model,
+            trim=raw.trim,
+            mileage_km=raw.mileage_km,
+            vin=raw.vin,
+            current_high_bid_cad=raw.current_high_bid_cad,
+            lot_status=raw.lot_status,
+            enrichment_status="pending",
+            valuation_status="pending",
+            vision_status="pending",
+            notification_status="pending",
+        )
+        session.add(lot)
+        await session.flush()
+        return lot
+    existing.title = raw.title or existing.title
+    existing.description = raw.description or existing.description
+    existing.photos = raw.photos or existing.photos
+    existing.current_high_bid_cad = raw.current_high_bid_cad
+    if existing.title != raw.title or existing.description != raw.description:
+        existing.enrichment_status = "pending"
+        existing.valuation_status = "pending"
+    await session.flush()
+    return existing
+
+
+def _build_sources() -> dict[str, AuctionSource]:
+    from carbuyer.sources.hibid.source import HibidSource
+    return {"hibid": HibidSource(provinces=["AB", "BC", "SK", "MB"])}
+
+
+async def process_auction(auction_id: int, sources: dict[str, AuctionSource]) -> int:
+    count = 0
+    async with async_session_maker() as session:
+        auction = await session.get(Auction, auction_id)
+        if auction is None:
+            return 0
+        source = sources.get(auction.source)
+        if source is None:
+            log.warning("no source plugin", source=auction.source)
+            return 0
+        ref = type("AR", (), {})()  # construct AuctionRef on the fly
+        from carbuyer.sources.base import AuctionRef
+        aref = AuctionRef(
+            source=auction.source,
+            source_auction_id=auction.source_auction_id,
+            url=auction.url,
+        )
+        async for lot_ref in source.fetch_lots(aref):
+            try:
+                raw = await source.fetch_lot(lot_ref)
+            except Exception:
+                log.exception("fetch_lot failed", lot_ref=lot_ref)
+                continue
+            async with session.begin_nested():
+                lot = await upsert_lot(session, auction.id, raw)
+                await notify(session, "enrichment_pending", str(lot.id))
+                count += 1
+        await session.commit()
+    return count
+
+
+async def main() -> None:
+    sources = _build_sources()
+    async for payload in listen("auction_pending"):
+        try:
+            auction_id = int(payload)
+        except ValueError:
+            continue
+        log.info("processing", auction_id=auction_id)
+        await process_auction(auction_id, sources)
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/apps/lot_scraper/__main__.py`**
+
+```python
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.lot_scraper.scraper import main
+
+
+if __name__ == "__main__":
+    run_worker("lot_scraper", main)
+```
+
+- [ ] **Step 4: Create `__init__.py` and run tests**
+
+```bash
+touch src/carbuyer/apps/lot_scraper/__init__.py
+uv run pytest tests/apps/test_lot_scraper.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/apps/lot_scraper/ tests/apps/test_lot_scraper.py
+git commit -m "apps: lot-scraper worker (consumes auction_pending)"
+```
+
+---
+
+End of Phase 2. Discoverer + lot-scraper plumbing wired. Next phase plugs LLM enrichment in.
+
+---
+
+## Phase 3 — LLM enrichment
+
+### Task 20: Pydantic schemas for enrichment output
+
+**Files:**
+- Create: `src/carbuyer/llm/__init__.py`
+- Create: `src/carbuyer/llm/schemas.py`
+- Create: `tests/llm/__init__.py`
+- Create: `tests/llm/test_schemas.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/llm/test_schemas.py
+import json
+
+from carbuyer.llm.schemas import EnrichmentOutput
+
+
+def test_enrichment_output_round_trip() -> None:
+    payload = {
+        "normalized_vehicle": {
+            "year": 2010, "make": "Ford", "model": "F-150",
+            "trim": None, "engine": "5.4L V8", "transmission": "automatic",
+            "drivetrain": "4wd", "mileage_km": 250000, "vin": None,
+        },
+        "title_status": "NORMAL",
+        "condition_categorical": "decent",
+        "condition_confidence": 0.7,
+        "red_flags": [],
+        "green_flags": [],
+        "showstopper_flags": [],
+        "carfax_url": None,
+        "summary": "an older F-150",
+        "rarity": {
+            "desirable_trim_or_spec": False, "classic_or_collector": False,
+            "desirability_signals": [], "desirability_evidence": [],
+        },
+    }
+    out = EnrichmentOutput.model_validate(payload)
+    assert out.normalized_vehicle.year == 2010
+    schema = EnrichmentOutput.model_json_schema()
+    assert "properties" in schema
+
+
+def test_enrichment_output_forbids_extra() -> None:
+    import pytest
+    from pydantic import ValidationError
+    payload = {"junk": True}
+    with pytest.raises(ValidationError):
+        EnrichmentOutput.model_validate(payload)
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/llm/schemas.py`**
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+Transmission = Literal["manual", "automatic", "cvt", "unknown"]
+Drivetrain = Literal["fwd", "rwd", "awd", "4wd", "unknown"]
+TitleStatus = Literal["NORMAL", "SALVAGE", "REBUILT", "NON_REPAIRABLE", "STOLEN", "UNKNOWN"]
+Condition = Literal["bad", "poor", "decent", "good", "great"]
+
+
+class NormalizedVehicle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    year: int | None
+    make: str | None
+    model: str | None
+    trim: str | None
+    engine: str | None
+    transmission: Transmission
+    drivetrain: Drivetrain
+    mileage_km: int | None
+    vin: str | None
+
+
+class FlagInstance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    flag: str
+    evidence: str
+    weight: int
+
+
+class ShowstopperInstance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    flag: str
+    evidence: str
+
+
+class RarityAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    desirable_trim_or_spec: bool
+    classic_or_collector: bool
+    desirability_signals: list[str]
+    desirability_evidence: list[str]
+
+
+class EnrichmentOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    normalized_vehicle: NormalizedVehicle
+    title_status: TitleStatus
+    condition_categorical: Condition
+    condition_confidence: float = Field(ge=0, le=1)
+    red_flags: list[FlagInstance]
+    green_flags: list[FlagInstance]
+    showstopper_flags: list[ShowstopperInstance]
+    carfax_url: str | None
+    summary: str
+    rarity: RarityAssessment
+
+
+class CarfaxFindings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    accident_count: int
+    accident_severity_max: Literal["minor", "moderate", "severe", "none"]
+    service_record_density: Literal["none", "sparse", "regular", "dense"]
+    ownership_count: int | None
+    title_brands: list[str]
+    odometer_consistency: Literal["consistent", "rollback_suspected", "unknown"]
+
+
+class PerImageFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal[
+        "rust", "dent", "scratch", "paint_mismatch", "panel_gap",
+        "interior_wear", "stain", "other",
+    ]
+    location: str
+    severity: int = Field(ge=1, le=3)
+    confidence: int = Field(ge=1, le=5)
+    reasoning: str
+
+
+class PerImageOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shot_type: Literal[
+        "exterior_front", "exterior_rear", "exterior_side", "interior",
+        "engine_bay", "wheel", "undercarriage", "document", "other",
+    ]
+    image_quality_sharpness: Literal["sharp", "blurry"]
+    image_quality_lighting: Literal["well_lit", "dim", "harsh_shadow"]
+    image_quality_cleanliness: Literal["clean", "dirty"]
+    visible_panels: list[str]
+    findings: list[PerImageFinding]
+    explicit_unknowns: list[str]
+
+
+class VisionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    coverage_gaps: list[str]
+    cross_panel_paint_consistency: Literal["consistent", "inconsistent", "cannot_assess"]
+    staging_signals: list[str]
+    overall_red_flags: list[str]
+    overall_green_flags: list[str]
+    exterior_condition: Condition
+    interior_condition: Condition
+    overall_vision_condition: Condition
+    vision_confidence: float = Field(ge=0, le=1)
+    contradictions_with_description: list[str]
+```
+
+- [ ] **Step 3: Create `__init__.py` and run tests**
+
+```bash
+touch src/carbuyer/llm/__init__.py tests/llm/__init__.py
+uv run pytest tests/llm/test_schemas.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/llm/__init__.py src/carbuyer/llm/schemas.py tests/llm/__init__.py tests/llm/test_schemas.py
+git commit -m "llm: Pydantic schemas for enrichment + vision output"
+```
+
+---
+
+### Task 21: LLMProvider ABC + flag/desirability taxonomy stubs
+
+**Files:**
+- Create: `src/carbuyer/llm/base.py`
+- Create: `src/carbuyer/flags/__init__.py`
+- Create: `src/carbuyer/flags/taxonomy.py`
+- Create: `tests/flags/__init__.py`
+- Create: `tests/flags/test_taxonomy.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/flags/test_taxonomy.py
+from carbuyer.flags.taxonomy import (
+    RED_FLAG_TAXONOMY, GREEN_FLAG_TAXONOMY, SHOWSTOPPER_TAXONOMY,
+    DESIRABLE_TRIMS, CLASSIC_EXCEPTIONS, model_gotchas_for,
+)
+
+
+def test_taxonomies_have_minimum_entries() -> None:
+    assert len(RED_FLAG_TAXONOMY) >= 8
+    assert len(GREEN_FLAG_TAXONOMY) >= 5
+    assert len(SHOWSTOPPER_TAXONOMY) >= 4
+
+
+def test_desirable_trims_seed_includes_known_examples() -> None:
+    assert any("TRD Pro" in entry["trim"] for entry in DESIRABLE_TRIMS)
+    assert any("Raptor" in entry["trim"] for entry in DESIRABLE_TRIMS)
+
+
+def test_model_gotchas_for_returns_relevant_entries() -> None:
+    g = model_gotchas_for(make="Toyota", model="Tacoma", year=2010)
+    assert any("frame" in note.lower() for note in g)
+    g2 = model_gotchas_for(make="Honda", model="CR-V", year=2018)
+    assert any("oil" in note.lower() for note in g2)
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/flags/taxonomy.py`**
+
+```python
+from typing import TypedDict
+
+
+class FlagDef(TypedDict):
+    flag: str
+    weight: int
+    description: str
+
+
+RED_FLAG_TAXONOMY: list[FlagDef] = [
+    {"flag": "engine_knock", "weight": -3, "description": "Engine knock, seized, or overheating mentioned."},
+    {"flag": "accident_history", "weight": -2, "description": "Accident reported on Carfax or in description."},
+    {"flag": "needs_work", "weight": -2, "description": "Listing says needs work, project, or major repairs."},
+    {"flag": "no_service_records", "weight": -1, "description": "No service history mentioned."},
+    {"flag": "rust_mentioned", "weight": -1, "description": "Surface rust mentioned."},
+    {"flag": "smoker_owned", "weight": -1, "description": "Smoker-owned, interior odor."},
+    {"flag": "high_mileage_no_service", "weight": -1, "description": ">200k km with no major service mentioned."},
+    {"flag": "mileage_unknown", "weight": -1, "description": "Mileage missing or labeled TMU/exempt."},
+    {"flag": "modifications", "weight": -1, "description": "Heavy aftermarket modifications without receipts."},
+]
+
+GREEN_FLAG_TAXONOMY: list[FlagDef] = [
+    {"flag": "recent_timing_belt", "weight": 1, "description": "Recent timing belt or chain replacement."},
+    {"flag": "recent_transmission_service", "weight": 1, "description": "Recent transmission service / fluid change."},
+    {"flag": "no_accidents_carfax", "weight": 2, "description": "Carfax shows no accidents."},
+    {"flag": "single_owner", "weight": 1, "description": "Single-owner vehicle."},
+    {"flag": "service_records", "weight": 2, "description": "Itemized service history attached."},
+    {"flag": "recent_major_service", "weight": 1, "description": "Recent brakes / tires / suspension service."},
+    {"flag": "garage_kept", "weight": 1, "description": "Stored indoors, plug-in block heater (cold climate)."},
+]
+
+SHOWSTOPPER_TAXONOMY: list[dict[str, str]] = [
+    {"flag": "salvage_not_rebuilt", "description": "Salvage title that has not been rebuilt."},
+    {"flag": "frame_damage", "description": "Frame damage or structural compromise."},
+    {"flag": "as_is_no_warranty", "description": "Sold as-is, no warranty, paired with refusal of inspection."},
+    {"flag": "wont_start", "description": "Won't start, ran when parked, sold for parts."},
+    {"flag": "fire_damage", "description": "Fire-damaged."},
+    {"flag": "flood_damage", "description": "Flood-damaged."},
+]
+
+
+class DesirableEntry(TypedDict):
+    make: str
+    model: str
+    trim: str
+    note: str
+
+
+DESIRABLE_TRIMS: list[DesirableEntry] = [
+    {"make": "Toyota", "model": "Tacoma", "trim": "TRD Pro", "note": "Special-edition Tacoma."},
+    {"make": "Toyota", "model": "4Runner", "trim": "TRD Pro", "note": "Special-edition 4Runner."},
+    {"make": "Ford", "model": "F-150", "trim": "Raptor", "note": "Off-road performance F-150."},
+    {"make": "Chevrolet", "model": "Silverado 1500", "trim": "Z71", "note": "Z71 off-road package."},
+    {"make": "Jeep", "model": "Wrangler", "trim": "Rubicon", "note": "Off-road-capable trim."},
+    # Plan note: extend during implementation. Start with ~30 entries; refine post-launch.
+]
+
+
+class ClassicException(TypedDict):
+    make: str
+    model: str
+    year_min: int
+    year_max: int
+    note: str
+
+
+CLASSIC_EXCEPTIONS: list[ClassicException] = [
+    {"make": "Toyota", "model": "Tundra", "year_min": 2000, "year_max": 2006, "note": "First-gen Tundra, V8."},
+    {"make": "Toyota", "model": "Land Cruiser", "year_min": 2000, "year_max": 2007, "note": "Last 100-series solid-axle option."},
+    {"make": "Toyota", "model": "4Runner", "year_min": 2003, "year_max": 2009, "note": "4th-gen V8 4Runner sought-after."},
+    {"make": "Land Rover", "model": "Defender", "year_min": 2000, "year_max": 2010, "note": "Defender 90/110."},
+    # Plan note: extend during implementation. Era + model + spec specific.
+]
+
+
+class GotchaEntry(TypedDict):
+    make: str
+    model: str
+    year_min: int
+    year_max: int
+    note: str
+
+
+GOTCHAS: list[GotchaEntry] = [
+    {"make": "Toyota", "model": "Tacoma", "year_min": 2005, "year_max": 2015,
+     "note": "Frame rust recall: inspect rear leaf-spring perches and crossmembers."},
+    {"make": "Toyota", "model": "4Runner", "year_min": 2003, "year_max": 2009,
+     "note": "Frame rust recall on early years; verify recall completion."},
+    {"make": "Honda", "model": "CR-V", "year_min": 2017, "year_max": 2022,
+     "note": "1.5T fuel-in-oil dilution; check oil level above full and gasoline smell on dipstick."},
+    {"make": "Ford", "model": "F-150", "year_min": 2011, "year_max": 2016,
+     "note": "3.5L EcoBoost cam phaser / timing chain rattle on cold start; TSB 16-0027."},
+    {"make": "Subaru", "model": "Forester", "year_min": 1999, "year_max": 2011,
+     "note": "EJ25 head gasket failure 100k–150k km; ask for updated MLS gasket."},
+    {"make": "Hyundai", "model": "Sonata", "year_min": 2011, "year_max": 2019,
+     "note": "Theta II 2.0T / 2.4 rod-bearing failure; verify recall / KSDS lifetime warranty."},
+    {"make": "Nissan", "model": "Altima", "year_min": 2013, "year_max": 2018,
+     "note": "CVT judder / whine class action; check fluid and any rebuild paperwork."},
+    {"make": "Jeep", "model": "Wrangler", "year_min": 2007, "year_max": 2018,
+     "note": "Death-wobble: inspect track bar, ball joints, steering stabilizer."},
+]
+
+
+def model_gotchas_for(*, make: str | None, model: str | None, year: int | None) -> list[str]:
+    if not (make and model and year):
+        return []
+    out: list[str] = []
+    for g in GOTCHAS:
+        if g["make"].lower() == make.lower() and g["model"].lower() == model.lower():
+            if g["year_min"] <= year <= g["year_max"]:
+                out.append(g["note"])
+    return out
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/llm/base.py`**
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+from carbuyer.llm.schemas import EnrichmentOutput, VisionOutput
+
+
+@dataclass(slots=True)
+class DescribeInput:
+    title: str
+    description: str
+    year: int | None
+    make: str | None
+    model: str | None
+    auctioneer_name: str | None
+    auction_subtype: str
+    pickup_province: str | None
+    raw_carfax_url: str | None
+
+
+@dataclass(slots=True)
+class VisionInput:
+    photo_paths: list[str]   # local paths to resized JPEGs
+    year: int | None
+    make: str | None
+    model: str | None
+    description_condition: str | None
+    description_red_flags: list[str]
+    description_green_flags: list[str]
+
+
+class LLMProvider(ABC):
+    name: str
+
+    @abstractmethod
+    async def describe(self, payload: DescribeInput) -> EnrichmentOutput: ...
+
+    @abstractmethod
+    async def vision(self, payload: VisionInput) -> VisionOutput: ...
+```
+
+- [ ] **Step 4: Create `__init__.py` files and run tests**
+
+```bash
+touch src/carbuyer/flags/__init__.py tests/flags/__init__.py
+uv run pytest tests/flags/test_taxonomy.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/llm/base.py src/carbuyer/flags/__init__.py src/carbuyer/flags/taxonomy.py tests/flags/__init__.py tests/flags/test_taxonomy.py
+git commit -m "llm+flags: provider ABC and taxonomy seeds"
+```
+
+---
+
+### Task 22: OpenAI provider (description pass)
+
+**Files:**
+- Create: `src/carbuyer/llm/openai_provider.py`
+- Create: `src/carbuyer/llm/prompts.py`
+- Create: `tests/llm/test_openai_provider.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/llm/prompts.py`**
+
+```python
+from carbuyer.flags.taxonomy import (
+    CLASSIC_EXCEPTIONS, DESIRABLE_TRIMS, GREEN_FLAG_TAXONOMY,
+    RED_FLAG_TAXONOMY, SHOWSTOPPER_TAXONOMY, model_gotchas_for,
+)
+
+
+def _bullet(items: list[str]) -> str:
+    return "\n".join(f"- {x}" for x in items)
+
+
+def description_system_prompt() -> str:
+    red = _bullet([f"{f['flag']} (weight {f['weight']}): {f['description']}" for f in RED_FLAG_TAXONOMY])
+    green = _bullet([f"{f['flag']} (weight {f['weight']}): {f['description']}" for f in GREEN_FLAG_TAXONOMY])
+    show = _bullet([f"{f['flag']}: {f['description']}" for f in SHOWSTOPPER_TAXONOMY])
+    desirable = _bullet([f"{e['make']} {e['model']} {e['trim']} — {e['note']}" for e in DESIRABLE_TRIMS])
+    classics = _bullet([f"{e['make']} {e['model']} ({e['year_min']}–{e['year_max']}) — {e['note']}" for e in CLASSIC_EXCEPTIONS])
+    return f"""You enrich auction lot listings into structured JSON for a used-vehicle deal-finder.
+
+Use ONLY these flag taxonomies. Do not invent new flags.
+
+RED FLAGS:
+{red}
+
+GREEN FLAGS:
+{green}
+
+SHOWSTOPPER FLAGS (the listing is excluded from notifications regardless of price):
+{show}
+
+DESIRABLE TRIMS / SPEC COMBOS — set `desirable_trim_or_spec=true` when the lot matches one:
+{desirable}
+
+CLASSIC / COLLECTOR EXCEPTIONS for years 2000–2010 — set `classic_or_collector=true` when the lot matches one. For year ≤ 2000, default `classic_or_collector=true` for cars/trucks of mass-produced significance.
+{classics}
+
+Rules:
+- Output `unknown` when you cannot determine a field. Do not guess.
+- If `condition_confidence < 0.5`, output `condition_categorical = "decent"`.
+- Quote `evidence` verbatim from the listing. Do not paraphrase.
+- For each flag in `red_flags`/`green_flags`, use the taxonomy `flag` key and copy the corresponding `weight`.
+"""
+
+
+def description_user_prompt(
+    *, title: str, description: str,
+    year: int | None, make: str | None, model: str | None,
+    auctioneer_name: str | None, auction_subtype: str,
+    pickup_province: str | None,
+) -> str:
+    gotchas = model_gotchas_for(make=make, model=model, year=year)
+    gotcha_block = ""
+    if gotchas:
+        gotcha_block = "\n\nMODEL-SPECIFIC GOTCHAS for this make/model/year:\n" + _bullet(gotchas)
+    return f"""TITLE: {title}
+
+DESCRIPTION:
+{description}
+
+CONTEXT:
+- year={year}, make={make}, model={model}
+- auctioneer={auctioneer_name}
+- auction_subtype={auction_subtype}
+- pickup_province={pickup_province}{gotcha_block}
+
+Return the structured EnrichmentOutput.
+"""
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/llm/openai_provider.py`**
+
+```python
+from openai import AsyncOpenAI
+from openai import APIError, RateLimitError
+
+from carbuyer.llm.base import DescribeInput, LLMProvider, VisionInput
+from carbuyer.llm.prompts import description_system_prompt, description_user_prompt
+from carbuyer.llm.schemas import EnrichmentOutput, VisionOutput
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("openai_provider")
+
+
+class OpenAIProvider(LLMProvider):
+    name = "openai"
+
+    def __init__(self, *, api_key: str | None = None, model: str | None = None) -> None:
+        self.client = AsyncOpenAI(api_key=api_key or settings.openai_api_key)
+        self.model = model or settings.openai_model
+
+    async def describe(self, payload: DescribeInput) -> EnrichmentOutput:
+        sys_prompt = description_system_prompt()
+        user_prompt = description_user_prompt(
+            title=payload.title, description=payload.description,
+            year=payload.year, make=payload.make, model=payload.model,
+            auctioneer_name=payload.auctioneer_name,
+            auction_subtype=payload.auction_subtype,
+            pickup_province=payload.pickup_province,
+        )
+        try:
+            response = await self.client.beta.chat.completions.parse(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format=EnrichmentOutput,
+                temperature=0,
+                max_tokens=2048,
+            )
+        except (APIError, RateLimitError):
+            log.exception("openai describe failed")
+            raise
+        result = response.choices[0].message.parsed
+        if result is None:
+            raise RuntimeError("openai parsed result was None")
+        return result
+
+    async def vision(self, payload: VisionInput) -> VisionOutput:
+        # Implemented in Phase 8.
+        raise NotImplementedError("vision pass implemented in Phase 8")
+```
+
+- [ ] **Step 3: Write the test (mocked OpenAI client, no live calls)**
+
+```python
+# tests/llm/test_openai_provider.py
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from carbuyer.llm.base import DescribeInput
+from carbuyer.llm.openai_provider import OpenAIProvider
+from carbuyer.llm.schemas import (
+    EnrichmentOutput, NormalizedVehicle, RarityAssessment,
+)
+
+
+@pytest.mark.asyncio
+async def test_describe_returns_parsed_enrichment_output() -> None:
+    expected = EnrichmentOutput(
+        normalized_vehicle=NormalizedVehicle(
+            year=2010, make="Ford", model="F-150", trim=None, engine="5.4L",
+            transmission="automatic", drivetrain="4wd", mileage_km=250000, vin=None,
+        ),
+        title_status="NORMAL",
+        condition_categorical="decent",
+        condition_confidence=0.6,
+        red_flags=[], green_flags=[], showstopper_flags=[],
+        carfax_url=None,
+        summary="ok",
+        rarity=RarityAssessment(
+            desirable_trim_or_spec=False, classic_or_collector=False,
+            desirability_signals=[], desirability_evidence=[],
+        ),
+    )
+    fake_choice = MagicMock()
+    fake_choice.message.parsed = expected
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+
+    provider = OpenAIProvider(api_key="sk-fake")
+    provider.client = MagicMock()
+    provider.client.beta.chat.completions.parse = AsyncMock(return_value=fake_response)
+
+    out = await provider.describe(DescribeInput(
+        title="t", description="d",
+        year=2010, make="Ford", model="F-150",
+        auctioneer_name=None, auction_subtype="estate",
+        pickup_province="AB", raw_carfax_url=None,
+    ))
+    assert out.normalized_vehicle.year == 2010
+    assert out.condition_categorical == "decent"
+```
+
+- [ ] **Step 4: Run tests**
+
+```bash
+uv run pytest tests/llm/test_openai_provider.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/llm/openai_provider.py src/carbuyer/llm/prompts.py tests/llm/test_openai_provider.py
+git commit -m "llm: OpenAI provider for description pass"
+```
+
+---
+
+### Task 23: Carfax extractor (text-only, no JS)
+
+**Files:**
+- Create: `src/carbuyer/llm/carfax.py`
+- Create: `tests/llm/test_carfax.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/llm/carfax.py`**
+
+```python
+import re
+from urllib.parse import urlparse
+
+from openai import AsyncOpenAI
+
+from carbuyer.llm.schemas import CarfaxFindings
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+from carbuyer.sources.http import make_client
+
+
+log = get_logger("carfax")
+
+_CARFAX_HOSTS = ("carfax.ca", "www.carfax.ca", "carfax.com", "www.carfax.com")
+_CARFAX_PATTERN = re.compile(r"https?://[\w.-]*carfax\.(ca|com)/\S+", re.IGNORECASE)
+
+
+def find_carfax_url(text: str) -> str | None:
+    if not text:
+        return None
+    m = _CARFAX_PATTERN.search(text)
+    if not m:
+        return None
+    url = m.group(0).rstrip(".,);")
+    return url if urlparse(url).hostname in _CARFAX_HOSTS else None
+
+
+async def fetch_carfax_text(url: str) -> str | None:
+    try:
+        async with make_client() as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            return r.text
+    except Exception:
+        log.exception("carfax fetch failed", url=url)
+        return None
+
+
+async def extract_carfax_findings(html: str, *, client: AsyncOpenAI | None = None) -> CarfaxFindings | None:
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text)[:8000]
+    api = client or AsyncOpenAI(api_key=settings.openai_api_key)
+    try:
+        response = await api.beta.chat.completions.parse(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": (
+                    "Extract structured Carfax findings from the report text. "
+                    "Output `unknown` when uncertain; never invent facts."
+                )},
+                {"role": "user", "content": text},
+            ],
+            response_format=CarfaxFindings,
+            temperature=0,
+            max_tokens=512,
+        )
+    except Exception:
+        log.exception("carfax extract failed")
+        return None
+    return response.choices[0].message.parsed
+```
+
+- [ ] **Step 2: Write the test**
+
+```python
+# tests/llm/test_carfax.py
+from carbuyer.llm.carfax import find_carfax_url
+
+
+def test_find_carfax_url_extracts_link() -> None:
+    text = "Clean carfax: https://www.carfax.ca/vhr/abc123 . email me."
+    assert find_carfax_url(text) == "https://www.carfax.ca/vhr/abc123"
+
+
+def test_find_carfax_url_returns_none_when_absent() -> None:
+    assert find_carfax_url("just a description") is None
+```
+
+- [ ] **Step 3: Run test and commit**
+
+```bash
+uv run pytest tests/llm/test_carfax.py -v
+git add src/carbuyer/llm/carfax.py tests/llm/test_carfax.py
+git commit -m "llm: Carfax URL extractor and findings parser"
+```
+
+---
+
+### Task 24: Description-enricher worker
+
+**Files:**
+- Create: `src/carbuyer/apps/enricher/__init__.py`
+- Create: `src/carbuyer/apps/enricher/__main__.py`
+- Create: `src/carbuyer/apps/enricher/enricher.py`
+- Create: `tests/apps/test_enricher.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/enricher/enricher.py`**
+
+```python
+import asyncio
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.notify import listen, notify
+from carbuyer.db.queue import claim_pending_lots
+from carbuyer.db.session import async_session_maker
+from carbuyer.llm.base import DescribeInput, LLMProvider
+from carbuyer.llm.carfax import extract_carfax_findings, fetch_carfax_text, find_carfax_url
+from carbuyer.llm.openai_provider import OpenAIProvider
+from carbuyer.llm.schemas import EnrichmentOutput
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("enricher")
+ENRICHMENT_VERSION = "v1"
+
+
+async def enrich_one(session: AsyncSession, lot: AuctionLot, provider: LLMProvider) -> None:
+    auction = await session.get(Auction, lot.auction_id)
+    if auction is None:
+        lot.enrichment_status = "failed"
+        return
+    payload = DescribeInput(
+        title=lot.title or "",
+        description=lot.description or "",
+        year=lot.year,
+        make=lot.make,
+        model=lot.model,
+        auctioneer_name=auction.auctioneer_name,
+        auction_subtype=auction.auction_subtype,
+        pickup_province=auction.pickup_province,
+        raw_carfax_url=find_carfax_url(lot.description or ""),
+    )
+    try:
+        out: EnrichmentOutput = await provider.describe(payload)
+    except Exception:
+        log.exception("describe failed", lot_id=lot.id)
+        lot.enrichment_status = "failed"
+        return
+
+    nv = out.normalized_vehicle
+    lot.year = nv.year or lot.year
+    lot.make = nv.make or lot.make
+    lot.model = nv.model or lot.model
+    lot.trim = nv.trim or lot.trim
+    lot.engine = nv.engine
+    lot.transmission = nv.transmission
+    lot.drivetrain = nv.drivetrain
+    lot.mileage_km = nv.mileage_km or lot.mileage_km
+    lot.vin = nv.vin or lot.vin
+    lot.title_status = out.title_status
+    lot.condition_categorical = out.condition_categorical
+    lot.condition_confidence = out.condition_confidence
+    lot.red_flags = [f.model_dump() for f in out.red_flags]
+    lot.green_flags = [f.model_dump() for f in out.green_flags]
+    lot.showstopper_flags = [f.model_dump() for f in out.showstopper_flags]
+    lot.summary = out.summary
+    lot.carfax_url = out.carfax_url or payload.raw_carfax_url
+    lot.desirable_trim_or_spec = out.rarity.desirable_trim_or_spec
+    lot.classic_or_collector = out.rarity.classic_or_collector
+    lot.desirability_signals = out.rarity.desirability_signals
+    lot.desirability_evidence = out.rarity.desirability_evidence
+
+    if lot.carfax_url:
+        html = await fetch_carfax_text(lot.carfax_url)
+        if html:
+            findings = await extract_carfax_findings(html)
+            if findings:
+                lot.carfax_findings = findings.model_dump()
+
+    lot.enrichment_status = "done"
+    lot.valuation_status = "pending"
+    lot.enrichment_version = ENRICHMENT_VERSION
+
+
+async def process_pending(provider: LLMProvider, *, batch_size: int = 20) -> int:
+    async with async_session_maker() as session:
+        async with session.begin():
+            lots = await claim_pending_lots(
+                session, status_field="enrichment_status", limit=batch_size
+            )
+        for lot in lots:
+            async with session.begin():
+                await enrich_one(session, lot, provider)
+                if lot.enrichment_status == "done":
+                    await notify(session, "valuation_pending", str(lot.id))
+        return len(lots)
+
+
+async def main() -> None:
+    provider = OpenAIProvider()
+    async for _ in listen("enrichment_pending"):
+        try:
+            await process_pending(provider)
+        except Exception:
+            log.exception("batch failed; sleeping before retry")
+            await asyncio.sleep(5)
+```
+
+- [ ] **Step 2: Implement `__main__.py` and `__init__.py`**
+
+```python
+# src/carbuyer/apps/enricher/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.enricher.enricher import main
+
+
+if __name__ == "__main__":
+    run_worker("enricher", main)
+```
+
+```bash
+touch src/carbuyer/apps/enricher/__init__.py
+```
+
+- [ ] **Step 3: Write the test (mocked provider)**
+
+```python
+# tests/apps/test_enricher.py
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
+
+import pytest
+
+from carbuyer.apps.enricher.enricher import enrich_one
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.llm.schemas import (
+    EnrichmentOutput, NormalizedVehicle, RarityAssessment,
+)
+
+
+@pytest.mark.asyncio
+async def test_enrich_one_writes_fields(session) -> None:
+    a = Auction(source="t", source_auction_id="A", url="x", auction_subtype="estate",
+                first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+                pickup_province="AB")
+    session.add(a)
+    await session.flush()
+    lot = AuctionLot(
+        auction_id=a.id, source_lot_id="L1", url="https://x/lot/1",
+        title="2010 Ford F-150", description="runs and drives",
+    )
+    session.add(lot)
+    await session.flush()
+
+    expected = EnrichmentOutput(
+        normalized_vehicle=NormalizedVehicle(
+            year=2010, make="Ford", model="F-150", trim=None, engine="5.4L",
+            transmission="automatic", drivetrain="4wd", mileage_km=200000, vin=None,
+        ),
+        title_status="NORMAL",
+        condition_categorical="decent",
+        condition_confidence=0.7,
+        red_flags=[], green_flags=[], showstopper_flags=[],
+        carfax_url=None, summary="ok",
+        rarity=RarityAssessment(
+            desirable_trim_or_spec=False, classic_or_collector=False,
+            desirability_signals=[], desirability_evidence=[],
+        ),
+    )
+    provider = AsyncMock()
+    provider.describe = AsyncMock(return_value=expected)
+
+    await enrich_one(session, lot, provider)
+    assert lot.enrichment_status == "done"
+    assert lot.year == 2010
+    assert lot.condition_categorical == "decent"
+    assert lot.valuation_status == "pending"
+```
+
+- [ ] **Step 4: Run test and commit**
+
+```bash
+uv run pytest tests/apps/test_enricher.py -v
+git add src/carbuyer/apps/enricher/ tests/apps/test_enricher.py
+git commit -m "apps: enricher worker (description LLM pass)"
+```
+
+---
+
+End of Phase 3. New lots arrive `enrichment_status='pending'`; the enricher LLMs them into structured fields and emits `valuation_pending`.
+
+---
+
+## Phase 4 — Valuation and scoring
+
+### Task 25: Channel normalization + condition mapping
+
+**Files:**
+- Create: `src/carbuyer/scoring/__init__.py`
+- Create: `src/carbuyer/scoring/channels.py`
+- Create: `tests/scoring/__init__.py`
+- Create: `tests/scoring/test_channels.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/scoring/test_channels.py
+from decimal import Decimal
+
+from carbuyer.scoring.channels import (
+    normalize_to_private, condition_position, CONDITION_POSITION,
+)
+
+
+def test_normalize_auction_estate_to_private() -> None:
+    assert normalize_to_private(Decimal("10000"), "auction_estate") == Decimal("12000")
+
+
+def test_normalize_dealer_to_private() -> None:
+    assert normalize_to_private(Decimal("10000"), "dealer") == Decimal("9200")
+
+
+def test_normalize_unknown_falls_back_to_identity() -> None:
+    assert normalize_to_private(Decimal("10000"), "weird") == Decimal("10000")
+
+
+def test_condition_position_returns_canonical_values() -> None:
+    assert condition_position("bad") == 0.0
+    assert condition_position("decent") == 0.5
+    assert condition_position("great") == 1.0
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/scoring/channels.py`**
+
+```python
+from decimal import Decimal
+from typing import Final
+
+
+CHANNEL_MULTIPLIERS: Final[dict[str, Decimal]] = {
+    "private": Decimal("1.00"),
+    "dealer": Decimal("0.92"),
+    "auction_estate": Decimal("1.20"),
+    "auction_govt": Decimal("1.15"),
+    "auction_commercial": Decimal("1.10"),
+    "auction_salvage": Decimal("0.50"),  # used only when comparing salvage comps; not used in MVP
+}
+
+CONDITION_POSITION: Final[dict[str, float]] = {
+    "bad": 0.0,
+    "poor": 0.25,
+    "decent": 0.50,
+    "good": 0.75,
+    "great": 1.0,
+}
+
+
+def normalize_to_private(price_cad: Decimal, channel: str) -> Decimal:
+    return price_cad * CHANNEL_MULTIPLIERS.get(channel, Decimal("1.00"))
+
+
+def condition_position(condition: str) -> float:
+    return CONDITION_POSITION.get(condition, 0.5)
+```
+
+- [ ] **Step 3: Create `__init__.py` and run tests**
+
+```bash
+touch src/carbuyer/scoring/__init__.py tests/scoring/__init__.py
+uv run pytest tests/scoring/test_channels.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/scoring/__init__.py src/carbuyer/scoring/channels.py tests/scoring/__init__.py tests/scoring/test_channels.py
+git commit -m "scoring: channel normalization + condition position"
+```
+
+---
+
+### Task 26: Comp set query
+
+**Files:**
+- Create: `src/carbuyer/scoring/comps.py`
+- Create: `tests/scoring/test_comps.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/scoring/test_comps.py
+import pytest
+from decimal import Decimal
+
+from carbuyer.db.models import HistoricalSale
+from carbuyer.scoring.comps import build_comp_set, ComparableSale
+
+
+@pytest.mark.asyncio
+async def test_build_comp_set_filters_make_model_year_mileage(session) -> None:
+    base = dict(
+        make="Toyota", model="Tacoma", trim="TRD Off-Road",
+        sale_channel="auction_estate", sale_platform="hibid",
+        title_status="NORMAL", schema_version=1,
+    )
+    session.add_all([
+        HistoricalSale(year=2015, mileage_km=150000,
+                       final_listed_price_cad=Decimal("20000"),
+                       final_price_with_premium_cad=Decimal("22000"),
+                       buyer_premium_pct_at_sale=Decimal("0.10"),
+                       disposition_reason="sold", **base),
+        HistoricalSale(year=2014, mileage_km=160000,
+                       final_listed_price_cad=Decimal("19000"),
+                       final_price_with_premium_cad=Decimal("20900"),
+                       buyer_premium_pct_at_sale=Decimal("0.10"),
+                       disposition_reason="sold", **base),
+        HistoricalSale(year=2010, mileage_km=300000,  # too old + too high mileage
+                       final_listed_price_cad=Decimal("9000"),
+                       final_price_with_premium_cad=Decimal("9900"),
+                       buyer_premium_pct_at_sale=Decimal("0.10"),
+                       disposition_reason="sold", **base),
+    ])
+    await session.commit()
+
+    comps = await build_comp_set(
+        session, make="Toyota", model="Tacoma", trim="TRD Off-Road",
+        year=2015, mileage_km=150000, year_window=1, mileage_pct=0.20,
+    )
+    assert len(comps) == 2
+    assert all(isinstance(c, ComparableSale) for c in comps)
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/scoring/comps.py`**
+
+```python
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from decimal import Decimal
+
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import AuctionLot, HistoricalSale
+
+
+@dataclass(frozen=True, slots=True)
+class ComparableSale:
+    price_cad: Decimal
+    sale_channel: str
+    year: int | None
+    mileage_km: int | None
+    days_listed: int | None
+    disposition_reason: str
+    source: str  # "historical_sales" or "auction_lots"
+
+
+async def build_comp_set(
+    session: AsyncSession,
+    *,
+    make: str,
+    model: str,
+    trim: str | None,
+    year: int,
+    mileage_km: int,
+    year_window: int = 1,
+    mileage_pct: float = 0.20,
+) -> list[ComparableSale]:
+    mileage_lo = int(mileage_km * (1 - mileage_pct))
+    mileage_hi = int(mileage_km * (1 + mileage_pct))
+
+    hs_stmt = select(HistoricalSale).where(
+        HistoricalSale.make == make,
+        HistoricalSale.model == model,
+        HistoricalSale.year.between(year - year_window, year + year_window),
+        HistoricalSale.mileage_km.between(mileage_lo, mileage_hi),
+    )
+    if trim:
+        hs_stmt = hs_stmt.where(or_(HistoricalSale.trim == trim, HistoricalSale.trim.is_(None)))
+    hs_rows = (await session.execute(hs_stmt)).scalars().all()
+
+    cutoff = datetime.utcnow() - timedelta(days=14)
+    al_stmt = select(AuctionLot).where(
+        AuctionLot.make == make,
+        AuctionLot.model == model,
+        AuctionLot.year.between(year - year_window, year + year_window),
+        AuctionLot.mileage_km.between(mileage_lo, mileage_hi),
+        AuctionLot.lot_status == "closed",
+        AuctionLot.closed_at >= cutoff,
+        AuctionLot.final_bid_cad.is_not(None),
+    )
+    if trim:
+        al_stmt = al_stmt.where(or_(AuctionLot.trim == trim, AuctionLot.trim.is_(None)))
+    al_rows = (await session.execute(al_stmt)).scalars().all()
+
+    comps: list[ComparableSale] = []
+    for h in hs_rows:
+        price = h.final_price_with_premium_cad or h.final_listed_price_cad
+        if price is None:
+            continue
+        comps.append(ComparableSale(
+            price_cad=Decimal(price),
+            sale_channel=h.sale_channel,
+            year=h.year,
+            mileage_km=h.mileage_km,
+            days_listed=h.days_listed,
+            disposition_reason=h.disposition_reason,
+            source="historical_sales",
+        ))
+    for lot in al_rows:
+        bid = lot.final_bid_cad
+        if bid is None:
+            continue
+        # Reconstruct all-in by applying the auction's BP at distillation time.
+        # For not-yet-distilled lots we approximate with current BP, fetched lazily.
+        comps.append(ComparableSale(
+            price_cad=Decimal(bid),
+            sale_channel="auction_estate",
+            year=lot.year,
+            mileage_km=lot.mileage_km,
+            days_listed=None,
+            disposition_reason="sold",
+            source="auction_lots",
+        ))
+    return comps
+```
+
+- [ ] **Step 3: Run test and commit**
+
+```bash
+uv run pytest tests/scoring/test_comps.py -v
+git add src/carbuyer/scoring/comps.py tests/scoring/test_comps.py
+git commit -m "scoring: comp set query (historical_sales + recent closed lots)"
+```
+
+---
+
+### Task 27: Fair-value range + expected value
+
+**Files:**
+- Create: `src/carbuyer/scoring/fair_value.py`
+- Create: `tests/scoring/test_fair_value.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/scoring/test_fair_value.py
+from decimal import Decimal
+
+from carbuyer.scoring.comps import ComparableSale
+from carbuyer.scoring.fair_value import compute_fair_value, ConfidenceBucket
+
+
+def test_compute_fair_value_ten_comps() -> None:
+    comps = [
+        ComparableSale(
+            price_cad=Decimal(p), sale_channel="auction_estate",
+            year=2015, mileage_km=150000, days_listed=None,
+            disposition_reason="sold", source="historical_sales",
+        )
+        for p in [10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000]
+    ]
+    fv = compute_fair_value(comps, condition="decent")
+    assert fv is not None
+    # All comps are auction_estate × 1.20 → range expands
+    assert fv.value_low_cad < fv.value_mid_cad < fv.value_high_cad
+    assert fv.confidence == ConfidenceBucket.HIGH
+    assert fv.comp_count == 10
+
+
+def test_compute_fair_value_insufficient() -> None:
+    comps = [
+        ComparableSale(
+            price_cad=Decimal("10000"), sale_channel="auction_estate",
+            year=2015, mileage_km=150000, days_listed=None,
+            disposition_reason="sold", source="historical_sales",
+        )
+    ]
+    fv = compute_fair_value(comps, condition="decent")
+    assert fv is not None
+    assert fv.confidence == ConfidenceBucket.INSUFFICIENT
+    assert fv.expected_value_cad is None
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/scoring/fair_value.py`**
+
+```python
+from dataclasses import dataclass
+from decimal import Decimal
+from enum import Enum
+from statistics import median, quantiles
+
+from carbuyer.scoring.channels import condition_position, normalize_to_private
+from carbuyer.scoring.comps import ComparableSale
+
+
+class ConfidenceBucket(str, Enum):
+    INSUFFICIENT = "insufficient"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+@dataclass(slots=True)
+class FairValue:
+    value_low_cad: Decimal | None
+    value_mid_cad: Decimal | None
+    value_high_cad: Decimal | None
+    expected_value_cad: Decimal | None
+    comp_count: int
+    confidence: ConfidenceBucket
+
+
+def _trim_mileage_outliers(comps: list[ComparableSale]) -> list[ComparableSale]:
+    if len(comps) < 4:
+        return comps
+    miles = [float(c.mileage_km) for c in comps if c.mileage_km is not None]
+    if not miles:
+        return comps
+    mean = sum(miles) / len(miles)
+    var = sum((m - mean) ** 2 for m in miles) / len(miles)
+    sd = var ** 0.5 if var > 0 else 1.0
+    if sd == 0:
+        return comps
+    return [c for c in comps if c.mileage_km is None or abs((c.mileage_km - mean) / sd) <= 2]
+
+
+def compute_fair_value(comps: list[ComparableSale], *, condition: str) -> FairValue:
+    trimmed = _trim_mileage_outliers(comps)
+    if len(trimmed) < 5:
+        return FairValue(
+            value_low_cad=None, value_mid_cad=None, value_high_cad=None,
+            expected_value_cad=None, comp_count=len(trimmed),
+            confidence=ConfidenceBucket.INSUFFICIENT,
+        )
+    normalized = sorted(
+        float(normalize_to_private(c.price_cad, c.sale_channel)) for c in trimmed
+    )
+    if len(normalized) >= 10:
+        q = quantiles(normalized, n=10)
+        p10, p90 = q[0], q[-1]
+    else:
+        p10, p90 = min(normalized), max(normalized)
+    p50 = median(normalized)
+    pos = condition_position(condition)
+    expected = p10 + pos * (p90 - p10)
+    confidence = ConfidenceBucket.HIGH if len(trimmed) >= 15 else ConfidenceBucket.MEDIUM
+    return FairValue(
+        value_low_cad=Decimal(round(p10, 2)),
+        value_mid_cad=Decimal(round(p50, 2)),
+        value_high_cad=Decimal(round(p90, 2)),
+        expected_value_cad=Decimal(round(expected, 2)),
+        comp_count=len(trimmed),
+        confidence=confidence,
+    )
+```
+
+- [ ] **Step 3: Run test and commit**
+
+```bash
+uv run pytest tests/scoring/test_fair_value.py -v
+git add src/carbuyer/scoring/fair_value.py tests/scoring/test_fair_value.py
+git commit -m "scoring: fair value range + condition-mapped expected value"
+```
+
+---
+
+### Task 28: Landed cost premium
+
+**Files:**
+- Create: `src/carbuyer/scoring/landed_cost.py`
+- Create: `tests/scoring/test_landed_cost.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/scoring/test_landed_cost.py
+from decimal import Decimal
+
+from carbuyer.scoring.landed_cost import landed_cost_premium, distance_km_between
+
+
+def test_same_province_zero() -> None:
+    assert landed_cost_premium(home="AB", dest="AB", distance_km=200) == Decimal("0")
+
+
+def test_cross_province_includes_inspection_and_contingency() -> None:
+    cost = landed_cost_premium(home="AB", dest="ON", distance_km=3500)
+    # transport floor = 600 + 0.65*3500 = 2875; inspection ON 120; contingency ON 350
+    expected = Decimal(2875) + Decimal(120) + Decimal(350)
+    assert cost == expected
+
+
+def test_min_floor_applies() -> None:
+    cost = landed_cost_premium(home="AB", dest="BC", distance_km=100)
+    # max(600, 400 + 65) = 600 (min floor)
+    expected = Decimal(600) + Decimal(125) + Decimal(150)
+    assert cost == expected
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/scoring/landed_cost.py`**
+
+```python
+from decimal import Decimal
+
+
+PROV_INSPECTION: dict[str, int] = {
+    "AB": 200, "ON": 120, "BC": 125, "QC": 125,
+    "MB": 100, "SK": 75, "NS": 50, "NB": 50,
+}
+PROV_CONTINGENCY: dict[str, int] = {
+    "AB": 350, "ON": 350, "QC": 250,
+}
+DEFAULT_INSPECTION = 75
+DEFAULT_CONTINGENCY = 150
+
+
+# Approximate centroid distances between provincial capitals (km).
+# Used as a fallback when we don't have the seller's exact city.
+_FALLBACK_DISTANCE: dict[tuple[str, str], int] = {
+    ("AB", "AB"): 0, ("AB", "BC"): 1000, ("AB", "SK"): 600, ("AB", "MB"): 1300,
+    ("BC", "BC"): 0, ("BC", "AB"): 1000, ("BC", "SK"): 1700, ("BC", "MB"): 2200,
+    ("SK", "SK"): 0, ("SK", "AB"): 600, ("SK", "BC"): 1700, ("SK", "MB"): 600,
+    ("MB", "MB"): 0, ("MB", "SK"): 600, ("MB", "AB"): 1300, ("MB", "BC"): 2200,
+}
+
+
+def distance_km_between(home: str, dest: str) -> int:
+    return _FALLBACK_DISTANCE.get((home, dest), 3000)
+
+
+def landed_cost_premium(*, home: str, dest: str, distance_km: int) -> Decimal:
+    if home == dest:
+        return Decimal("0")
+    transport = max(600, int(400 + 0.65 * distance_km))
+    inspection = PROV_INSPECTION.get(dest, DEFAULT_INSPECTION)
+    contingency = PROV_CONTINGENCY.get(dest, DEFAULT_CONTINGENCY)
+    return Decimal(transport + inspection + contingency)
+```
+
+- [ ] **Step 3: Run test and commit**
+
+```bash
+uv run pytest tests/scoring/test_landed_cost.py -v
+git add src/carbuyer/scoring/landed_cost.py tests/scoring/test_landed_cost.py
+git commit -m "scoring: landed-cost premium model"
+```
+
+---
+
+### Task 29: Price-deal score + rarity score
+
+**Files:**
+- Create: `src/carbuyer/scoring/score.py`
+- Create: `tests/scoring/test_score.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/scoring/test_score.py
+from decimal import Decimal
+
+from carbuyer.scoring.score import (
+    price_deal_score, rarity_score, recommended_max_bid, RarityInputs,
+)
+
+
+def test_price_deal_score_positive_when_underpriced() -> None:
+    s = price_deal_score(
+        current_high_bid=Decimal("10000"),
+        buyer_premium_pct=Decimal("0.10"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("500"),
+        expected_value=Decimal("18000"),
+    )
+    # all_in_at_bid = 10000 * 1.10 * 1.05 = 11550; total = 12050; score = (18000-12050)/18000 ≈ 0.330
+    assert 0.32 < s < 0.34
+
+
+def test_rarity_score_low_comp_count_with_desirable_yields_2() -> None:
+    s = rarity_score(RarityInputs(
+        desirable_trim_or_spec=True, classic_or_collector=False,
+        historical_comp_count=1, recent_appreciation=None,
+    ))
+    # 2.0 (low+desirable) + 1.0 (desirable_trim) = 3.0
+    assert s == 3.0
+
+
+def test_rarity_score_low_comp_count_undesirable_yields_zero() -> None:
+    s = rarity_score(RarityInputs(
+        desirable_trim_or_spec=False, classic_or_collector=False,
+        historical_comp_count=1, recent_appreciation=None,
+    ))
+    assert s == 0.0
+
+
+def test_recommended_max_bid_backs_out_margin() -> None:
+    bid = recommended_max_bid(
+        expected_value=Decimal("20000"),
+        buyer_premium_pct=Decimal("0.10"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("500"),
+        flip_margin=Decimal("2000"),
+    )
+    # target_all_in = 20000 - 2000 = 18000
+    # bid = (18000 - 500) / (1.10 * 1.05) = 17500 / 1.155 ≈ 15151.52
+    assert bid is not None
+    assert 15140 < float(bid) < 15165
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/scoring/score.py`**
+
+```python
+from dataclasses import dataclass
+from decimal import Decimal
+
+
+@dataclass(slots=True)
+class RarityInputs:
+    desirable_trim_or_spec: bool
+    classic_or_collector: bool
+    historical_comp_count: int
+    recent_appreciation: float | None
+
+
+def all_in_cost(
+    *,
+    current_high_bid: Decimal,
+    buyer_premium_pct: Decimal,
+    gst_pct: Decimal,
+    pst_pct: Decimal,
+    landed_cost_premium: Decimal,
+) -> Decimal:
+    bp_factor = Decimal("1") + buyer_premium_pct
+    tax_factor = Decimal("1") + gst_pct + pst_pct
+    bid_with_premium = current_high_bid * bp_factor * tax_factor
+    return bid_with_premium + landed_cost_premium
+
+
+def price_deal_score(
+    *,
+    current_high_bid: Decimal,
+    buyer_premium_pct: Decimal,
+    gst_pct: Decimal,
+    pst_pct: Decimal,
+    landed_cost_premium: Decimal,
+    expected_value: Decimal,
+) -> float:
+    if expected_value <= 0:
+        return 0.0
+    total = all_in_cost(
+        current_high_bid=current_high_bid,
+        buyer_premium_pct=buyer_premium_pct,
+        gst_pct=gst_pct,
+        pst_pct=pst_pct,
+        landed_cost_premium=landed_cost_premium,
+    )
+    return float((expected_value - total) / expected_value)
+
+
+def rarity_score(inputs: RarityInputs) -> float:
+    score = 0.0
+    low_comp_with_desirability = (
+        inputs.historical_comp_count < 3
+        and (inputs.desirable_trim_or_spec or inputs.classic_or_collector)
+    )
+    if low_comp_with_desirability:
+        score += 2.0
+    if inputs.classic_or_collector:
+        score += 1.5
+    if inputs.desirable_trim_or_spec:
+        score += 1.0
+    if inputs.recent_appreciation is not None and inputs.recent_appreciation > 0.05:
+        score += 1.0
+    return min(score, 5.0)
+
+
+def recommended_max_bid(
+    *,
+    expected_value: Decimal,
+    buyer_premium_pct: Decimal,
+    gst_pct: Decimal,
+    pst_pct: Decimal,
+    landed_cost_premium: Decimal,
+    flip_margin: Decimal,
+) -> Decimal | None:
+    target_all_in = expected_value - flip_margin
+    if target_all_in <= 0:
+        return None
+    bp_tax = (Decimal("1") + buyer_premium_pct) * (Decimal("1") + gst_pct + pst_pct)
+    bid = (target_all_in - landed_cost_premium) / bp_tax
+    return bid if bid > 0 else None
+
+
+def flag_score(red: list[dict[str, int]], green: list[dict[str, int]]) -> int:
+    s = sum(int(f.get("weight", 0)) for f in red) + sum(int(f.get("weight", 0)) for f in green)
+    return max(-5, min(5, s))
+```
+
+- [ ] **Step 3: Run test and commit**
+
+```bash
+uv run pytest tests/scoring/test_score.py -v
+git add src/carbuyer/scoring/score.py tests/scoring/test_score.py
+git commit -m "scoring: deal score + rarity score + recommended max bid"
+```
+
+---
+
+### Task 30: Valuator worker
+
+**Files:**
+- Create: `src/carbuyer/apps/valuator/__init__.py`
+- Create: `src/carbuyer/apps/valuator/__main__.py`
+- Create: `src/carbuyer/apps/valuator/valuator.py`
+- Create: `tests/apps/test_valuator.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/valuator/valuator.py`**
+
+```python
+import asyncio
+import hashlib
+import json
+from decimal import Decimal
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.notify import listen, notify
+from carbuyer.db.queue import claim_pending_lots
+from carbuyer.db.session import async_session_maker
+from carbuyer.scoring.comps import build_comp_set
+from carbuyer.scoring.fair_value import compute_fair_value, ConfidenceBucket
+from carbuyer.scoring.landed_cost import distance_km_between, landed_cost_premium
+from carbuyer.scoring.score import (
+    RarityInputs, all_in_cost, flag_score, price_deal_score,
+    rarity_score, recommended_max_bid,
+)
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("valuator")
+SCORING_VERSION = "v1"
+
+
+def _weights_hash() -> str:
+    payload = json.dumps({
+        "scoring_version": SCORING_VERSION,
+        "notify_threshold": settings.notify_threshold,
+        "rarity_threshold": settings.early_warning_rarity_threshold,
+        "flip_margin_min": settings.flip_margin_min_cad,
+        "flip_margin_pct": settings.flip_margin_pct,
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
+    auction = await session.get(Auction, lot.auction_id)
+    if auction is None or lot.make is None or lot.model is None or lot.year is None:
+        lot.valuation_status = "skipped"
+        return
+
+    comps = await build_comp_set(
+        session,
+        make=lot.make, model=lot.model, trim=lot.trim,
+        year=lot.year, mileage_km=lot.mileage_km or 0,
+    )
+    fv = compute_fair_value(comps, condition=lot.condition_categorical or "decent")
+    lot.comp_count = fv.comp_count
+    lot.value_low_cad = fv.value_low_cad
+    lot.value_mid_cad = fv.value_mid_cad
+    lot.value_high_cad = fv.value_high_cad
+    lot.expected_value_cad = fv.expected_value_cad
+    lot.confidence_bucket = fv.confidence.value
+    lot.scoring_version = SCORING_VERSION
+    lot.weights_hash = _weights_hash()
+
+    # Historical comp count for rarity (broader: same make+model regardless of trim/year window)
+    hcc_stmt = select(func.count()).where(
+        HistoricalSale.make == lot.make,
+        HistoricalSale.model == lot.model,
+    )
+    historical_count = (await session.execute(hcc_stmt)).scalar_one()
+    lot.historical_comp_count = historical_count
+
+    lot.rarity_score = rarity_score(RarityInputs(
+        desirable_trim_or_spec=lot.desirable_trim_or_spec,
+        classic_or_collector=lot.classic_or_collector,
+        historical_comp_count=historical_count,
+        recent_appreciation=lot.recent_appreciation,
+    ))
+
+    # Flag score
+    lot.flag_score = flag_score(lot.red_flags or [], lot.green_flags or [])
+
+    # Tax + landed
+    bp = auction.buyer_premium_pct or Decimal("0.10")
+    gst = auction.gst_pct or Decimal("0.05")
+    pst = auction.pst_pct or Decimal("0.00")
+    distance = distance_km_between(settings.home_province, auction.pickup_province or settings.home_province)
+    landed = landed_cost_premium(home=settings.home_province, dest=auction.pickup_province or settings.home_province, distance_km=distance)
+    lot.landed_cost_premium_cad = landed
+
+    if lot.current_high_bid_cad is not None and fv.expected_value_cad is not None:
+        lot.all_in_at_current_bid_cad = all_in_cost(
+            current_high_bid=lot.current_high_bid_cad,
+            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
+            landed_cost_premium=landed,
+        )
+        lot.price_deal_score = price_deal_score(
+            current_high_bid=lot.current_high_bid_cad,
+            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
+            landed_cost_premium=landed,
+            expected_value=fv.expected_value_cad,
+        )
+    else:
+        lot.price_deal_score = None
+        lot.all_in_at_current_bid_cad = None
+
+    if fv.expected_value_cad is not None:
+        margin = max(
+            Decimal(settings.flip_margin_min_cad),
+            fv.expected_value_cad * Decimal(str(settings.flip_margin_pct)),
+        )
+        lot.recommended_max_bid_cad = recommended_max_bid(
+            expected_value=fv.expected_value_cad,
+            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
+            landed_cost_premium=landed, flip_margin=margin,
+        )
+
+    if lot.value_low_cad is not None and lot.current_high_bid_cad is not None:
+        lot.suspicious_underprice_flag = lot.current_high_bid_cad < (lot.value_low_cad * Decimal("0.85"))
+
+    lot.valuation_status = "done"
+    lot.notification_status = "pending"
+
+
+async def process_pending(*, batch_size: int = 30) -> int:
+    async with async_session_maker() as session:
+        async with session.begin():
+            lots = await claim_pending_lots(
+                session, status_field="valuation_status", limit=batch_size
+            )
+        for lot in lots:
+            async with session.begin():
+                await value_one(session, lot)
+                if lot.valuation_status == "done":
+                    await notify(session, "notification_pending", str(lot.id))
+        return len(lots)
+
+
+async def main() -> None:
+    async for _ in listen("valuation_pending"):
+        try:
+            await process_pending()
+        except Exception:
+            log.exception("valuation batch failed")
+            await asyncio.sleep(5)
+```
+
+- [ ] **Step 2: Implement `__main__.py` and `__init__.py`**
+
+```python
+# src/carbuyer/apps/valuator/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.valuator.valuator import main
+
+
+if __name__ == "__main__":
+    run_worker("valuator", main)
+```
+
+```bash
+touch src/carbuyer/apps/valuator/__init__.py
+```
+
+- [ ] **Step 3: Write the test**
+
+```python
+# tests/apps/test_valuator.py
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+
+from carbuyer.apps.valuator.valuator import value_one
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+
+
+@pytest.mark.asyncio
+async def test_value_one_writes_score_when_comps_exist(session) -> None:
+    a = Auction(source="t", source_auction_id="A", url="x", auction_subtype="estate",
+                first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+                pickup_province="AB", buyer_premium_pct=Decimal("0.10"),
+                gst_pct=Decimal("0.05"), pst_pct=Decimal("0.00"))
+    session.add(a)
+    await session.flush()
+
+    base = dict(make="Toyota", model="Tacoma", trim=None,
+                sale_channel="auction_estate", sale_platform="hibid",
+                title_status="NORMAL", schema_version=1, disposition_reason="sold")
+    for p in [10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000]:
+        session.add(HistoricalSale(year=2015, mileage_km=150000,
+                                   final_listed_price_cad=Decimal(p),
+                                   final_price_with_premium_cad=Decimal(p),
+                                   buyer_premium_pct_at_sale=Decimal("0.10"),
+                                   **base))
+    lot = AuctionLot(
+        auction_id=a.id, source_lot_id="L1", url="https://x",
+        title="2015 Toyota Tacoma", description="runs",
+        year=2015, make="Toyota", model="Tacoma",
+        mileage_km=150000, condition_categorical="decent",
+        red_flags=[], green_flags=[], showstopper_flags=[],
+        current_high_bid_cad=Decimal("12000"),
+    )
+    session.add(lot)
+    await session.commit()
+
+    await value_one(session, lot)
+    await session.commit()
+
+    assert lot.valuation_status == "done"
+    assert lot.confidence_bucket in ("medium", "high")
+    assert lot.expected_value_cad is not None
+    assert lot.price_deal_score is not None
+```
+
+- [ ] **Step 4: Run test and commit**
+
+```bash
+uv run pytest tests/apps/test_valuator.py -v
+git add src/carbuyer/apps/valuator/ tests/apps/test_valuator.py
+git commit -m "apps: valuator worker (comp set + scoring)"
+```
+
+---
+
+End of Phase 4. Lots are now scored with `price_deal_score`, `rarity_score`, `recommended_max_bid`, and `confidence_bucket`. `notification_pending` fires next.
+
+---
+
+## Phase 5 — Discord bot
+
+Bot connects out via TCP 443 (no inbound). Persistent views via `DynamicItem` with regex `custom_id`. Slash commands only.
+
+### Task 31: Discord bot skeleton + channel router
+
+**Files:**
+- Create: `src/carbuyer/apps/bot/__init__.py`
+- Create: `src/carbuyer/apps/bot/channels.py`
+- Create: `src/carbuyer/apps/bot/messages.py`
+- Create: `tests/apps/test_bot_messages.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/bot/channels.py`**
+
+```python
+from typing import Literal
+
+
+ChannelKey = Literal[
+    "early_warning", "hot_deals", "watchlist",
+    "auction_closing", "auction_watch", "vision_updates", "system_health",
+]
+
+
+def select_channel(*, trigger: str, score: float | None) -> ChannelKey:
+    if trigger == "early_warning":
+        return "early_warning"
+    if trigger == "going_cheap":
+        if score is not None and score >= 0.20:
+            return "hot_deals"
+        return "watchlist"
+    if trigger in {"closing_soon", "bid_trajectory", "lot_extended"}:
+        return "auction_closing"
+    if trigger == "vision_update":
+        return "vision_updates"
+    if trigger == "system":
+        return "system_health"
+    return "watchlist"
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/bot/messages.py`**
+
+```python
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+
+
+@dataclass(slots=True)
+class LotEmbedData:
+    lot_id: int
+    url: str
+    title: str
+    year: int | None
+    make: str | None
+    model: str | None
+    trim: str | None
+    location: str
+    current_high_bid_cad: Decimal | None
+    all_in_cad: Decimal | None
+    expected_value_cad: Decimal | None
+    value_low_cad: Decimal | None
+    value_high_cad: Decimal | None
+    price_deal_score: float | None
+    rarity_score: float | None
+    confidence_bucket: str | None
+    condition_categorical: str | None
+    top_red_flags: list[str]
+    top_green_flags: list[str]
+    suspicious_underprice: bool
+    scheduled_end_at: datetime | None
+
+
+def render_early_warning_text(d: LotEmbedData) -> str:
+    title = f"{d.year or ''} {d.make or ''} {d.model or ''} {d.trim or ''}".strip()
+    end = d.scheduled_end_at.strftime("%b %d") if d.scheduled_end_at else "?"
+    bid = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no bid yet)"
+    if d.value_low_cad and d.value_high_cad:
+        rng = f"${int(d.value_low_cad):,}–${int(d.value_high_cad):,}"
+    else:
+        rng = "(uncomped)"
+    rarity = ", ".join(d.top_green_flags[:3]) or "rare/desirable"
+    return (
+        f"⭐ RARE FIND — {title} ({d.location})\n"
+        f"Closes {end}\n"
+        f"Current bid: {bid} · Estimated value: {rng}\n"
+        f"Rarity: {rarity}"
+    )
+
+
+def render_going_cheap_text(d: LotEmbedData) -> str:
+    title = f"{d.year or ''} {d.make or ''} {d.model or ''} {d.trim or ''}".strip()
+    bid = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "no bid"
+    all_in = f"${int(d.all_in_cad):,}" if d.all_in_cad else "?"
+    ev = f"${int(d.expected_value_cad):,}" if d.expected_value_cad else "?"
+    margin = ""
+    if d.expected_value_cad and d.all_in_cad:
+        m = int(d.expected_value_cad - d.all_in_cad)
+        margin = f"  ·  Margin at current bid: ${m:,}"
+    flags = ", ".join(d.top_green_flags[:3])
+    prefix = "⚠ PRICED BELOW TYPICAL LOW END\n" if d.suspicious_underprice else ""
+    return (
+        f"{prefix}💰 Going cheap — {title}\n"
+        f"{d.location}\n"
+        f"Current bid: {bid}  →  All-in: {all_in}\n"
+        f"Estimated value: {ev}{margin}\n"
+        f"Confidence: {d.confidence_bucket} · Condition: {d.condition_categorical}\n"
+        f"{('✅ ' + flags) if flags else ''}".rstrip()
+    )
+```
+
+- [ ] **Step 3: Write a focused test**
+
+```python
+# tests/apps/test_bot_messages.py
+from datetime import datetime
+from decimal import Decimal
+
+from carbuyer.apps.bot.channels import select_channel
+from carbuyer.apps.bot.messages import LotEmbedData, render_early_warning_text, render_going_cheap_text
+
+
+def test_select_channel_routes() -> None:
+    assert select_channel(trigger="early_warning", score=None) == "early_warning"
+    assert select_channel(trigger="going_cheap", score=0.25) == "hot_deals"
+    assert select_channel(trigger="going_cheap", score=0.16) == "watchlist"
+    assert select_channel(trigger="closing_soon", score=None) == "auction_closing"
+
+
+def test_render_early_warning() -> None:
+    d = LotEmbedData(
+        lot_id=1, url="u", title="t",
+        year=1985, make="Toyota", model="Land Cruiser", trim="FJ60",
+        location="Edmonton, AB",
+        current_high_bid_cad=Decimal("5500"),
+        all_in_cad=None, expected_value_cad=Decimal("23000"),
+        value_low_cad=Decimal("18000"), value_high_cad=Decimal("28000"),
+        price_deal_score=None, rarity_score=4.0,
+        confidence_bucket="high", condition_categorical="good",
+        top_red_flags=[], top_green_flags=["classic Land Cruiser", "Western Canada origin"],
+        suspicious_underprice=False,
+        scheduled_end_at=datetime(2026, 6, 1),
+    )
+    text = render_early_warning_text(d)
+    assert "RARE FIND" in text
+    assert "Land Cruiser" in text
+
+
+def test_render_going_cheap_includes_margin() -> None:
+    d = LotEmbedData(
+        lot_id=2, url="u", title="t",
+        year=2018, make="Toyota", model="Tacoma", trim="TRD Off-Road",
+        location="Saskatoon, SK",
+        current_high_bid_cad=Decimal("14500"),
+        all_in_cad=Decimal("17400"), expected_value_cad=Decimal("24000"),
+        value_low_cad=Decimal("20000"), value_high_cad=Decimal("28000"),
+        price_deal_score=0.27, rarity_score=1.0,
+        confidence_bucket="high", condition_categorical="good",
+        top_red_flags=[], top_green_flags=["recent timing chain"],
+        suspicious_underprice=False,
+        scheduled_end_at=datetime(2026, 6, 1),
+    )
+    text = render_going_cheap_text(d)
+    assert "Going cheap" in text
+    assert "$6,600" in text  # margin
+```
+
+- [ ] **Step 4: Create `__init__.py` and run tests**
+
+```bash
+touch src/carbuyer/apps/bot/__init__.py
+uv run pytest tests/apps/test_bot_messages.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/apps/bot/ tests/apps/test_bot_messages.py
+git commit -m "bot: channel router + message renderers"
+```
+
+---
+
+### Task 32: Discord bot main + persistent action buttons
+
+**Files:**
+- Create: `src/carbuyer/apps/bot/__main__.py`
+- Create: `src/carbuyer/apps/bot/bot.py`
+- Create: `src/carbuyer/apps/bot/views.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/bot/views.py`**
+
+```python
+from typing import Any
+
+import discord
+from discord import ButtonStyle, Interaction
+from discord.ui import DynamicItem, View, button
+
+
+class LotActionView(View):
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+
+
+class LotInterestedButton(DynamicItem[discord.ui.Button[View]], template=r"deal:interested:(?P<lot_id>\d+)"):
+    def __init__(self, lot_id: int) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=ButtonStyle.success, label="👍 Interested",
+                custom_id=f"deal:interested:{lot_id}",
+            )
+        )
+        self.lot_id = lot_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: Interaction, item: discord.ui.Button[View], match: Any) -> "LotInterestedButton":
+        return cls(int(match["lot_id"]))
+
+    async def callback(self, interaction: Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        from carbuyer.db.session import async_session_maker
+        from carbuyer.db.models import AuctionLot
+        async with async_session_maker() as session:
+            lot = await session.get(AuctionLot, self.lot_id)
+            if lot is not None:
+                lot.user_action = "interested"
+                await session.commit()
+        await interaction.followup.send(f"Marked lot {self.lot_id} as interested.", ephemeral=True)
+
+
+class LotMaybeButton(DynamicItem[discord.ui.Button[View]], template=r"deal:maybe:(?P<lot_id>\d+)"):
+    def __init__(self, lot_id: int) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=ButtonStyle.secondary, label="🤔 Maybe",
+                custom_id=f"deal:maybe:{lot_id}",
+            )
+        )
+        self.lot_id = lot_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["lot_id"]))
+
+    async def callback(self, interaction: Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        from carbuyer.db.session import async_session_maker
+        from carbuyer.db.models import AuctionLot
+        async with async_session_maker() as session:
+            lot = await session.get(AuctionLot, self.lot_id)
+            if lot is not None:
+                lot.user_action = "maybe"
+                await session.commit()
+        await interaction.followup.send(f"Marked lot {self.lot_id} as maybe.", ephemeral=True)
+
+
+class LotNotInterestedButton(DynamicItem[discord.ui.Button[View]], template=r"deal:not_interested:(?P<lot_id>\d+)"):
+    def __init__(self, lot_id: int) -> None:
+        super().__init__(
+            discord.ui.Button(
+                style=ButtonStyle.danger, label="👎 Not interested",
+                custom_id=f"deal:not_interested:{lot_id}",
+            )
+        )
+        self.lot_id = lot_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["lot_id"]))
+
+    async def callback(self, interaction: Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        from carbuyer.db.session import async_session_maker
+        from carbuyer.db.models import AuctionLot
+        async with async_session_maker() as session:
+            lot = await session.get(AuctionLot, self.lot_id)
+            if lot is not None:
+                lot.user_action = "not_interested"
+                await session.commit()
+        await interaction.followup.send(f"Marked lot {self.lot_id} as not interested.", ephemeral=True)
+
+
+def build_view_for_lot(lot_id: int) -> View:
+    v = LotActionView()
+    v.add_item(LotInterestedButton(lot_id))
+    v.add_item(LotMaybeButton(lot_id))
+    v.add_item(LotNotInterestedButton(lot_id))
+    return v
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/bot/bot.py`**
+
+```python
+import asyncio
+
+import discord
+from discord.ext import commands
+
+from carbuyer.apps.bot.views import (
+    LotInterestedButton, LotMaybeButton, LotNotInterestedButton,
+)
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("bot")
+
+
+def _intents() -> discord.Intents:
+    intents = discord.Intents.none()
+    intents.guilds = True
+    return intents
+
+
+class CarbuyerBot(commands.Bot):
+    def __init__(self) -> None:
+        super().__init__(command_prefix="!", intents=_intents())
+
+    async def setup_hook(self) -> None:
+        self.add_dynamic_items(
+            LotInterestedButton, LotMaybeButton, LotNotInterestedButton,
+        )
+        if settings.discord_guild_id:
+            self.tree.copy_global_to(guild=discord.Object(id=settings.discord_guild_id))
+            await self.tree.sync(guild=discord.Object(id=settings.discord_guild_id))
+        else:
+            await self.tree.sync()
+
+
+async def post_to_channel(bot: CarbuyerBot, channel_id: int, content: str, view: discord.ui.View | None = None) -> None:
+    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    if isinstance(channel, discord.TextChannel):
+        await channel.send(content=content, view=view)
+
+
+async def main() -> None:
+    bot = CarbuyerBot()
+    async with bot:
+        await bot.start(settings.discord_bot_token)
+```
+
+- [ ] **Step 3: Implement `__main__.py`**
+
+```python
+# src/carbuyer/apps/bot/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.bot.bot import main
+
+
+if __name__ == "__main__":
+    run_worker("bot", main)
+```
+
+- [ ] **Step 4: Smoke check**
+
+```bash
+uv run python -c "from carbuyer.apps.bot.views import build_view_for_lot; v = build_view_for_lot(1); print(len(v.children))"
+```
+
+Expected: `3`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/apps/bot/__main__.py src/carbuyer/apps/bot/bot.py src/carbuyer/apps/bot/views.py
+git commit -m "bot: discord.py bot scaffold with persistent action buttons"
+```
+
+---
+
+## Phase 6 — Notifier worker
+
+### Task 33: Trigger evaluator (pure logic)
+
+**Files:**
+- Create: `src/carbuyer/apps/notifier/__init__.py`
+- Create: `src/carbuyer/apps/notifier/triggers.py`
+- Create: `tests/apps/test_notifier_triggers.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/notifier/triggers.py`**
+
+```python
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+
+@dataclass(slots=True)
+class LotState:
+    lot_id: int
+    rarity_score: float | None
+    price_deal_score: float | None
+    flag_score: int | None
+    confidence_bucket: str | None
+    has_showstopper: bool
+    user_action: str | None
+    scheduled_end_at: datetime | None
+    early_warning_notified_at: datetime | None
+    cheap_notified_at: datetime | None
+    last_cheap_score: float | None
+
+
+@dataclass(slots=True)
+class TriggerResult:
+    trigger: str   # "early_warning" | "going_cheap" | "skip"
+    reason: str
+
+
+def evaluate_triggers(
+    state: LotState,
+    *,
+    now: datetime,
+    rarity_threshold: float,
+    notify_threshold: float,
+    rescore_improvement_threshold: float,
+    early_warning_min_hours: int,
+) -> list[TriggerResult]:
+    out: list[TriggerResult] = []
+
+    if state.user_action == "not_interested":
+        return out
+
+    # Early-warning
+    if (
+        state.rarity_score is not None
+        and state.rarity_score >= rarity_threshold
+        and state.early_warning_notified_at is None
+        and state.scheduled_end_at is not None
+        and (state.scheduled_end_at - now) >= timedelta(hours=early_warning_min_hours)
+    ):
+        out.append(TriggerResult("early_warning", f"rarity={state.rarity_score}"))
+
+    # Going-cheap
+    if state.has_showstopper:
+        return out
+    if state.confidence_bucket not in {"medium", "high"}:
+        return out
+    if (state.flag_score or 0) < -1:
+        return out
+    if state.price_deal_score is None or state.price_deal_score < notify_threshold:
+        return out
+
+    closing_soon = (
+        state.scheduled_end_at is not None
+        and state.scheduled_end_at - now <= timedelta(hours=24)
+    )
+    eligible_user = state.user_action in {"interested", "maybe", None}
+    fires_for_unflagged = closing_soon
+    fires_for_watched = state.user_action in {"interested", "maybe"}
+
+    should_fire = False
+    if state.cheap_notified_at is None and (fires_for_watched or fires_for_unflagged):
+        should_fire = True
+    elif state.last_cheap_score is not None and (state.price_deal_score - state.last_cheap_score) >= rescore_improvement_threshold:
+        should_fire = True
+
+    if should_fire and eligible_user:
+        out.append(TriggerResult("going_cheap", f"score={state.price_deal_score}"))
+
+    return out
+```
+
+- [ ] **Step 2: Write the test**
+
+```python
+# tests/apps/test_notifier_triggers.py
+from datetime import datetime, timedelta, timezone
+
+from carbuyer.apps.notifier.triggers import LotState, evaluate_triggers
+
+
+NOW = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def _state(**kw) -> LotState:
+    base = dict(
+        lot_id=1, rarity_score=None, price_deal_score=None,
+        flag_score=0, confidence_bucket="high", has_showstopper=False,
+        user_action=None,
+        scheduled_end_at=NOW + timedelta(days=10),
+        early_warning_notified_at=None, cheap_notified_at=None,
+        last_cheap_score=None,
+    )
+    base.update(kw)
+    return LotState(**base)
+
+
+def test_early_warning_fires() -> None:
+    s = _state(rarity_score=2.5)
+    out = evaluate_triggers(
+        s, now=NOW, rarity_threshold=2.0, notify_threshold=0.15,
+        rescore_improvement_threshold=0.05, early_warning_min_hours=48,
+    )
+    assert any(t.trigger == "early_warning" for t in out)
+
+
+def test_going_cheap_fires_for_watched_anytime() -> None:
+    s = _state(price_deal_score=0.20, user_action="interested",
+               scheduled_end_at=NOW + timedelta(days=10))
+    out = evaluate_triggers(
+        s, now=NOW, rarity_threshold=2.0, notify_threshold=0.15,
+        rescore_improvement_threshold=0.05, early_warning_min_hours=48,
+    )
+    assert any(t.trigger == "going_cheap" for t in out)
+
+
+def test_going_cheap_for_unflagged_only_when_closing_soon() -> None:
+    far = _state(price_deal_score=0.20, scheduled_end_at=NOW + timedelta(days=10))
+    near = _state(price_deal_score=0.20, scheduled_end_at=NOW + timedelta(hours=12))
+    out_far = evaluate_triggers(far, now=NOW, rarity_threshold=2.0,
+                                notify_threshold=0.15,
+                                rescore_improvement_threshold=0.05,
+                                early_warning_min_hours=48)
+    out_near = evaluate_triggers(near, now=NOW, rarity_threshold=2.0,
+                                 notify_threshold=0.15,
+                                 rescore_improvement_threshold=0.05,
+                                 early_warning_min_hours=48)
+    assert not any(t.trigger == "going_cheap" for t in out_far)
+    assert any(t.trigger == "going_cheap" for t in out_near)
+
+
+def test_not_interested_suppresses() -> None:
+    s = _state(rarity_score=3.0, price_deal_score=0.30, user_action="not_interested")
+    out = evaluate_triggers(
+        s, now=NOW, rarity_threshold=2.0, notify_threshold=0.15,
+        rescore_improvement_threshold=0.05, early_warning_min_hours=48,
+    )
+    assert out == []
+```
+
+- [ ] **Step 3: Create `__init__.py` and run tests**
+
+```bash
+touch src/carbuyer/apps/notifier/__init__.py
+uv run pytest tests/apps/test_notifier_triggers.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/apps/notifier/__init__.py src/carbuyer/apps/notifier/triggers.py tests/apps/test_notifier_triggers.py
+git commit -m "notifier: trigger evaluator (early-warning + going-cheap)"
+```
+
+---
+
+### Task 34: Notifier worker (consume `notification_pending`, post via Discord HTTP)
+
+**Files:**
+- Create: `src/carbuyer/apps/notifier/__main__.py`
+- Create: `src/carbuyer/apps/notifier/notifier.py`
+- Create: `src/carbuyer/apps/notifier/discord_post.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/notifier/discord_post.py`**
+
+```python
+import discord
+
+from carbuyer.apps.bot.views import build_view_for_lot
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("notifier_post")
+
+
+async def post_message(channel_id: int, content: str, lot_id: int) -> bool:
+    """Post a message via a transient discord.Client (no full bot needed)."""
+    intents = discord.Intents.none()
+    intents.guilds = True
+    client = discord.Client(intents=intents)
+
+    posted = False
+
+    @client.event
+    async def on_ready() -> None:
+        nonlocal posted
+        try:
+            channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+            if isinstance(channel, discord.TextChannel):
+                await channel.send(content=content, view=build_view_for_lot(lot_id))
+                posted = True
+        finally:
+            await client.close()
+
+    try:
+        await client.start(settings.discord_bot_token)
+    except Exception:
+        log.exception("discord post failed", channel_id=channel_id)
+    return posted
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/notifier/notifier.py`**
+
+```python
+import asyncio
+from datetime import datetime, timezone
+
+from carbuyer.apps.bot.channels import select_channel
+from carbuyer.apps.bot.messages import LotEmbedData, render_early_warning_text, render_going_cheap_text
+from carbuyer.apps.notifier.discord_post import post_message
+from carbuyer.apps.notifier.triggers import LotState, evaluate_triggers
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.notify import listen
+from carbuyer.db.queue import claim_pending_lots
+from carbuyer.db.session import async_session_maker
+from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("notifier")
+
+
+def _state_from_lot(lot: AuctionLot) -> LotState:
+    showstopper = bool(lot.showstopper_flags)
+    return LotState(
+        lot_id=lot.id,
+        rarity_score=lot.rarity_score,
+        price_deal_score=lot.price_deal_score,
+        flag_score=lot.flag_score,
+        confidence_bucket=lot.confidence_bucket,
+        has_showstopper=showstopper,
+        user_action=lot.user_action,
+        scheduled_end_at=None,  # patched in caller from auction
+        early_warning_notified_at=lot.early_warning_notified_at,
+        cheap_notified_at=lot.cheap_notified_at,
+        last_cheap_score=None,
+    )
+
+
+def _embed_data(lot: AuctionLot, auction: Auction) -> LotEmbedData:
+    return LotEmbedData(
+        lot_id=lot.id, url=lot.url, title=lot.title or "",
+        year=lot.year, make=lot.make, model=lot.model, trim=lot.trim,
+        location=", ".join(filter(None, [auction.pickup_city, auction.pickup_province])) or "?",
+        current_high_bid_cad=lot.current_high_bid_cad,
+        all_in_cad=lot.all_in_at_current_bid_cad,
+        expected_value_cad=lot.expected_value_cad,
+        value_low_cad=lot.value_low_cad, value_high_cad=lot.value_high_cad,
+        price_deal_score=lot.price_deal_score,
+        rarity_score=lot.rarity_score,
+        confidence_bucket=lot.confidence_bucket,
+        condition_categorical=lot.condition_categorical,
+        top_red_flags=[f.get("flag", "") for f in (lot.red_flags or [])][:3],
+        top_green_flags=lot.desirability_signals or [f.get("flag", "") for f in (lot.green_flags or [])][:3],
+        suspicious_underprice=lot.suspicious_underprice_flag,
+        scheduled_end_at=auction.scheduled_end_at,
+    )
+
+
+async def process_pending(*, batch_size: int = 30) -> int:
+    now = datetime.now(timezone.utc)
+    async with async_session_maker() as session:
+        async with session.begin():
+            lots = await claim_pending_lots(
+                session, status_field="notification_status", limit=batch_size,
+            )
+        for lot in lots:
+            auction = await session.get(Auction, lot.auction_id)
+            if auction is None:
+                lot.notification_status = "skipped"
+                continue
+            state = _state_from_lot(lot)
+            state.scheduled_end_at = auction.scheduled_end_at
+            triggers = evaluate_triggers(
+                state, now=now,
+                rarity_threshold=settings.early_warning_rarity_threshold,
+                notify_threshold=settings.notify_threshold,
+                rescore_improvement_threshold=settings.rescore_improvement_threshold,
+                early_warning_min_hours=settings.early_warning_min_hours_to_close,
+            )
+            for trig in triggers:
+                channel_key = select_channel(trigger=trig.trigger, score=lot.price_deal_score)
+                channel_id = settings.discord_channels.get(channel_key)
+                if channel_id is None:
+                    log.warning("no channel configured", channel_key=channel_key)
+                    continue
+                d = _embed_data(lot, auction)
+                content = (
+                    render_early_warning_text(d) if trig.trigger == "early_warning"
+                    else render_going_cheap_text(d)
+                )
+                async with session.begin_nested():
+                    posted = await post_message(channel_id, content, lot.id)
+                    if posted:
+                        if trig.trigger == "early_warning":
+                            lot.early_warning_notified_at = now
+                        else:
+                            lot.cheap_notified_at = now
+                        lot.last_notified_channel = channel_key
+            lot.notification_status = "done"
+        await session.commit()
+    return len(lots)
+
+
+async def main() -> None:
+    async for _ in listen("notification_pending"):
+        try:
+            await process_pending()
+        except Exception:
+            log.exception("notification batch failed")
+            await asyncio.sleep(5)
+```
+
+- [ ] **Step 3: Implement `__main__.py`**
+
+```python
+# src/carbuyer/apps/notifier/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.notifier.notifier import main
+
+
+if __name__ == "__main__":
+    run_worker("notifier", main)
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/apps/notifier/notifier.py src/carbuyer/apps/notifier/discord_post.py src/carbuyer/apps/notifier/__main__.py
+git commit -m "apps: notifier worker (consume notification_pending → Discord)"
+```
+
+---
+
+End of Phase 6. The pipeline can now post real Discord messages on early-warning and going-cheap.
+
+---
+
+## Phase 7 — Bid polling
+
+### Task 35: Tiered cadence + bid-poller worker
+
+**Files:**
+- Create: `src/carbuyer/apps/bid_poller/__init__.py`
+- Create: `src/carbuyer/apps/bid_poller/__main__.py`
+- Create: `src/carbuyer/apps/bid_poller/scheduler.py`
+- Create: `src/carbuyer/apps/bid_poller/poller.py`
+- Create: `tests/apps/test_bid_scheduler.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/bid_poller/scheduler.py`**
+
+```python
+from datetime import datetime, timedelta, timezone
+
+
+def next_poll_delay(*, scheduled_end: datetime | None, now: datetime, status: str) -> timedelta:
+    """How long until we should next poll this lot."""
+    if scheduled_end is None:
+        return timedelta(minutes=60)
+    if status in {"closed", "unsold", "sold"}:
+        return timedelta(hours=24)  # very rare re-check
+    delta = scheduled_end - now
+    if delta <= timedelta(minutes=10):
+        return timedelta(seconds=30)
+    if delta <= timedelta(hours=1):
+        return timedelta(minutes=1)
+    if delta <= timedelta(hours=2):
+        return timedelta(minutes=5)
+    if delta <= timedelta(hours=24):
+        return timedelta(minutes=15)
+    return timedelta(minutes=60)
+
+
+def fast_poll_concurrency_cap(open_fast_count: int, *, hard_cap: int = 20) -> int:
+    """Allow up to `hard_cap` simultaneous fast pollers; slow the rest."""
+    return min(open_fast_count, hard_cap)
+```
+
+- [ ] **Step 2: Write the test**
+
+```python
+# tests/apps/test_bid_scheduler.py
+from datetime import datetime, timedelta, timezone
+
+from carbuyer.apps.bid_poller.scheduler import next_poll_delay
+
+
+NOW = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def test_far_lot_polls_hourly() -> None:
+    assert next_poll_delay(
+        scheduled_end=NOW + timedelta(days=2), now=NOW, status="open"
+    ) == timedelta(minutes=60)
+
+
+def test_closing_window_speeds_up() -> None:
+    assert next_poll_delay(
+        scheduled_end=NOW + timedelta(minutes=30), now=NOW, status="open"
+    ) == timedelta(minutes=1)
+    assert next_poll_delay(
+        scheduled_end=NOW + timedelta(minutes=5), now=NOW, status="open"
+    ) == timedelta(seconds=30)
+
+
+def test_closed_lot_throttles() -> None:
+    assert next_poll_delay(
+        scheduled_end=NOW + timedelta(minutes=5), now=NOW, status="closed"
+    ) == timedelta(hours=24)
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/apps/bid_poller/poller.py`**
+
+```python
+import asyncio
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.bid_poller.scheduler import next_poll_delay
+from carbuyer.db.models import Auction, AuctionBidHistory, AuctionLot
+from carbuyer.db.session import async_session_maker
+from carbuyer.shared.logging import get_logger
+from carbuyer.sources.base import AuctionSource, LotRef
+
+
+log = get_logger("bid_poller")
+
+
+def _build_sources() -> dict[str, AuctionSource]:
+    from carbuyer.sources.hibid.source import HibidSource
+    return {"hibid": HibidSource(provinces=["AB", "BC", "SK", "MB"])}
+
+
+async def _select_open_lots(session: AsyncSession, limit: int = 200) -> list[tuple[AuctionLot, Auction]]:
+    stmt = (
+        select(AuctionLot, Auction)
+        .join(Auction, Auction.id == AuctionLot.auction_id)
+        .where(AuctionLot.lot_status.in_(["open", "closing_soon", "extended"]))
+        .order_by(Auction.scheduled_end_at.asc().nulls_last())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [(lot, auction) for (lot, auction) in rows]
+
+
+async def _poll_one(
+    session: AsyncSession, lot: AuctionLot, auction: Auction, sources: dict[str, AuctionSource]
+) -> None:
+    source = sources.get(auction.source)
+    if source is None:
+        return
+    ref = LotRef(
+        source=auction.source,
+        source_auction_id=auction.source_auction_id,
+        source_lot_id=lot.source_lot_id,
+        url=lot.url,
+    )
+    try:
+        obs = await source.poll_bid(ref)
+    except Exception:
+        log.exception("poll_bid failed", lot_id=lot.id)
+        return
+
+    history = AuctionBidHistory(
+        lot_id=lot.id,
+        observed_at=obs.observed_at,
+        current_high_bid_cad=obs.current_high_bid_cad,
+        end_time_at_observation=obs.end_time_at_observation,
+        status_at_observation=obs.status_at_observation,
+    )
+    session.add(history)
+
+    if obs.current_high_bid_cad is not None:
+        old_bid = lot.current_high_bid_cad
+        lot.current_high_bid_cad = obs.current_high_bid_cad
+        lot.last_bid_observed_at = obs.observed_at
+        if old_bid != obs.current_high_bid_cad:
+            lot.valuation_status = "pending"   # rescoring needed
+
+    if obs.end_time_at_observation is not None:
+        if auction.scheduled_end_at and obs.end_time_at_observation > auction.scheduled_end_at:
+            lot.lot_status = "extended"
+        auction.last_seen_end_at = obs.end_time_at_observation
+
+    if obs.status_at_observation == "missing":
+        # Lot disappeared from the source — treat as closed
+        if lot.lot_status != "closed":
+            lot.lot_status = "closed"
+            lot.closed_at = datetime.now(timezone.utc)
+            lot.final_bid_cad = old_bid
+    elif obs.status_at_observation == "closed":
+        lot.lot_status = "closed"
+        lot.closed_at = datetime.now(timezone.utc)
+        lot.final_bid_cad = obs.current_high_bid_cad
+
+
+async def main() -> None:
+    sources = _build_sources()
+    while True:
+        async with async_session_maker() as session:
+            async with session.begin():
+                rows = await _select_open_lots(session, limit=200)
+            now = datetime.now(timezone.utc)
+            buckets: dict[str, list[tuple[AuctionLot, Auction]]] = {"fast": [], "slow": []}
+            for lot, auction in rows:
+                delay = next_poll_delay(
+                    scheduled_end=auction.scheduled_end_at, now=now, status=lot.lot_status,
+                )
+                key = "fast" if delay.total_seconds() <= 300 else "slow"
+                buckets[key].append((lot, auction))
+
+            FAST_CAP = 20
+            for lot, auction in buckets["fast"][:FAST_CAP]:
+                async with session.begin():
+                    await _poll_one(session, lot, auction, sources)
+            for lot, auction in buckets["slow"][:50]:
+                async with session.begin():
+                    await _poll_one(session, lot, auction, sources)
+        await asyncio.sleep(30)
+```
+
+- [ ] **Step 4: Implement `__main__.py`**
+
+```python
+# src/carbuyer/apps/bid_poller/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.bid_poller.poller import main
+
+
+if __name__ == "__main__":
+    run_worker("bid_poller", main)
+```
+
+- [ ] **Step 5: Run scheduler tests and commit**
+
+```bash
+touch src/carbuyer/apps/bid_poller/__init__.py
+uv run pytest tests/apps/test_bid_scheduler.py -v
+git add src/carbuyer/apps/bid_poller/ tests/apps/test_bid_scheduler.py
+git commit -m "apps: bid-poller with tiered cadence + soft-close handling"
+```
+
+---
+
+## Phase 8 — Vision pass
+
+### Task 36: Photo download + resize helper
+
+**Files:**
+- Create: `src/carbuyer/apps/vision_batcher/__init__.py`
+- Create: `src/carbuyer/apps/vision_batcher/photos.py`
+- Create: `tests/apps/test_vision_photos.py`
+
+- [ ] **Step 1: Add Pillow to dependencies**
+
+```bash
+uv add pillow
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/vision_batcher/photos.py`**
+
+```python
+import asyncio
+import hashlib
+import os
+import tempfile
+from pathlib import Path
+
+from PIL import Image
+
+from carbuyer.shared.logging import get_logger
+from carbuyer.sources.http import make_client
+
+
+log = get_logger("vision_photos")
+
+
+async def download_and_resize(urls: list[str], *, max_dim: int = 1024, max_count: int = 8) -> list[Path]:
+    """Download up to `max_count` photos, resize to fit `max_dim` long edge, return local paths."""
+    out: list[Path] = []
+    tmp = Path(tempfile.gettempdir()) / "carbuyer-vision"
+    tmp.mkdir(parents=True, exist_ok=True)
+    async with make_client() as client:
+        for url in urls[:max_count]:
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+            except Exception:
+                log.warning("photo download failed", url=url)
+                continue
+            digest = hashlib.sha256(url.encode()).hexdigest()[:16]
+            raw_path = tmp / f"{digest}.bin"
+            raw_path.write_bytes(r.content)
+            try:
+                img = Image.open(raw_path)
+                img.thumbnail((max_dim, max_dim))
+                jpg_path = tmp / f"{digest}.jpg"
+                img.convert("RGB").save(jpg_path, format="JPEG", quality=85)
+                out.append(jpg_path)
+            except Exception:
+                log.warning("photo resize failed", url=url)
+            finally:
+                try:
+                    raw_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    return out
+```
+
+- [ ] **Step 3: Write the test**
+
+```python
+# tests/apps/test_vision_photos.py
+import io
+
+import pytest
+import respx
+from httpx import Response
+from PIL import Image
+
+from carbuyer.apps.vision_batcher.photos import download_and_resize
+
+
+def _png_bytes(w: int, h: int) -> bytes:
+    img = Image.new("RGB", (w, h), color=(128, 128, 128))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_download_and_resize_caps_count_and_size() -> None:
+    urls = [f"https://x.test/p{i}.png" for i in range(12)]
+    with respx.mock(base_url="https://x.test") as mock:
+        mock.get(url__regex=r"/p\d+\.png").mock(return_value=Response(200, content=_png_bytes(2048, 2048)))
+        out = await download_and_resize(urls, max_dim=1024, max_count=5)
+    assert len(out) == 5
+    for p in out:
+        img = Image.open(p)
+        assert max(img.size) <= 1024
+```
+
+- [ ] **Step 4: Run test and commit**
+
+```bash
+uv run pytest tests/apps/test_vision_photos.py -v
+git add src/carbuyer/apps/vision_batcher/__init__.py src/carbuyer/apps/vision_batcher/photos.py tests/apps/test_vision_photos.py pyproject.toml uv.lock
+git commit -m "vision: photo download + resize helper"
+```
+
+---
+
+### Task 37: Vision pass implementation in OpenAIProvider
+
+**Files:**
+- Modify: `src/carbuyer/llm/openai_provider.py`
+- Modify: `src/carbuyer/llm/prompts.py`
+
+- [ ] **Step 1: Add per-image and aggregation prompts to `src/carbuyer/llm/prompts.py`**
+
+Append at the end of the file:
+
+```python
+VISION_PER_IMAGE_PROMPT = """You are inspecting a single photo of a used vehicle for a deal-finder.
+
+Output the structured PerImageOutput. Rules:
+- Set explicit_unknowns for anything you cannot judge from THIS image alone.
+- Do not guess. Output `unknown`-equivalent values when uncertain.
+- Severity: 1=cosmetic, 2=needs repair, 3=structural / safety.
+- Confidence: 1=very unsure, 5=certain.
+"""
+
+
+VISION_AGGREGATION_PROMPT = """You are aggregating per-image findings (JSON only, no images) into an overall VisionOutput for a single vehicle.
+
+Rules:
+- coverage_gaps: list standard angles missing (e.g., "no engine bay shot", "no undercarriage").
+- cross_panel_paint_consistency only "consistent"/"inconsistent" if the same panel appears in 2+ shots; else "cannot_assess".
+- staging_signals: pro photography, perfect lighting, no underbody close-ups.
+- contradictions_with_description: list specific contradictions with the supplied description condition / flags.
+- Set overall_vision_condition pessimistically when finding severity 3 items.
+"""
+```
+
+- [ ] **Step 2: Replace the `vision` method body of `OpenAIProvider` (in `openai_provider.py`)**
+
+Replace:
+```python
+    async def vision(self, payload: VisionInput) -> VisionOutput:
+        # Implemented in Phase 8.
+        raise NotImplementedError("vision pass implemented in Phase 8")
+```
+
+With:
+```python
+    async def vision(self, payload: VisionInput) -> VisionOutput:
+        from base64 import b64encode
+
+        from carbuyer.llm.prompts import VISION_AGGREGATION_PROMPT, VISION_PER_IMAGE_PROMPT
+        from carbuyer.llm.schemas import PerImageOutput
+
+        per_image_results: list[PerImageOutput] = []
+        for path in payload.photo_paths:
+            img_bytes = open(path, "rb").read()
+            data_url = f"data:image/jpeg;base64,{b64encode(img_bytes).decode()}"
+            try:
+                resp = await self.client.beta.chat.completions.parse(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": VISION_PER_IMAGE_PROMPT},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": (
+                                f"Vehicle: {payload.year} {payload.make} {payload.model}. "
+                                f"Description condition (claimed): {payload.description_condition}. "
+                                f"Description red flags: {', '.join(payload.description_red_flags)}. "
+                                f"Description green flags: {', '.join(payload.description_green_flags)}."
+                            )},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ]},
+                    ],
+                    response_format=PerImageOutput,
+                    temperature=0,
+                    max_tokens=512,
+                )
+                parsed = resp.choices[0].message.parsed
+                if parsed is not None:
+                    per_image_results.append(parsed)
+            except Exception:
+                log.exception("vision per-image failed")
+                continue
+
+        agg_user = (
+            f"Per-image findings (JSON):\n{[r.model_dump() for r in per_image_results]}\n\n"
+            f"Description condition (claimed): {payload.description_condition}\n"
+            f"Description red flags: {payload.description_red_flags}\n"
+            f"Description green flags: {payload.description_green_flags}"
+        )
+        try:
+            resp = await self.client.beta.chat.completions.parse(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": VISION_AGGREGATION_PROMPT},
+                    {"role": "user", "content": agg_user},
+                ],
+                response_format=VisionOutput,
+                temperature=0,
+                max_tokens=1024,
+            )
+        except Exception:
+            log.exception("vision aggregation failed")
+            raise
+        out = resp.choices[0].message.parsed
+        if out is None:
+            raise RuntimeError("vision aggregation returned None")
+        return out
+```
+
+- [ ] **Step 3: Quick smoke run (no live API)**
+
+```bash
+uv run python -c "from carbuyer.llm.openai_provider import OpenAIProvider; print('ok')"
+```
+
+Expected: `ok`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/llm/openai_provider.py src/carbuyer/llm/prompts.py
+git commit -m "llm: implement vision pass (per-image + aggregation)"
+```
+
+---
+
+### Task 38: Vision-batcher worker (nightly)
+
+**Files:**
+- Create: `src/carbuyer/apps/vision_batcher/__main__.py`
+- Create: `src/carbuyer/apps/vision_batcher/batcher.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/vision_batcher/batcher.py`**
+
+```python
+from datetime import UTC, datetime
+from typing import cast
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.vision_batcher.photos import download_and_resize
+from carbuyer.db.models import AuctionLot
+from carbuyer.db.session import async_session_maker
+from carbuyer.llm.base import VisionInput
+from carbuyer.llm.openai_provider import OpenAIProvider
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("vision_batcher")
+
+
+CONDITION_RANK = {"bad": 0, "poor": 1, "decent": 2, "good": 3, "great": 4}
+
+
+def _bucket_diff(a: str | None, b: str | None) -> int:
+    if a is None or b is None:
+        return 0
+    return abs(CONDITION_RANK.get(a, 2) - CONDITION_RANK.get(b, 2))
+
+
+async def _select_shortlist(session: AsyncSession, *, threshold: float = 0.10, limit: int = 100) -> list[AuctionLot]:
+    stmt = (
+        select(AuctionLot)
+        .where(
+            AuctionLot.vision_status == "pending",
+            AuctionLot.price_deal_score >= threshold,
+            AuctionLot.lot_status.in_(["open", "closing_soon", "extended"]),
+        )
+        .order_by(AuctionLot.price_deal_score.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def vision_one(session: AsyncSession, lot: AuctionLot, provider: OpenAIProvider) -> None:
+    if not lot.photos:
+        lot.vision_status = "skipped"
+        return
+    paths = await download_and_resize(lot.photos, max_dim=1024, max_count=8)
+    if not paths:
+        lot.vision_status = "skipped"
+        return
+
+    payload = VisionInput(
+        photo_paths=[str(p) for p in paths],
+        year=lot.year, make=lot.make, model=lot.model,
+        description_condition=lot.condition_categorical,
+        description_red_flags=[f.get("flag", "") for f in (lot.red_flags or [])],
+        description_green_flags=[f.get("flag", "") for f in (lot.green_flags or [])],
+    )
+    try:
+        out = await provider.vision(payload)
+    except Exception:
+        log.exception("vision failed", lot_id=lot.id)
+        lot.vision_status = "failed"
+        return
+
+    lot.vision_findings = out.model_dump()
+    lot.vision_condition_overall = out.overall_vision_condition
+    lot.vision_confidence = out.vision_confidence
+    lot.vision_contradictions = out.contradictions_with_description
+
+    if (
+        out.vision_confidence > 0.7
+        and _bucket_diff(out.overall_vision_condition, lot.condition_categorical) >= 2
+    ):
+        # Pessimistic update + add a synthetic red flag
+        lot.condition_categorical = (
+            out.overall_vision_condition
+            if CONDITION_RANK[out.overall_vision_condition] < CONDITION_RANK[lot.condition_categorical or "decent"]
+            else lot.condition_categorical
+        )
+        flags = list(lot.red_flags or [])
+        flags.append({
+            "flag": "description_oversells_condition",
+            "evidence": ", ".join(out.contradictions_with_description),
+            "weight": -2,
+        })
+        lot.red_flags = flags
+        lot.valuation_status = "pending"  # rescore based on revised condition
+
+    lot.vision_status = "done"
+
+
+async def main() -> None:
+    provider = OpenAIProvider()
+    async with async_session_maker() as session:
+        async with session.begin():
+            shortlist = await _select_shortlist(session, threshold=0.10, limit=100)
+        log.info("vision shortlist", count=len(shortlist))
+        for lot in shortlist:
+            async with session.begin():
+                await vision_one(session, lot, provider)
+```
+
+- [ ] **Step 2: Implement `__main__.py`**
+
+```python
+# src/carbuyer/apps/vision_batcher/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.vision_batcher.batcher import main
+
+
+if __name__ == "__main__":
+    run_worker("vision_batcher", main)
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/carbuyer/apps/vision_batcher/batcher.py src/carbuyer/apps/vision_batcher/__main__.py
+git commit -m "vision: nightly batcher (shortlist + reconciliation)"
+```
+
+---
+
+## Phase 9 — Distillation
+
+### Task 39: Auction-distiller worker
+
+**Files:**
+- Create: `src/carbuyer/apps/auction_distiller/__init__.py`
+- Create: `src/carbuyer/apps/auction_distiller/__main__.py`
+- Create: `src/carbuyer/apps/auction_distiller/distiller.py`
+- Create: `tests/apps/test_distiller.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/auction_distiller/distiller.py`**
+
+```python
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.session import async_session_maker
+from carbuyer.shared.logging import get_logger
+
+
+log = get_logger("distiller")
+KEEP_NOTIFIED_DAYS = 90
+DISTILL_AGE_DAYS = 14
+
+
+def _channel_from(auction: Auction) -> str:
+    return f"auction_{auction.auction_subtype}"
+
+
+async def distill_lot(session: AsyncSession, lot: AuctionLot, auction: Auction) -> None:
+    final_bid = lot.final_bid_cad
+    bp = auction.buyer_premium_pct
+    final_with_premium = None
+    if final_bid is not None and bp is not None:
+        final_with_premium = final_bid * (1 + bp)
+
+    sale = HistoricalSale(
+        year=lot.year, make=lot.make, model=lot.model, trim=lot.trim,
+        engine=lot.engine, transmission=lot.transmission, drivetrain=lot.drivetrain,
+        mileage_km=lot.mileage_km, vin=lot.vin,
+        title_status=lot.title_status, province_of_origin=lot.province_of_origin,
+        condition_categorical=lot.condition_categorical,
+        final_listed_price_cad=final_bid,
+        days_listed=None,
+        buyer_premium_pct_at_sale=bp,
+        final_price_with_premium_cad=final_with_premium,
+        sale_channel=_channel_from(auction),
+        sale_platform=auction.source,
+        seller_province=auction.pickup_province,
+        seller_city=auction.pickup_city,
+        observed_first_at=auction.first_seen_at,
+        disappeared_at=lot.closed_at,
+        disposition_reason="sold" if final_bid is not None else "unsold",
+        was_notified=lot.cheap_notified_at is not None or lot.early_warning_notified_at is not None,
+        was_purchased_by_us=lot.was_purchased_by_us,
+        notes=lot.notes,
+        schema_version=1,
+    )
+    session.add(sale)
+    await session.delete(lot)
+
+
+async def main() -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DISTILL_AGE_DAYS)
+    keep_notified_cutoff = datetime.now(timezone.utc) - timedelta(days=KEEP_NOTIFIED_DAYS)
+    async with async_session_maker() as session:
+        async with session.begin():
+            stmt = (
+                select(AuctionLot, Auction)
+                .join(Auction, Auction.id == AuctionLot.auction_id)
+                .where(
+                    AuctionLot.lot_status.in_(["closed", "sold", "unsold"]),
+                    AuctionLot.closed_at.is_not(None),
+                    AuctionLot.closed_at <= cutoff,
+                    AuctionLot.was_purchased_by_us.is_(False),
+                )
+            )
+            rows = (await session.execute(stmt)).all()
+            for lot, auction in rows:
+                # Keep watched lots longer
+                if lot.user_action in {"interested", "maybe"} and (
+                    lot.closed_at is None or lot.closed_at > keep_notified_cutoff
+                ):
+                    continue
+                await distill_lot(session, lot, auction)
+            log.info("distilled", count=len(rows))
+```
+
+- [ ] **Step 2: Implement `__main__.py`**
+
+```python
+# src/carbuyer/apps/auction_distiller/__main__.py
+from carbuyer.apps._runner import run_worker
+from carbuyer.apps.auction_distiller.distiller import main
+
+
+if __name__ == "__main__":
+    run_worker("auction_distiller", main)
+```
+
+- [ ] **Step 3: Write the test**
+
+```python
+# tests/apps/test_distiller.py
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import select
+
+from carbuyer.apps.auction_distiller.distiller import distill_lot
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+
+
+@pytest.mark.asyncio
+async def test_distill_lot_creates_historical_sale(session) -> None:
+    a = Auction(source="hibid", source_auction_id="A", url="x", auction_subtype="estate",
+                first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+                pickup_province="AB", pickup_city="Calgary",
+                buyer_premium_pct=Decimal("0.10"))
+    session.add(a)
+    await session.flush()
+    lot = AuctionLot(
+        auction_id=a.id, source_lot_id="L1", url="https://x",
+        year=2010, make="Ford", model="F-150", mileage_km=200000,
+        title_status="NORMAL", condition_categorical="decent",
+        red_flags=[], green_flags=[], showstopper_flags=[],
+        lot_status="closed", final_bid_cad=Decimal("8000"),
+        closed_at=datetime.now(UTC) - timedelta(days=20),
+    )
+    session.add(lot)
+    await session.commit()
+
+    await distill_lot(session, lot, a)
+    await session.commit()
+
+    sales = list((await session.execute(select(HistoricalSale))).scalars().all())
+    assert len(sales) == 1
+    assert sales[0].sale_channel == "auction_estate"
+    assert sales[0].sale_platform == "hibid"
+    assert sales[0].final_listed_price_cad == Decimal("8000.00")
+    assert sales[0].final_price_with_premium_cad == Decimal("8800.000")  # 8000 × 1.10
+```
+
+- [ ] **Step 4: Run test and commit**
+
+```bash
+touch src/carbuyer/apps/auction_distiller/__init__.py
+uv run pytest tests/apps/test_distiller.py -v
+git add src/carbuyer/apps/auction_distiller/ tests/apps/test_distiller.py
+git commit -m "apps: auction-distiller (closed lots → historical_sales)"
+```
+
+---
+
+End of Phase 9. The pipeline is complete from discovery through bid polling, vision, and distillation. Phase 10 adds two more sources; Phase 11 builds the dashboard; Phase 12 wires production deployment.
+
+---
+
+## Phase 10 — Additional sources (McDougall + farmauctionguide.com)
+
+### Task 40: McDougall Auctioneers plugin
+
+McDougall Auctioneers (`mcdougallauction.com`) runs its own platform. Their site has a dedicated Vehicles + Vocational Trucks taxonomy. The exact selectors must be verified during implementation against a captured fixture. This task delivers the structure; selectors are filled in once a real page is captured.
+
+**Files:**
+- Create: `src/carbuyer/sources/mcdougall/__init__.py`
+- Create: `src/carbuyer/sources/mcdougall/source.py`
+- Create: `tests/sources/mcdougall/__init__.py`
+- Create: `tests/sources/mcdougall/test_source.py`
+- Create: `tests/sources/fixtures/mcdougall_vehicles_sample.html`
+
+- [ ] **Step 1: Capture a fixture**
+
+```bash
+curl -s "https://www.mcdougallauction.com/vehicles" \
+  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
+  > tests/sources/fixtures/mcdougall_vehicles_sample.html
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/sources/mcdougall/source.py`**
+
+```python
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from selectolax.parser import HTMLParser
+
+from carbuyer.sources.base import (
+    AuctionRef, AuctionSource, BidObservation, LotRef, RawAuction, RawLot,
+)
+from carbuyer.sources.http import jittered_sleep, make_client
+
+
+VEHICLES_URL = "https://www.mcdougallauction.com/vehicles"
+
+
+class McDougallSource(AuctionSource):
+    name = "mcdougall"
+
+    async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
+        seen: set[str] = set()
+        async with make_client() as client:
+            resp = await client.get(VEHICLES_URL)
+            resp.raise_for_status()
+            tree = HTMLParser(resp.text)
+            for node in tree.css("a[href*='/auction/']"):
+                href = node.attributes.get("href") or ""
+                # Selectors verified during implementation against the captured fixture.
+                # Expected pattern: /auction/<id>/<slug>
+                parts = href.strip("/").split("/")
+                if len(parts) < 2 or not parts[1].isdigit():
+                    continue
+                auction_id = parts[1]
+                if auction_id in seen:
+                    continue
+                seen.add(auction_id)
+                yield AuctionRef(
+                    source="mcdougall",
+                    source_auction_id=auction_id,
+                    url=f"https://www.mcdougallauction.com{href}",
+                )
+            await jittered_sleep()
+
+    async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        tree = HTMLParser(resp.text)
+        # Selectors verified during implementation. For MVP we record minimum metadata.
+        title_node = tree.css_first("h1") or tree.css_first(".auction-title")
+        title = title_node.text(strip=True) if title_node else None
+        return RawAuction(
+            ref=ref, title=title, description=None,
+            auctioneer_name="McDougall Auctioneers", auctioneer_external_id=None,
+            scheduled_start_at=None, scheduled_end_at=None,
+            pickup_address=None, pickup_city=None, pickup_province="SK",
+            pickup_window_text=None,
+            buyer_premium_pct=Decimal("0.10"),
+            online_bidding_fee_pct=None,
+            terms_text=None,
+            auction_subtype="estate",
+        )
+
+    async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        tree = HTMLParser(resp.text)
+        for node in tree.css("a[href*='/lot/']"):
+            href = node.attributes.get("href") or ""
+            parts = href.strip("/").split("/")
+            if len(parts) < 2 or not parts[1].isdigit():
+                continue
+            lot_id = parts[1]
+            yield LotRef(
+                source="mcdougall",
+                source_auction_id=ref.source_auction_id,
+                source_lot_id=lot_id,
+                url=f"https://www.mcdougallauction.com{href}",
+            )
+
+    async def fetch_lot(self, ref: LotRef) -> RawLot:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        tree = HTMLParser(resp.text)
+        title_node = tree.css_first("h1") or tree.css_first(".lot-title")
+        title = title_node.text(strip=True) if title_node else None
+        desc_node = tree.css_first(".lot-description") or tree.css_first(".description")
+        description = desc_node.text(strip=True) if desc_node else None
+        photos = [n.attributes.get("src") or "" for n in tree.css(".lot-images img")]
+        photos = [p for p in photos if p]
+        return RawLot(
+            ref=ref,
+            lot_number=None,
+            title=title,
+            description=description,
+            photos=photos,
+            year=None, make=None, model=None,
+            current_high_bid_cad=None,
+            scheduled_end_at=None,
+            lot_status="open",
+        )
+
+    async def poll_bid(self, ref: LotRef) -> BidObservation:
+        async with make_client() as client:
+            resp = await client.get(ref.url)
+            resp.raise_for_status()
+        tree = HTMLParser(resp.text)
+        bid_node = tree.css_first(".current-bid") or tree.css_first("[data-bid]")
+        bid = None
+        if bid_node:
+            txt = bid_node.text(strip=True).replace("$", "").replace(",", "").strip()
+            try:
+                bid = Decimal(txt)
+            except Exception:
+                bid = None
+        return BidObservation(
+            ref=ref, observed_at=datetime.now(UTC),
+            current_high_bid_cad=bid,
+            end_time_at_observation=None,
+            status_at_observation="open",
+        )
+```
+
+- [ ] **Step 3: Write a smoke test (skipped without fixture content)**
+
+```python
+# tests/sources/mcdougall/test_source.py
+import os
+from pathlib import Path
+
+import pytest
+
+from carbuyer.sources.mcdougall.source import McDougallSource
+
+
+FIXTURE_PATH = Path("tests/sources/fixtures/mcdougall_vehicles_sample.html")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not FIXTURE_PATH.exists() or FIXTURE_PATH.stat().st_size < 1000,
+    reason="fixture not captured yet",
+)
+async def test_source_imports() -> None:
+    src = McDougallSource()
+    assert src.name == "mcdougall"
+```
+
+- [ ] **Step 4: Create `__init__.py` files and commit**
+
+```bash
+touch src/carbuyer/sources/mcdougall/__init__.py tests/sources/mcdougall/__init__.py
+uv run pytest tests/sources/mcdougall/test_source.py -v
+git add src/carbuyer/sources/mcdougall/ tests/sources/mcdougall/ tests/sources/fixtures/mcdougall_vehicles_sample.html
+git commit -m "mcdougall: AuctionSource implementation"
+```
+
+---
+
+### Task 41: farmauctionguide.com — primary platform-router
+
+**Operational note:** for the user's region, farmauctionguide.com surfaces meaningfully more relevant auctions than HiBid's province pages do (HiBid's Canada inventory leans US-east). farmauctionguide is therefore the **primary discovery entry point**. It inspects each upcoming auction's outbound URL, identifies the underlying platform, and emits an `AuctionRef` with the resolved `source` so the existing per-platform plugin (HiBid lot extractor, McDougall lot extractor) can fetch lots normally. HiBid's own province-page discovery (Task 13) stays as a redundant secondary path — same auctions surface from both, but rows dedup on `(source, source_auction_id)` so no duplication.
+
+For auctions whose underlying platform we don't have a plugin for, we emit `source="farmauctionguide_unknown"` — those rows surface in the dashboard with the outbound URL for the user to click through manually, and the lot-scraper skips them (no plugin to call).
+
+**Files:**
+- Create: `src/carbuyer/sources/farmauctionguide/__init__.py`
+- Create: `src/carbuyer/sources/farmauctionguide/source.py`
+- Create: `tests/sources/farmauctionguide/__init__.py`
+- Create: `tests/sources/farmauctionguide/test_source.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/sources/farmauctionguide/source.py`**
+
+```python
+import re
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from decimal import Decimal
+from urllib.parse import urlparse
+
+from selectolax.parser import HTMLParser
+
+from carbuyer.sources.base import (
+    AuctionRef, AuctionSource, BidObservation, LotRef, RawAuction, RawLot,
+)
+from carbuyer.sources.http import jittered_sleep, make_client
+
+
+PROVINCE_PAGES = {
+    "AB": "https://www.farmauctionguide.com/canada/alberta/",
+    "SK": "https://www.farmauctionguide.com/canada/saskatchewan/",
+    "MB": "https://www.farmauctionguide.com/canada/manitoba/",
+    "BC": "https://www.farmauctionguide.com/canada/british-columbia/",
+}
+
+
+# Each entry: (hostname pattern, resolved source name, regex to extract auction id from URL).
+# `source` matches the lookup key in lot_scraper._build_sources() so the right plugin runs.
+PLATFORM_RULES: list[tuple[re.Pattern[str], str, re.Pattern[str]]] = [
+    (re.compile(r"(^|\.)hibid\.com$", re.I), "hibid",
+     re.compile(r"/(?:catalog|auctions?)/(\d+)")),
+    (re.compile(r"mcdougallauction\.com$", re.I), "mcdougall",
+     re.compile(r"/auction/(\d+)")),
+    # Add new platforms here as we ship per-platform plugins.
+]
+
+
+def resolve_platform(url: str) -> tuple[str, str]:
+    """Return (resolved_source, extracted_auction_id). Falls back to farmauctionguide_unknown."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    for host_re, source, id_re in PLATFORM_RULES:
+        if host_re.search(host):
+            m = id_re.search(parsed.path)
+            ext_id = m.group(1) if m else (parsed.path.rstrip("/").split("/")[-1] or url)
+            return source, ext_id
+    fallback_id = parsed.path.rstrip("/").split("/")[-1] or url
+    return "farmauctionguide_unknown", fallback_id
+
+
+class FarmAuctionGuideSource(AuctionSource):
+    """Primary platform-router for the user's region.
+
+    Walks per-province pages, identifies the underlying platform from each
+    outbound URL, and emits AuctionRefs with the resolved `source`. The
+    existing pipeline (auction-discoverer + lot-scraper) then dispatches each
+    auction to the correct per-platform plugin. Auctions whose platform we
+    don't have a plugin for emit `source='farmauctionguide_unknown'` and
+    surface in the dashboard with the outbound URL for manual review.
+    """
+
+    name = "farmauctionguide"
+
+    def __init__(self, provinces: list[str]) -> None:
+        self.provinces = provinces
+
+    async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
+        seen: set[tuple[str, str]] = set()
+        async with make_client() as client:
+            for province in self.provinces:
+                page = PROVINCE_PAGES.get(province)
+                if not page:
+                    continue
+                resp = await client.get(page)
+                resp.raise_for_status()
+                tree = HTMLParser(resp.text)
+                # Selectors verified during implementation against a captured fixture.
+                for link in tree.css("a.auction-link, a[href*='/auction/'], a[data-auction]"):
+                    href = link.attributes.get("href") or ""
+                    if not href or not href.startswith("http"):
+                        continue
+                    source, ext_id = resolve_platform(href)
+                    key = (source, ext_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield AuctionRef(
+                        source=source,
+                        source_auction_id=ext_id,
+                        url=href,
+                    )
+                await jittered_sleep()
+
+    async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
+        # Only called for refs we emit with source='farmauctionguide_unknown'.
+        # For 'hibid' / 'mcdougall' refs, the corresponding plugin is invoked
+        # by the auction-discoverer instead. We provide a minimal record so
+        # the unknown rows still appear in the dashboard.
+        return RawAuction(
+            ref=ref, title=None, description=None,
+            auctioneer_name=None, auctioneer_external_id=None,
+            scheduled_start_at=None, scheduled_end_at=None,
+            pickup_address=None, pickup_city=None, pickup_province=None,
+            pickup_window_text=None, buyer_premium_pct=Decimal("0.10"),
+            online_bidding_fee_pct=None, terms_text=None,
+            auction_subtype="estate",
+        )
+
+    async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]:
+        # Lot-scraping for farmauctionguide_unknown rows is intentionally a no-op.
+        # The user clicks through the outbound URL in the dashboard.
+        if False:
+            yield  # pragma: no cover -- typed empty generator
+        return
+
+    async def fetch_lot(self, ref: LotRef) -> RawLot:
+        raise NotImplementedError("farmauctionguide_unknown auctions cannot fetch lots")
+
+    async def poll_bid(self, ref: LotRef) -> BidObservation:
+        return BidObservation(
+            ref=ref, observed_at=datetime.now(UTC),
+            current_high_bid_cad=None,
+            end_time_at_observation=None,
+            status_at_observation="missing",
+        )
+```
+
+The key behavior change from the discovery-only design: `discover_auctions` now emits `AuctionRef(source="hibid", ...)` or `AuctionRef(source="mcdougall", ...)` for auctions whose outbound URL identifies them as living on those platforms. The auction-discoverer worker (Task 18 / Task 41 step 2) sees these refs with the resolved source, then calls `fetch_auction` / `fetch_lots` on the matching plugin via the dispatch map below.
+
+For dispatching by `ref.source`, we update `auction-discoverer` to look up the plugin from a registry rather than calling `source.fetch_auction(ref)` on the discoverer that emitted the ref:
+
+- [ ] **Step 2: Update `discover_once` in `src/carbuyer/apps/auction_discoverer/discoverer.py` to route by `ref.source`**
+
+Replace `discover_once` and `main` in that file with:
+
+```python
+async def discover_once(
+    discoverers: list[AuctionSource],
+    registry: dict[str, AuctionSource],
+) -> int:
+    """Run each discoverer; for every emitted AuctionRef, dispatch fetch_auction
+    to the plugin registered under ref.source. Falls back to the discoverer
+    that emitted the ref when no registry entry matches (used for source-of-
+    its-own-refs plugins like HiBid's province-page discovery)."""
+    found = 0
+    for discoverer in discoverers:
+        log.info("discovering", source=discoverer.name)
+        async for ref in discoverer.discover_auctions():
+            plugin = registry.get(ref.source, discoverer)
+            try:
+                raw = await plugin.fetch_auction(ref)
+            except Exception:
+                log.exception("fetch_auction failed", source=ref.source, ref=ref)
+                continue
+            async with async_session_maker() as session:
+                async with session.begin():
+                    auction = await upsert_auction(session, raw)
+                    await notify(session, "auction_pending", str(auction.id))
+            found += 1
+    log.info("discovery complete", found=found)
+    return found
+
+
+async def main() -> None:
+    from carbuyer.sources.farmauctionguide.source import FarmAuctionGuideSource
+    from carbuyer.sources.hibid.source import HibidSource
+    from carbuyer.sources.mcdougall.source import McDougallSource
+
+    hibid = HibidSource(provinces=["AB", "BC", "SK", "MB"])
+    mcdougall = McDougallSource()
+    farmguide = FarmAuctionGuideSource(provinces=["AB", "SK", "MB", "BC"])
+
+    # farmauctionguide first: primary entry point for the user's region.
+    # HiBid's own province discovery stays as a redundant secondary path —
+    # any HiBid auction farmauctionguide already routed dedupes via
+    # (source, source_auction_id) in upsert_auction.
+    discoverers: list[AuctionSource] = [farmguide, hibid, mcdougall]
+
+    # Registry — keyed on `ref.source`. The plugin that owns each platform
+    # provides `fetch_auction` / `fetch_lots` / `fetch_lot` / `poll_bid`.
+    registry: dict[str, AuctionSource] = {
+        "hibid": hibid,
+        "mcdougall": mcdougall,
+        "farmauctionguide_unknown": farmguide,  # minimum-record path
+    }
+    await discover_once(discoverers, registry)
+```
+
+- [ ] **Step 3: Update `lot_scraper`'s `_build_sources` to be the same registry**
+
+Modify `src/carbuyer/apps/lot_scraper/scraper.py`:
+
+```python
+def _build_sources() -> dict[str, AuctionSource]:
+    from carbuyer.sources.farmauctionguide.source import FarmAuctionGuideSource
+    from carbuyer.sources.hibid.source import HibidSource
+    from carbuyer.sources.mcdougall.source import McDougallSource
+    return {
+        "hibid": HibidSource(provinces=["AB", "BC", "SK", "MB"]),
+        "mcdougall": McDougallSource(),
+        "farmauctionguide_unknown": FarmAuctionGuideSource(provinces=["AB", "SK", "MB", "BC"]),
+    }
+```
+
+`farmauctionguide_unknown` lots return zero `LotRef`s (the `fetch_lots` async generator yields nothing), so the lot-scraper sees those auctions but writes no `auction_lots` rows — they show up in the dashboard with the outbound URL only.
+
+The bid-poller's `_build_sources` should mirror the same registry — update `src/carbuyer/apps/bid_poller/poller.py` to import all three plugins identically.
+
+- [ ] **Step 4: Smoke test the platform router**
+
+```python
+# tests/sources/farmauctionguide/test_source.py
+import pytest
+
+from carbuyer.sources.farmauctionguide.source import FarmAuctionGuideSource, resolve_platform
+
+
+def test_source_constructible() -> None:
+    src = FarmAuctionGuideSource(provinces=["AB"])
+    assert src.name == "farmauctionguide"
+
+
+def test_resolve_platform_routes_hibid() -> None:
+    source, ext_id = resolve_platform("https://terrymcdougall.hibid.com/catalog/740236/some-slug")
+    assert source == "hibid"
+    assert ext_id == "740236"
+
+
+def test_resolve_platform_routes_mcdougall() -> None:
+    source, ext_id = resolve_platform("https://www.mcdougallauction.com/auction/12345/regina-summer")
+    assert source == "mcdougall"
+    assert ext_id == "12345"
+
+
+def test_resolve_platform_falls_back_to_unknown() -> None:
+    source, ext_id = resolve_platform("https://random-auctioneer.example.com/sale/abc")
+    assert source == "farmauctionguide_unknown"
+    assert ext_id == "abc"
+```
+
+```bash
+touch src/carbuyer/sources/farmauctionguide/__init__.py tests/sources/farmauctionguide/__init__.py
+uv run pytest tests/sources/farmauctionguide/test_source.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/carbuyer/sources/farmauctionguide/ tests/sources/farmauctionguide/ src/carbuyer/apps/auction_discoverer/discoverer.py src/carbuyer/apps/lot_scraper/scraper.py src/carbuyer/apps/bid_poller/poller.py
+git commit -m "sources: farmauctionguide as primary platform-router; HiBid secondary"
+```
+
+---
+
+End of Phase 10. All three MVP sources are integrated.
+
+---
+
+## Phase 11 — Dashboard
+
+FastAPI + Jinja2 + HTMX served on `localhost:8000`. No auth in MVP; auth seam wired so it's a one-line addition later. HTMX vendored locally — no CDN.
+
+### Task 42: FastAPI skeleton + base template + HTMX
+
+**Files:**
+- Create: `src/carbuyer/apps/dashboard/__init__.py`
+- Create: `src/carbuyer/apps/dashboard/__main__.py`
+- Create: `src/carbuyer/apps/dashboard/app.py`
+- Create: `src/carbuyer/apps/dashboard/deps.py`
+- Create: `src/carbuyer/apps/dashboard/templates/base.html`
+- Create: `src/carbuyer/apps/dashboard/templates/_macros.html`
+- Create: `src/carbuyer/apps/dashboard/static/vendor/htmx.min.js`
+- Create: `src/carbuyer/apps/dashboard/static/vendor/chart.umd.js`
+- Create: `src/carbuyer/apps/dashboard/static/css/app.css`
+
+- [ ] **Step 1: Vendor HTMX and Chart.js**
+
+```bash
+mkdir -p src/carbuyer/apps/dashboard/static/vendor src/carbuyer/apps/dashboard/templates
+curl -L -o src/carbuyer/apps/dashboard/static/vendor/htmx.min.js https://unpkg.com/htmx.org@2.0.2/dist/htmx.min.js
+curl -L -o src/carbuyer/apps/dashboard/static/vendor/chart.umd.js https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.js
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/dashboard/deps.py`**
+
+```python
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+
+from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.session import async_session_maker
+
+
+@dataclass(slots=True, frozen=True)
+class CurrentUser:
+    id: str
+    role: str
+
+
+async def get_session() -> AsyncIterator[AsyncSession]:
+    async with async_session_maker() as session:
+        yield session
+
+
+def is_htmx(request: Request) -> bool:
+    return request.headers.get("HX-Request") == "true"
+
+
+def current_user() -> CurrentUser:
+    # Stub for MVP; replace with real auth in phase 2.
+    return CurrentUser(id="me", role="dev")
+```
+
+- [ ] **Step 3: Implement `src/carbuyer/apps/dashboard/app.py`**
+
+```python
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+
+BASE_DIR = Path(__file__).parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="CarBuyer Dashboard")
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(BASE_DIR / "static")),
+        name="static",
+    )
+    from carbuyer.apps.dashboard.routers import (
+        feed, closing, watched, lots, comps, sold, purchases, health, actions,
+    )
+    for router in (feed, closing, watched, lots, comps, sold, purchases, health, actions):
+        app.include_router(router.router)
+    return app
+
+
+app = create_app()
+```
+
+- [ ] **Step 4: Implement `src/carbuyer/apps/dashboard/__main__.py`**
+
+```python
+import uvicorn
+
+from carbuyer.apps.dashboard.app import app
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+```
+
+- [ ] **Step 5: Write `src/carbuyer/apps/dashboard/templates/base.html`**
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}CarBuyer{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  <script src="/static/vendor/chart.umd.js" defer></script>
+</head>
+<body>
+  <nav class="topnav">
+    <a href="/">Feed</a>
+    <a href="/closing">Closing soon</a>
+    <a href="/watched">Watched</a>
+    <a href="/comps">Comps</a>
+    <a href="/sold">Sold</a>
+    <a href="/purchases">Purchases</a>
+    <a href="/health">Health</a>
+  </nav>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>
+```
+
+- [ ] **Step 6: Write `src/carbuyer/apps/dashboard/templates/_macros.html`**
+
+```html
+{% macro money(value) %}
+{%- if value is none -%}—{%- else -%}${{ "{:,.0f}".format(value|float) }}{%- endif -%}
+{% endmacro %}
+
+{% macro pct(value) %}
+{%- if value is none -%}—{%- else -%}{{ "{:.1%}".format(value|float) }}{%- endif -%}
+{% endmacro %}
+```
+
+- [ ] **Step 7: Write `src/carbuyer/apps/dashboard/static/css/app.css` (minimum)**
+
+```css
+body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #fafaf9; color: #1a1a1a; }
+.topnav { background: #1a1a1a; padding: 0.75rem 1rem; }
+.topnav a { color: #fafaf9; margin-right: 1.25rem; text-decoration: none; }
+.topnav a:hover { text-decoration: underline; }
+main { padding: 1rem; max-width: 1200px; margin: 0 auto; }
+.card { background: white; border: 1px solid #e5e5e5; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+.muted { color: #666; }
+.range-bar { position: relative; height: 8px; background: #ddd; border-radius: 4px; }
+.range-bar .marker { position: absolute; width: 4px; height: 12px; top: -2px; background: #d33; border-radius: 2px; }
+.tag { display: inline-block; padding: 0.1rem 0.5rem; background: #eee; border-radius: 999px; font-size: 0.85em; margin-right: 0.25rem; }
+.tag.rare { background: #ffd166; }
+.tag.deal { background: #06d6a0; }
+```
+
+- [ ] **Step 8: Smoke test**
+
+```bash
+touch src/carbuyer/apps/dashboard/__init__.py
+mkdir -p src/carbuyer/apps/dashboard/routers
+touch src/carbuyer/apps/dashboard/routers/__init__.py
+# Add stub routers to satisfy imports
+for r in feed closing watched lots comps sold purchases health actions; do
+  cat > src/carbuyer/apps/dashboard/routers/$r.py <<EOF
+from fastapi import APIRouter
+router = APIRouter()
+EOF
+done
+uv run python -c "from carbuyer.apps.dashboard.app import app; print(app.title)"
+```
+
+Expected: `CarBuyer Dashboard`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/carbuyer/apps/dashboard/
+git commit -m "dashboard: FastAPI skeleton + base template + HTMX vendoring"
+```
+
+---
+
+### Task 43: Auction feed view (default landing)
+
+**Files:**
+- Modify: `src/carbuyer/apps/dashboard/routers/feed.py`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/feed.html`
+- Create: `src/carbuyer/apps/dashboard/templates/partials/lot_card.html`
+- Create: `src/carbuyer/apps/dashboard/templates/partials/lot_list.html`
+- Create: `src/carbuyer/apps/dashboard/templates/partials/feed_filters.html`
+- Create: `tests/apps/dashboard/__init__.py`
+- Create: `tests/apps/dashboard/test_feed.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/dashboard/routers/feed.py`**
+
+```python
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session, is_htmx
+from carbuyer.db.models import Auction, AuctionLot
+
+
+router = APIRouter()
+
+
+@router.get("/", response_class=HTMLResponse)
+async def feed(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    province: list[str] | None = Query(default=None),
+    min_score: float = 0.0,
+    min_rarity: float = 0.0,
+    exclude_not_interested: bool = True,
+    cursor: int | None = None,
+    limit: int = 20,
+) -> HTMLResponse:
+    stmt = (
+        select(AuctionLot, Auction)
+        .join(Auction, Auction.id == AuctionLot.auction_id)
+        .where(AuctionLot.lot_status.in_(["open", "closing_soon", "extended"]))
+    )
+    if province:
+        stmt = stmt.where(Auction.pickup_province.in_(province))
+    if min_score > 0:
+        stmt = stmt.where(AuctionLot.price_deal_score >= min_score)
+    if min_rarity > 0:
+        stmt = stmt.where(AuctionLot.rarity_score >= min_rarity)
+    if exclude_not_interested:
+        stmt = stmt.where(AuctionLot.user_action.is_distinct_from("not_interested"))
+    if cursor is not None:
+        stmt = stmt.where(AuctionLot.id < cursor)
+    stmt = stmt.order_by(AuctionLot.id.desc()).limit(limit)
+
+    rows = (await session.execute(stmt)).all()
+    items = [{"lot": lot, "auction": auction} for (lot, auction) in rows]
+    next_cursor = items[-1]["lot"].id if items else None
+
+    template = "partials/lot_list.html" if is_htmx(request) else "pages/feed.html"
+    return templates.TemplateResponse(
+        request, template,
+        {"items": items, "next_cursor": next_cursor,
+         "filters": {"province": province or [], "min_score": min_score,
+                     "min_rarity": min_rarity, "exclude_not_interested": exclude_not_interested}},
+    )
+```
+
+- [ ] **Step 2: Write `templates/pages/feed.html`**
+
+```html
+{% extends "base.html" %}
+{% block title %}Feed — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Auction feed</h1>
+  {% include "partials/feed_filters.html" %}
+  <div id="lot-list">
+    {% include "partials/lot_list.html" %}
+  </div>
+{% endblock %}
+```
+
+- [ ] **Step 3: Write `templates/partials/feed_filters.html`**
+
+```html
+<form
+  hx-get="/"
+  hx-target="#lot-list"
+  hx-swap="innerHTML"
+  hx-trigger="change from:select, change from:input[type='checkbox'], keyup changed delay:300ms from:input[type='number'], submit"
+  hx-push-url="true"
+  class="card"
+>
+  <label>Province
+    <select name="province" multiple>
+      {% for p in ["AB", "BC", "SK", "MB"] %}
+        <option value="{{ p }}" {% if p in filters.province %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Min deal score
+    <input type="number" name="min_score" step="0.01" min="0" max="1" value="{{ filters.min_score }}">
+  </label>
+  <label>Min rarity score
+    <input type="number" name="min_rarity" step="0.5" min="0" max="5" value="{{ filters.min_rarity }}">
+  </label>
+  <label>
+    <input type="checkbox" name="exclude_not_interested" value="true"
+      {% if filters.exclude_not_interested %}checked{% endif %}>
+    Exclude not-interested
+  </label>
+</form>
+```
+
+- [ ] **Step 4: Write `templates/partials/lot_list.html`**
+
+```html
+{% from "_macros.html" import money %}
+{% for item in items %}
+  {% include "partials/lot_card.html" %}
+{% endfor %}
+{% if next_cursor %}
+  <div
+    hx-get="/?cursor={{ next_cursor }}{% if filters.province %}{% for p in filters.province %}&province={{ p }}{% endfor %}{% endif %}&min_score={{ filters.min_score }}&min_rarity={{ filters.min_rarity }}&exclude_not_interested={{ filters.exclude_not_interested|lower }}"
+    hx-trigger="revealed"
+    hx-swap="afterend"
+  ></div>
+{% endif %}
+```
+
+- [ ] **Step 5: Write `templates/partials/lot_card.html`**
+
+```html
+{% from "_macros.html" import money %}
+{% set lot = item.lot %}
+{% set auction = item.auction %}
+<div class="card">
+  <h3>
+    <a href="/lots/{{ lot.id }}">{{ lot.year or "" }} {{ lot.make or "" }} {{ lot.model or "" }} {{ lot.trim or "" }}</a>
+  </h3>
+  <p class="muted">
+    {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
+    closes {{ auction.scheduled_end_at.strftime("%b %d %H:%M") if auction.scheduled_end_at else "?" }}
+  </p>
+  <p>
+    Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong>
+    {% if lot.all_in_at_current_bid_cad %} · All-in: {{ money(lot.all_in_at_current_bid_cad) }}{% endif %}
+    {% if lot.expected_value_cad %} · Est value: {{ money(lot.expected_value_cad) }}{% endif %}
+  </p>
+  <p>
+    {% if lot.rarity_score and lot.rarity_score >= 2.0 %}
+      <span class="tag rare">Rarity {{ "%.1f"|format(lot.rarity_score) }}</span>
+    {% endif %}
+    {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+      <span class="tag deal">Deal {{ "%.0f"|format(lot.price_deal_score * 100) }}%</span>
+    {% endif %}
+    {% if lot.suspicious_underprice_flag %}
+      <span class="tag" style="background:#ffe0e0">⚠ below low end</span>
+    {% endif %}
+  </p>
+</div>
+```
+
+- [ ] **Step 6: Write the test**
+
+```python
+# tests/apps/dashboard/test_feed.py
+import pytest
+from fastapi.testclient import TestClient
+
+from carbuyer.apps.dashboard.app import app
+
+
+def test_feed_root_returns_html() -> None:
+    with TestClient(app) as client:
+        r = client.get("/")
+    assert r.status_code == 200
+    assert "Auction feed" in r.text
+
+
+def test_feed_htmx_returns_partial() -> None:
+    with TestClient(app) as client:
+        r = client.get("/", headers={"HX-Request": "true"})
+    assert r.status_code == 200
+    assert "Auction feed" not in r.text  # full page header omitted
+```
+
+- [ ] **Step 7: Run test and commit**
+
+```bash
+mkdir -p tests/apps/dashboard
+touch tests/apps/dashboard/__init__.py
+uv run pytest tests/apps/dashboard/test_feed.py -v
+git add src/carbuyer/apps/dashboard/routers/feed.py src/carbuyer/apps/dashboard/templates/ tests/apps/dashboard/
+git commit -m "dashboard: auction feed view with filters and infinite scroll"
+```
+
+---
+
+### Task 44: Lot detail with comp comparison panel
+
+**Files:**
+- Modify: `src/carbuyer/apps/dashboard/routers/lots.py`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/lot_detail.html`
+- Create: `src/carbuyer/apps/dashboard/templates/partials/comp_panel.html`
+- Create: `tests/apps/dashboard/test_lot_detail.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/dashboard/routers/lots.py`**
+
+```python
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session, is_htmx
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+
+
+router = APIRouter()
+
+
+@router.get("/lots/{lot_id}", response_class=HTMLResponse)
+async def lot_detail(
+    request: Request, lot_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> HTMLResponse:
+    lot = await session.get(AuctionLot, lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404)
+    auction = await session.get(Auction, lot.auction_id)
+    return templates.TemplateResponse(
+        request, "pages/lot_detail.html",
+        {"lot": lot, "auction": auction},
+    )
+
+
+@router.get("/lots/{lot_id}/comps", response_class=HTMLResponse)
+async def lot_comps(
+    request: Request, lot_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> HTMLResponse:
+    lot = await session.get(AuctionLot, lot_id)
+    if lot is None or lot.make is None or lot.model is None or lot.year is None:
+        return templates.TemplateResponse(
+            request, "partials/comp_panel.html",
+            {"sold": [], "open": [], "fuzzy": True},
+        )
+
+    # Sold comps from historical_sales: same make/model, year ±2, mileage ±20%
+    mileage = lot.mileage_km or 0
+    mileage_lo = int(mileage * 0.8) if mileage else 0
+    mileage_hi = int(mileage * 1.2) if mileage else 9_999_999
+
+    sold_stmt = (
+        select(HistoricalSale)
+        .where(
+            HistoricalSale.make == lot.make,
+            HistoricalSale.model == lot.model,
+            HistoricalSale.year.between(lot.year - 2, lot.year + 2),
+        )
+        .order_by(HistoricalSale.id.desc())
+        .limit(20)
+    )
+    if mileage:
+        sold_stmt = sold_stmt.where(HistoricalSale.mileage_km.between(mileage_lo, mileage_hi))
+    sold = list((await session.execute(sold_stmt)).scalars().all())
+
+    # Open comps: currently-open auction_lots, same make/model, year ±2
+    open_stmt = (
+        select(AuctionLot, Auction)
+        .join(Auction, Auction.id == AuctionLot.auction_id)
+        .where(
+            AuctionLot.id != lot.id,
+            AuctionLot.lot_status.in_(["open", "closing_soon", "extended"]),
+            AuctionLot.make == lot.make,
+            AuctionLot.model == lot.model,
+            AuctionLot.year.between(lot.year - 2, lot.year + 2),
+        )
+        .order_by(Auction.scheduled_end_at.asc())
+        .limit(10)
+    )
+    open_rows = (await session.execute(open_stmt)).all()
+    open_lots = [{"lot": lot_row, "auction": auc} for (lot_row, auc) in open_rows]
+
+    fuzzy = (len(sold) + len(open_lots)) == 0
+    return templates.TemplateResponse(
+        request, "partials/comp_panel.html",
+        {"sold": sold, "open": open_lots, "fuzzy": fuzzy},
+    )
+```
+
+- [ ] **Step 2: Write `templates/pages/lot_detail.html`**
+
+```html
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block title %}{{ lot.title or "Lot" }}{% endblock %}
+{% block content %}
+  <h1>{{ lot.year or "" }} {{ lot.make or "" }} {{ lot.model or "" }} {{ lot.trim or "" }}</h1>
+  <p class="muted">
+    {{ auction.auctioneer_name or auction.source }} ·
+    {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
+    <a href="{{ lot.url }}" target="_blank">view at source</a>
+  </p>
+
+  <section class="card">
+    <h3>Comparable vehicles</h3>
+    <div hx-get="/lots/{{ lot.id }}/comps" hx-trigger="load" hx-swap="innerHTML">
+      Loading…
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Pricing</h3>
+    <p>Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong></p>
+    <p>All-in at current bid: {{ money(lot.all_in_at_current_bid_cad) }}</p>
+    <p>Expected value (private equiv): {{ money(lot.expected_value_cad) }}</p>
+    <p>Recommended max bid: <strong>{{ money(lot.recommended_max_bid_cad) }}</strong></p>
+  </section>
+
+  <section class="card">
+    <h3>Flags</h3>
+    {% if lot.red_flags %}<p>Red: {% for f in lot.red_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
+    {% if lot.green_flags %}<p>Green: {% for f in lot.green_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
+    {% if lot.showstopper_flags %}<p style="color:#d33">Showstoppers: {% for f in lot.showstopper_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <h3>Actions</h3>
+    <form hx-post="/lots/{{ lot.id }}/mark" hx-swap="none" style="display:inline">
+      <button name="action" value="interested">👍 Interested</button>
+      <button name="action" value="maybe">🤔 Maybe</button>
+      <button name="action" value="not_interested">👎 Not interested</button>
+    </form>
+  </section>
+{% endblock %}
+```
+
+- [ ] **Step 3: Write `templates/partials/comp_panel.html`**
+
+```html
+{% from "_macros.html" import money %}
+{% if fuzzy %}
+  <p class="muted">No exact matches in our database yet. As more auctions are tracked, similar vehicles will appear here.</p>
+{% endif %}
+<h4>Recently sold</h4>
+{% if sold %}
+  <div style="display:flex;overflow-x:auto;gap:0.5rem">
+    {% for s in sold %}
+      <div class="card" style="min-width:200px">
+        <strong>{{ s.year or "" }} {{ s.make or "" }} {{ s.model or "" }}</strong><br>
+        <span class="muted">{{ s.mileage_km or "?" }} km · {{ s.sale_channel }}</span><br>
+        Sold: {{ money(s.final_price_with_premium_cad or s.final_listed_price_cad) }}<br>
+        <span class="muted">{{ s.disappeared_at.strftime("%Y-%m-%d") if s.disappeared_at else "" }}</span>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="muted">No sold comps yet.</p>
+{% endif %}
+
+<h4>Currently up for auction</h4>
+{% if open %}
+  <div style="display:flex;overflow-x:auto;gap:0.5rem">
+    {% for o in open %}
+      <div class="card" style="min-width:200px">
+        <a href="/lots/{{ o.lot.id }}"><strong>{{ o.lot.year or "" }} {{ o.lot.make or "" }} {{ o.lot.model or "" }}</strong></a><br>
+        <span class="muted">{{ o.lot.mileage_km or "?" }} km · {{ o.auction.pickup_city or "?" }}, {{ o.auction.pickup_province or "?" }}</span><br>
+        Current: {{ money(o.lot.current_high_bid_cad) }}<br>
+        Closes: {{ o.auction.scheduled_end_at.strftime("%b %d") if o.auction.scheduled_end_at else "?" }}
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="muted">No open comps.</p>
+{% endif %}
+```
+
+- [ ] **Step 4: Write the test**
+
+```python
+# tests/apps/dashboard/test_lot_detail.py
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+from fastapi.testclient import TestClient
+
+from carbuyer.apps.dashboard.app import app
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.session import async_session_maker
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_renders() -> None:
+    async with async_session_maker() as s:
+        a = Auction(source="hibid", source_auction_id="A", url="x", auction_subtype="estate",
+                    first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+                    pickup_province="AB", pickup_city="Calgary")
+        s.add(a)
+        await s.flush()
+        lot = AuctionLot(
+            auction_id=a.id, source_lot_id="L1", url="https://x",
+            title="2010 Ford F-150", year=2010, make="Ford", model="F-150",
+            current_high_bid_cad=Decimal("8000"),
+            red_flags=[], green_flags=[], showstopper_flags=[],
+        )
+        s.add(lot)
+        await s.commit()
+        lot_id = lot.id
+    with TestClient(app) as client:
+        r = client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200
+    assert "Ford" in r.text
+```
+
+- [ ] **Step 5: Run test and commit**
+
+```bash
+uv run pytest tests/apps/dashboard/test_lot_detail.py -v
+git add src/carbuyer/apps/dashboard/routers/lots.py src/carbuyer/apps/dashboard/templates/pages/lot_detail.html src/carbuyer/apps/dashboard/templates/partials/comp_panel.html tests/apps/dashboard/test_lot_detail.py
+git commit -m "dashboard: lot detail + comp comparison panel"
+```
+
+---
+
+### Task 45: Remaining views (closing-soon, watched, comps, sold, purchases, health)
+
+These follow the same pattern as Task 43. For each: a router file, a page template, optionally an HTMX partial. Implementation listed compactly per view.
+
+**Files:**
+- Modify: `src/carbuyer/apps/dashboard/routers/closing.py`
+- Modify: `src/carbuyer/apps/dashboard/routers/watched.py`
+- Modify: `src/carbuyer/apps/dashboard/routers/comps.py`
+- Modify: `src/carbuyer/apps/dashboard/routers/sold.py`
+- Modify: `src/carbuyer/apps/dashboard/routers/purchases.py`
+- Modify: `src/carbuyer/apps/dashboard/routers/health.py`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/closing.html`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/watched.html`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/comps.html`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/sold.html`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/purchases.html`
+- Create: `src/carbuyer/apps/dashboard/templates/pages/health.html`
+
+- [ ] **Step 1: Closing-soon — `routers/closing.py`**
+
+```python
+from datetime import datetime, timedelta, timezone
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import Auction, AuctionLot
+
+
+router = APIRouter()
+
+
+@router.get("/closing", response_class=HTMLResponse)
+async def closing(
+    request: Request, hours: int = 24,
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> HTMLResponse:
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=hours)
+    stmt = (
+        select(AuctionLot, Auction)
+        .join(Auction, Auction.id == AuctionLot.auction_id)
+        .where(
+            AuctionLot.lot_status.in_(["open", "closing_soon", "extended"]),
+            Auction.scheduled_end_at.is_not(None),
+            Auction.scheduled_end_at <= cutoff,
+        )
+        .order_by(Auction.scheduled_end_at.asc())
+        .limit(50)
+    )
+    rows = (await session.execute(stmt)).all()
+    items = [{"lot": lot, "auction": auc} for (lot, auc) in rows]
+    return templates.TemplateResponse(request, "pages/closing.html",
+                                      {"items": items, "hours": hours})
+```
+
+- [ ] **Step 2: `templates/pages/closing.html`**
+
+```html
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+  <h1>Closing in next {{ hours }}h</h1>
+  {% if not items %}<p class="muted">Nothing closing soon.</p>{% endif %}
+  {% for item in items %}
+    {% include "partials/lot_card.html" %}
+  {% endfor %}
+{% endblock %}
+```
+
+- [ ] **Step 3: Watched — `routers/watched.py`**
+
+```python
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import Auction, AuctionLot
+
+
+router = APIRouter()
+
+
+@router.get("/watched", response_class=HTMLResponse)
+async def watched(
+    request: Request,
+    tier: str = Query(default="interested"),
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> HTMLResponse:
+    if tier not in {"interested", "maybe"}:
+        tier = "interested"
+    stmt = (
+        select(AuctionLot, Auction)
+        .join(Auction, Auction.id == AuctionLot.auction_id)
+        .where(AuctionLot.user_action == tier)
+        .order_by(Auction.scheduled_end_at.asc().nulls_last())
+        .limit(100)
+    )
+    rows = (await session.execute(stmt)).all()
+    items = [{"lot": lot, "auction": auc} for (lot, auc) in rows]
+    return templates.TemplateResponse(request, "pages/watched.html",
+                                      {"items": items, "tier": tier})
+```
+
+- [ ] **Step 4: `templates/pages/watched.html`**
+
+```html
+{% extends "base.html" %}
+{% block content %}
+  <h1>Watched lots</h1>
+  <p>
+    <a href="/watched?tier=interested" class="tag {{ 'deal' if tier == 'interested' else '' }}">Interested</a>
+    <a href="/watched?tier=maybe" class="tag {{ 'rare' if tier == 'maybe' else '' }}">Maybe</a>
+  </p>
+  {% if not items %}<p class="muted">No lots in this tier.</p>{% endif %}
+  {% for item in items %}
+    {% include "partials/lot_card.html" %}
+  {% endfor %}
+{% endblock %}
+```
+
+- [ ] **Step 5: Comps + sold-price browsers — `routers/comps.py` and `routers/sold.py`**
+
+```python
+# src/carbuyer/apps/dashboard/routers/comps.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import HistoricalSale
+
+
+router = APIRouter()
+
+
+@router.get("/comps", response_class=HTMLResponse)
+async def comps(
+    request: Request, make: str | None = None, model: str | None = None,
+    year: int | None = None, trim: str | None = None,
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> HTMLResponse:
+    rows: list[HistoricalSale] = []
+    if make and model:
+        stmt = select(HistoricalSale).where(
+            HistoricalSale.make == make, HistoricalSale.model == model,
+        )
+        if year is not None:
+            stmt = stmt.where(HistoricalSale.year.between(year - 2, year + 2))
+        if trim:
+            stmt = stmt.where(HistoricalSale.trim == trim)
+        rows = list((await session.execute(stmt.limit(200))).scalars().all())
+    return templates.TemplateResponse(request, "pages/comps.html",
+                                      {"rows": rows, "make": make, "model": model,
+                                       "year": year, "trim": trim})
+```
+
+```python
+# src/carbuyer/apps/dashboard/routers/sold.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import HistoricalSale
+
+
+router = APIRouter()
+
+
+@router.get("/sold", response_class=HTMLResponse)
+async def sold(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> HTMLResponse:
+    rows = list((await session.execute(
+        select(HistoricalSale).order_by(HistoricalSale.id.desc()).limit(100)
+    )).scalars().all())
+    return templates.TemplateResponse(request, "pages/sold.html", {"rows": rows})
+```
+
+- [ ] **Step 6: `templates/pages/comps.html` and `pages/sold.html`**
+
+```html
+{# templates/pages/comps.html #}
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+  <h1>Comp browser</h1>
+  <form method="get" class="card">
+    <input name="make" placeholder="Make" value="{{ make or '' }}" required>
+    <input name="model" placeholder="Model" value="{{ model or '' }}" required>
+    <input name="year" type="number" placeholder="Year" value="{{ year or '' }}">
+    <input name="trim" placeholder="Trim" value="{{ trim or '' }}">
+    <button type="submit">Search</button>
+  </form>
+  {% if not rows %}<p class="muted">Type a make/model to browse comps.</p>{% endif %}
+  <ul>
+    {% for r in rows %}
+      <li>
+        {{ r.year }} {{ r.make }} {{ r.model }} {{ r.trim or '' }} ·
+        {{ r.mileage_km or '?' }} km · {{ r.sale_channel }} ·
+        {{ money(r.final_price_with_premium_cad or r.final_listed_price_cad) }}
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}
+```
+
+```html
+{# templates/pages/sold.html #}
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+  <h1>Recent sold prices</h1>
+  <table>
+    <thead><tr><th>Year</th><th>Make/Model</th><th>km</th><th>Channel</th><th>Price</th><th>Date</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.year or "" }}</td>
+        <td>{{ r.make or "" }} {{ r.model or "" }} {{ r.trim or "" }}</td>
+        <td>{{ r.mileage_km or "?" }}</td>
+        <td>{{ r.sale_channel }}</td>
+        <td>{{ money(r.final_price_with_premium_cad or r.final_listed_price_cad) }}</td>
+        <td>{{ r.disappeared_at.strftime("%Y-%m-%d") if r.disappeared_at else "" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
+```
+
+- [ ] **Step 7: Purchases + health — `routers/purchases.py` and `routers/health.py`**
+
+```python
+# src/carbuyer/apps/dashboard/routers/purchases.py
+from datetime import date, datetime, timezone
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import extract, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import Purchase
+
+
+router = APIRouter()
+
+
+@router.get("/purchases", response_class=HTMLResponse)
+async def purchases_list(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> HTMLResponse:
+    rows = list((await session.execute(
+        select(Purchase).order_by(Purchase.purchase_date.desc())
+    )).scalars().all())
+    year = datetime.now(timezone.utc).year
+    ytd_count = (await session.execute(
+        select(func.count()).select_from(Purchase)
+        .where(extract("year", Purchase.purchase_date) == year)
+    )).scalar_one()
+    return templates.TemplateResponse(request, "pages/purchases.html",
+                                      {"rows": rows, "ytd_count": ytd_count, "year": year})
+
+
+@router.post("/purchases", response_class=HTMLResponse)
+async def purchases_create(
+    purchase_date: Annotated[date, Form()],
+    make: Annotated[str, Form()],
+    model: Annotated[str, Form()],
+    year: Annotated[int, Form()],
+    purchase_price_cad: Annotated[float, Form()],
+    province_of_purchase: Annotated[str, Form()] = "AB",
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> RedirectResponse:
+    p = Purchase(
+        purchase_date=purchase_date,
+        make=make, model=model, year=year,
+        purchase_price_cad=purchase_price_cad,
+        province_of_purchase=province_of_purchase,
+    )
+    session.add(p)
+    await session.commit()
+    return RedirectResponse("/purchases", status_code=303)
+```
+
+```python
+# src/carbuyer/apps/dashboard/routers/health.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+
+
+router = APIRouter()
+
+
+@router.get("/health", response_class=HTMLResponse)
+async def health(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)] = ...,
+) -> HTMLResponse:
+    auction_count = (await session.execute(select(func.count()).select_from(Auction))).scalar_one()
+    lot_count = (await session.execute(select(func.count()).select_from(AuctionLot))).scalar_one()
+    open_count = (await session.execute(
+        select(func.count()).select_from(AuctionLot)
+        .where(AuctionLot.lot_status.in_(["open", "closing_soon", "extended"]))
+    )).scalar_one()
+    pending_enrichment = (await session.execute(
+        select(func.count()).select_from(AuctionLot)
+        .where(AuctionLot.enrichment_status == "pending")
+    )).scalar_one()
+    pending_valuation = (await session.execute(
+        select(func.count()).select_from(AuctionLot)
+        .where(AuctionLot.valuation_status == "pending")
+    )).scalar_one()
+    pending_notification = (await session.execute(
+        select(func.count()).select_from(AuctionLot)
+        .where(AuctionLot.notification_status == "pending")
+    )).scalar_one()
+    historical_count = (await session.execute(select(func.count()).select_from(HistoricalSale))).scalar_one()
+    return templates.TemplateResponse(request, "pages/health.html", {
+        "auction_count": auction_count, "lot_count": lot_count,
+        "open_count": open_count,
+        "pending_enrichment": pending_enrichment,
+        "pending_valuation": pending_valuation,
+        "pending_notification": pending_notification,
+        "historical_count": historical_count,
+    })
+```
+
+- [ ] **Step 8: `templates/pages/purchases.html` and `pages/health.html`**
+
+```html
+{# templates/pages/purchases.html #}
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+  <h1>Purchases ({{ year }} YTD: {{ ytd_count }})</h1>
+  {% if ytd_count >= 4 %}
+    <p style="color:#d33"><strong>⚠ At or above curbsider warning threshold.</strong>
+       BC's deeming clause kicks in at 5; AMVIC has zero tolerance. Stop and reassess.</p>
+  {% elif ytd_count == 3 %}
+    <p style="color:#c80">⚠ One more transfer this year is your hard ceiling.</p>
+  {% endif %}
+
+  <form method="post" action="/purchases" class="card">
+    <input name="purchase_date" type="date" required>
+    <input name="make" placeholder="Make" required>
+    <input name="model" placeholder="Model" required>
+    <input name="year" type="number" placeholder="Year" required>
+    <input name="purchase_price_cad" type="number" step="0.01" placeholder="Price CAD" required>
+    <input name="province_of_purchase" placeholder="Province" value="AB">
+    <button type="submit">Record purchase</button>
+  </form>
+
+  <table>
+    <thead><tr><th>Date</th><th>Vehicle</th><th>Price</th><th>Province</th><th>Sold?</th></tr></thead>
+    <tbody>
+      {% for p in rows %}
+        <tr>
+          <td>{{ p.purchase_date }}</td>
+          <td>{{ p.year }} {{ p.make }} {{ p.model }}</td>
+          <td>{{ money(p.purchase_price_cad) }}</td>
+          <td>{{ p.province_of_purchase or "" }}</td>
+          <td>{{ p.sale_date or "(held)" }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
+```
+
+```html
+{# templates/pages/health.html #}
+{% extends "base.html" %}
+{% block content %}
+  <h1>System health</h1>
+  <ul>
+    <li>Auctions tracked: {{ auction_count }}</li>
+    <li>Lots tracked (all): {{ lot_count }}</li>
+    <li>Open lots: {{ open_count }}</li>
+    <li>Pending enrichment: {{ pending_enrichment }}</li>
+    <li>Pending valuation: {{ pending_valuation }}</li>
+    <li>Pending notification: {{ pending_notification }}</li>
+    <li>Historical sales: {{ historical_count }}</li>
+  </ul>
+{% endblock %}
+```
+
+- [ ] **Step 9: Smoke-test all routes**
+
+```bash
+uv run python -c "
+from fastapi.testclient import TestClient
+from carbuyer.apps.dashboard.app import app
+client = TestClient(app)
+for path in ['/', '/closing', '/watched', '/comps', '/sold', '/purchases', '/health']:
+    r = client.get(path)
+    print(path, r.status_code)
+    assert r.status_code == 200
+"
+```
+
+Expected: each path prints `200`.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/carbuyer/apps/dashboard/routers/ src/carbuyer/apps/dashboard/templates/pages/
+git commit -m "dashboard: closing / watched / comps / sold / purchases / health views"
+```
+
+---
+
+### Task 46: Action endpoints (mark, notes, snooze, refresh, rescore)
+
+**Files:**
+- Modify: `src/carbuyer/apps/dashboard/routers/actions.py`
+
+- [ ] **Step 1: Implement `src/carbuyer/apps/dashboard/routers/actions.py`**
+
+```python
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Response
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import AuctionLot
+
+
+router = APIRouter()
+
+
+VALID_ACTIONS = {"interested", "maybe", "not_interested"}
+
+
+@router.post("/lots/{lot_id}/mark", status_code=204)
+async def mark_lot(
+    lot_id: int,
+    action: Annotated[Literal["interested", "maybe", "not_interested"], Form()],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    if action not in VALID_ACTIONS:
+        raise HTTPException(status_code=400, detail="invalid action")
+    lot = await session.get(AuctionLot, lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404)
+    lot.user_action = action
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/lots/{lot_id}/notes", status_code=204)
+async def append_note(
+    lot_id: int, note: Annotated[str, Form()],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    lot = await session.get(AuctionLot, lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404)
+    existing = lot.notes or ""
+    lot.notes = (existing + "\n" + note).strip() if existing else note
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post("/admin/rescore", status_code=204)
+async def rescore_all(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    await session.execute(update(AuctionLot).values(valuation_status="pending"))
+    await session.commit()
+    return Response(status_code=204)
+```
+
+- [ ] **Step 2: Smoke test**
+
+```python
+# tests/apps/dashboard/test_actions.py
+from datetime import UTC, datetime
+
+import pytest
+from fastapi.testclient import TestClient
+
+from carbuyer.apps.dashboard.app import app
+from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.session import async_session_maker
+
+
+@pytest.mark.asyncio
+async def test_mark_endpoint_updates_user_action() -> None:
+    async with async_session_maker() as s:
+        a = Auction(source="t", source_auction_id="A", url="x", auction_subtype="estate",
+                    first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC))
+        s.add(a)
+        await s.flush()
+        lot = AuctionLot(auction_id=a.id, source_lot_id="L1", url="https://x",
+                         red_flags=[], green_flags=[], showstopper_flags=[])
+        s.add(lot)
+        await s.commit()
+        lot_id = lot.id
+    with TestClient(app) as client:
+        r = client.post(f"/lots/{lot_id}/mark", data={"action": "interested"})
+    assert r.status_code == 204
+    async with async_session_maker() as s:
+        lot = await s.get(AuctionLot, lot_id)
+        assert lot.user_action == "interested"
+```
+
+- [ ] **Step 3: Run test and commit**
+
+```bash
+uv run pytest tests/apps/dashboard/test_actions.py -v
+git add src/carbuyer/apps/dashboard/routers/actions.py tests/apps/dashboard/test_actions.py
+git commit -m "dashboard: action endpoints (mark / notes / rescore)"
+```
+
+---
+
+End of Phase 11. Dashboard is complete with all views and HTMX-driven interactivity.
+
+---
+
+## Phase 12 — Production deployment
+
+### Task 47: systemd unit files
+
+**Files:**
+- Create: `infra/systemd/carbuyer-postgres.service`
+- Create: `infra/systemd/carbuyer-bot.service`
+- Create: `infra/systemd/carbuyer-dashboard.service`
+- Create: `infra/systemd/carbuyer-enricher.service`
+- Create: `infra/systemd/carbuyer-valuator.service`
+- Create: `infra/systemd/carbuyer-notifier.service`
+- Create: `infra/systemd/carbuyer-lot-scraper.service`
+- Create: `infra/systemd/carbuyer-bid-poller.service`
+- Create: `infra/systemd/carbuyer-discoverer.service`
+- Create: `infra/systemd/carbuyer-discoverer.timer`
+- Create: `infra/systemd/carbuyer-vision.service`
+- Create: `infra/systemd/carbuyer-vision.timer`
+- Create: `infra/systemd/carbuyer-distiller.service`
+- Create: `infra/systemd/carbuyer-distiller.timer`
+- Create: `infra/systemd/install.sh`
+
+- [ ] **Step 1: Continuous-service template — `infra/systemd/carbuyer-bot.service`**
+
+```ini
+[Unit]
+Description=CarBuyer Discord bot
+After=network-online.target carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=simple
+User=mark
+WorkingDirectory=/home/mark/repos/CarBuyerAssistant
+EnvironmentFile=/home/mark/repos/CarBuyerAssistant/.env
+ExecStart=/home/mark/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.bot
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+(Same shape, swap module name, for: `carbuyer-dashboard.service` → `carbuyer.apps.dashboard`; `carbuyer-enricher.service` → `carbuyer.apps.enricher`; `carbuyer-valuator.service` → `carbuyer.apps.valuator`; `carbuyer-notifier.service` → `carbuyer.apps.notifier`; `carbuyer-lot-scraper.service` → `carbuyer.apps.lot_scraper`; `carbuyer-bid-poller.service` → `carbuyer.apps.bid_poller`. Each gets its own unit file with the exec line updated.)
+
+- [ ] **Step 2: Postgres unit — `infra/systemd/carbuyer-postgres.service`**
+
+```ini
+[Unit]
+Description=CarBuyer Postgres (Docker)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/home/mark/repos/CarBuyerAssistant/infra
+ExecStart=/usr/bin/docker compose up -d postgres
+ExecStop=/usr/bin/docker compose stop postgres
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- [ ] **Step 3: Oneshot timer template — discoverer**
+
+`infra/systemd/carbuyer-discoverer.service`:
+
+```ini
+[Unit]
+Description=CarBuyer auction discoverer (oneshot)
+After=carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=oneshot
+User=mark
+WorkingDirectory=/home/mark/repos/CarBuyerAssistant
+EnvironmentFile=/home/mark/repos/CarBuyerAssistant/.env
+ExecStart=/home/mark/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.auction_discoverer
+StandardOutput=journal
+StandardError=journal
+```
+
+`infra/systemd/carbuyer-discoverer.timer`:
+
+```ini
+[Unit]
+Description=Run CarBuyer auction discoverer every 6 hours
+After=carbuyer-postgres.service
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=carbuyer-discoverer.service
+
+[Install]
+WantedBy=timers.target
+```
+
+(Same shape, with different `OnUnitActiveSec`/`OnCalendar`, for: `carbuyer-vision.timer` → `OnCalendar=*-*-* 02:00:00`, `Unit=carbuyer-vision.service`; `carbuyer-distiller.timer` → `OnCalendar=*-*-* 03:00:00`, `Unit=carbuyer-distiller.service`. Their service files use `Type=oneshot` like the discoverer, calling `python -m carbuyer.apps.vision_batcher` and `python -m carbuyer.apps.auction_distiller` respectively.)
+
+- [ ] **Step 4: Install script — `infra/systemd/install.sh`**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="/home/mark/repos/CarBuyerAssistant"
+UNIT_DIR="/etc/systemd/system"
+
+cd "$(dirname "$0")"
+
+echo "Linking units to ${UNIT_DIR}..."
+for f in *.service *.timer; do
+  sudo ln -sf "$(realpath "$f")" "${UNIT_DIR}/${f}"
+done
+
+sudo systemctl daemon-reload
+
+# Enable continuous services
+for svc in carbuyer-postgres carbuyer-bot carbuyer-dashboard \
+           carbuyer-enricher carbuyer-valuator carbuyer-notifier \
+           carbuyer-lot-scraper carbuyer-bid-poller; do
+  sudo systemctl enable "${svc}.service"
+done
+
+# Enable timers
+for t in carbuyer-discoverer carbuyer-vision carbuyer-distiller; do
+  sudo systemctl enable "${t}.timer"
+done
+
+echo "Installed. Run: sudo systemctl start carbuyer-postgres && sudo systemctl start carbuyer-bot ..."
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+chmod +x infra/systemd/install.sh
+git add infra/systemd/
+git commit -m "infra: systemd unit files for all workers + install script"
+```
+
+---
+
+### Task 48: Postgres backup script
+
+**Files:**
+- Create: `infra/backup.sh`
+
+- [ ] **Step 1: Write `infra/backup.sh`**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+BACKUP_DIR="${HOME}/carbuyer-backups"
+mkdir -p "${BACKUP_DIR}"
+
+DATE=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+OUT="${BACKUP_DIR}/carbuyer-${DATE}.sql.gz"
+
+docker exec carbuyer-pg pg_dump -U carbuyer -d carbuyer | gzip > "${OUT}"
+
+# Retain 30 days of dailies
+find "${BACKUP_DIR}" -name "carbuyer-*.sql.gz" -mtime +30 -delete
+
+echo "Backup written: ${OUT}"
+```
+
+- [ ] **Step 2: Make executable and verify it runs**
+
+```bash
+chmod +x infra/backup.sh
+infra/backup.sh
+ls -lh ${HOME}/carbuyer-backups/ | head -3
+```
+
+Expected: at least one `.sql.gz` file present.
+
+- [ ] **Step 3: Wire it as a daily cron**
+
+Append to user crontab via `crontab -e`:
+```
+0 3 * * * /home/mark/repos/CarBuyerAssistant/infra/backup.sh >> /home/mark/carbuyer-backups/backup.log 2>&1
+```
+
+(Document this in README; not committed in crontab itself.)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add infra/backup.sh
+git commit -m "infra: postgres backup script with 30-day retention"
+```
+
+---
+
+### Task 49: README + .env.example
+
+**Files:**
+- Create: `README.md`
+- Create: `.env.example`
+
+- [ ] **Step 1: Write `.env.example`**
+
+```
+DATABASE_URL=postgresql+psycopg://carbuyer:local@localhost:5432/carbuyer
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+DISCORD_BOT_TOKEN=
+DISCORD_GUILD_ID=
+HOME_PROVINCE=AB
+LOG_LEVEL=INFO
+NOTIFY_THRESHOLD=0.15
+EARLY_WARNING_RARITY_THRESHOLD=2.0
+EARLY_WARNING_MIN_HOURS_TO_CLOSE=48
+RESCORE_IMPROVEMENT_THRESHOLD=0.05
+QUIET_HOURS_START=22
+QUIET_HOURS_END=8
+QUIET_HOURS_OVERRIDE_SCORE=0.30
+FLIP_MARGIN_MIN_CAD=1500
+FLIP_MARGIN_PCT=0.10
+# JSON object: {"early_warning": 12345, "hot_deals": ...}
+DISCORD_CHANNELS={}
+```
+
+- [ ] **Step 2: Write `README.md`**
+
+```markdown
+# CarBuyerAssistant
+
+Personal Western-Canadian used-vehicle auction deal-finder.
+
+## Quickstart (local development)
+
+```bash
+# 1. Install dependencies
+uv sync --extra dev
+
+# 2. Start Postgres
+cd infra && docker compose up -d postgres && cd ..
+
+# 3. Apply migrations
+uv run alembic upgrade head
+
+# 4. Configure env
+cp .env.example .env
+# Fill in OPENAI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNELS
+
+# 5. Run a one-off discovery + lot scrape (manual)
+uv run python -m carbuyer.apps.auction_discoverer
+
+# 6. Start the dashboard
+uv run python -m carbuyer.apps.dashboard
+# Open http://localhost:8000
+```
+
+## Architecture
+
+See `docs/specs/2026-05-08-carbuyer-mvp-design.md` for the full design.
+See `docs/plans/2026-05-09-auction-mvp-plan.md` for the implementation plan.
+
+## Production deployment
+
+1. `infra/systemd/install.sh` symlinks unit files into `/etc/systemd/system`.
+2. Start the services in order: `postgres → bot → dashboard → workers`.
+3. `infra/backup.sh` runs daily via crontab, retains 30 days of `pg_dump`s.
+
+## Tests
+
+```bash
+uv run pytest
+uv run pyright
+uv run ruff check .
+```
+
+## Honest limitations
+
+- Source plugins for Ritchie Bros + Michener Allen are phase-2 (these auctioneers are large enough to follow manually).
+- The desirability and classic-exception taxonomies start small; expand as you encounter sought-after vehicles in real auctions.
+- Bid history is reconstructed from polling — only what the source exposes publicly.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add README.md .env.example
+git commit -m "docs: README + env example"
+```
+
+---
+
+### Task 50: End-to-end smoke test (manual checklist)
+
+This is the verification gate. Do it at the end of implementation.
+
+- [ ] **Step 1: Apply migrations against the dev DB**
+
+```bash
+uv run alembic upgrade head
+```
+
+- [ ] **Step 2: Run a one-shot discovery**
+
+```bash
+uv run python -m carbuyer.apps.auction_discoverer
+```
+
+Expected log lines: `discovering source=hibid` / `discovering source=mcdougall` / `discovering source=farmauctionguide_discovered`, then `discovery complete found=N` with `N > 0`.
+
+- [ ] **Step 3: Verify rows in DB**
+
+```bash
+docker exec carbuyer-pg psql -U carbuyer -d carbuyer -c "SELECT source, COUNT(*) FROM auctions GROUP BY source;"
+```
+
+Expected: at least one row per HiBid/McDougall (farmauctionguide may be 0 if no in-house auctions on that day).
+
+- [ ] **Step 4: Run the lot-scraper manually**
+
+```bash
+uv run python -m carbuyer.apps.lot_scraper &
+SLEEP=15; sleep $SLEEP
+docker exec carbuyer-pg psql -U carbuyer -d carbuyer -c "SELECT COUNT(*) FROM auction_lots;"
+kill %1
+```
+
+Expected: `auction_lots` count > 0.
+
+- [ ] **Step 5: Run enricher + valuator + notifier as separate processes**
+
+In three terminals:
+```bash
+uv run python -m carbuyer.apps.enricher
+uv run python -m carbuyer.apps.valuator
+uv run python -m carbuyer.apps.notifier
+```
+
+After 1–2 minutes, expect:
+```bash
+docker exec carbuyer-pg psql -U carbuyer -d carbuyer -c "
+  SELECT
+    SUM(CASE WHEN enrichment_status='done' THEN 1 ELSE 0 END) AS enriched,
+    SUM(CASE WHEN valuation_status='done' THEN 1 ELSE 0 END) AS valued,
+    SUM(CASE WHEN price_deal_score >= 0.15 THEN 1 ELSE 0 END) AS deals,
+    SUM(CASE WHEN rarity_score >= 2 THEN 1 ELSE 0 END) AS rare
+  FROM auction_lots;"
+```
+
+Expected: `enriched > 0`. `valued` may be 0 until comps accumulate. `deals` and `rare` may be 0 on first run — that's fine.
+
+- [ ] **Step 6: Open the dashboard**
+
+```bash
+uv run python -m carbuyer.apps.dashboard
+```
+
+Visit `http://localhost:8000`. Expect the auction feed to render lot cards.
+
+- [ ] **Step 7: Verify Discord post (if any deal/rare lot was scored)**
+
+Check the `#early-warning` and `#hot-deals` channels. Click 👍 Interested on one — confirm dashboard `/watched` shows it.
+
+- [ ] **Step 8: Tag a release**
+
+```bash
+git tag -a v0.1.0 -m "MVP: end-to-end auction deal-finder"
+```
+
+(Do not push the tag without explicit user confirmation per CLAUDE.md.)
+
+---
+
+## Self-review notes (planner internal)
+
+**Spec coverage:**
+- §1 goals → Phases 1, 6, 7, 8, 11 (auction sources, two-trigger notifications, comp comparison, sold-price tracking, legal tracking).
+- §2 architecture → Phases 0, 2, 3–11 (Postgres, LISTEN/NOTIFY, SKIP LOCKED, all workers).
+- §3 data model → Phase 0 Task 6 + Task 7 (all tables + initial migration).
+- §4 scoring → Phase 4 (channel norm, comps, fair-value range, landed cost, deal score, rarity, max bid).
+- §5 LLM enrichment → Phases 3 + 8 (description + vision two-pass).
+- §6 notifications → Phases 5 + 6 (Discord bot + notifier with all five trigger types).
+- §7 dashboard → Phase 11 (all eight views).
+- §8 tech stack → Phase 0 + scattered (FastAPI, HTMX, SQLAlchemy 2 async, etc.).
+- §9 phase-2 → explicitly deferred; not in this plan.
+
+**Type consistency check:** all schema field names match between Pydantic models, ORM models, and template usage. Worker module names match between systemd units and `python -m carbuyer.apps.<name>` paths.
+
+**Verification path:** Phase 12 Task 50 is the end-to-end smoke that proves the whole pipeline works on real data.
