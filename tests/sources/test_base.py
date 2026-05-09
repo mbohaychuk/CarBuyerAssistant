@@ -46,13 +46,18 @@ def test_role_abcs_are_abstract() -> None:
 
 
 def test_register_adds_source_to_registry() -> None:
+    # Save and restore so other tests' SOURCES entries (e.g. HibidSource
+    # registered at import) survive.
+    saved = dict(SOURCES)
     SOURCES.clear()
+    try:
+        class _StubSource(Source):
+            name = "stub"
+            version = "0.0.1"
 
-    class _StubSource(Source):
-        name = "stub"
-        version = "0.0.1"
-
-    src = _StubSource()
-    register(src)
-    assert SOURCES["stub"] is src
-    SOURCES.clear()
+        src = _StubSource()
+        register(src)
+        assert SOURCES["stub"] is src
+    finally:
+        SOURCES.clear()
+        SOURCES.update(saved)

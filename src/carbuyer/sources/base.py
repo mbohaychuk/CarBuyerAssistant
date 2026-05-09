@@ -102,6 +102,19 @@ class Source(ABC):
     # rows scraped by a stale version.
     version: ClassVar[str]
 
+    @classmethod
+    def parse_auction_url(cls, url: str) -> AuctionRef | None:
+        """Return AuctionRef if THIS source is authoritative for the URL, else None.
+
+        Concrete plugins override when they own a URL space (e.g. HiBidSource
+        recognizes ``https://hibid.com/.../catalog/{id}``). The resolver helper
+        (``carbuyer.sources.resolver.resolve_auction_url``) walks all registered
+        sources to find a match. The default returns None (plugin doesn't claim
+        this URL).
+        """
+        del url  # default impl ignores
+        return None
+
 
 class AuctionDiscoverer(Source):
     kind: ClassVar[SourceType] = "auction"
