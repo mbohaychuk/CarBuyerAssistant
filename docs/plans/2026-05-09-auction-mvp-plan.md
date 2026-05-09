@@ -217,7 +217,9 @@ services:
       - "effective_cache_size=2GB"
     ports:
       # Bound to localhost only — never expose Postgres on LAN.
-      - "127.0.0.1:5432:5432"
+      # Host port 5433 (not 5432) to avoid collisions with a host-native
+      # Postgres install. DATABASE_URL must reference :5433 to match.
+      - "127.0.0.1:5433:5432"
     volumes:
       - carbuyer-pg-data:/var/lib/postgresql/data
       # Runs on first volume init only; idempotent CREATE DATABASE for tests.
@@ -335,7 +337,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(
-        default="postgresql+psycopg://carbuyer:local@localhost:5432/carbuyer"
+        default="postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer"
     )
     openai_api_key: str = Field(default="")
     openai_model: str = Field(default="gpt-4o-mini")
