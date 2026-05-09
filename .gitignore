@@ -56,3 +56,6 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Local editor config
+.claude/
