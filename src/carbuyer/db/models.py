@@ -72,6 +72,17 @@ class Auction(Base, TimestampMixin):
     needs_plugin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     routing_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Indexed for dashboard hrefs / admin lookup; NOT unique — multi-router can
+    # produce two rows with the same canonical_url under different `source`
+    # values when one router has a real plugin and another fell back to
+    # `unknown:{host}`. Dedup is via (source, source_auction_id).
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # Names of Source plugins/routers that have surfaced this auction.
+    # text[] (not JSONB) so we can append + dedupe atomically inside ON CONFLICT.
+    discovered_via: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+    )
+
     lots: Mapped[list[AuctionLot]] = relationship(back_populates="auction", lazy="raise")
 
     __table_args__ = (
@@ -235,6 +246,24 @@ class AuctionLot(Base, TimestampMixin):
         # rarity_score + auction.scheduled_end_at would be ideal but spans tables;
         # the lot-level partial index works for early-warning triage at query time.
         Index("ix_auction_lots_rarity_score", "rarity_score"),
+        # Partial indexes for queue claims — most rows are non-pending, so a
+        # full-table b-tree on the status column is mostly dead weight.
+        Index(
+            "ix_auction_lots_enrichment_pending", "id",
+            postgresql_where=text("enrichment_status = 'pending'"),
+        ),
+        Index(
+            "ix_auction_lots_valuation_pending", "id",
+            postgresql_where=text("valuation_status = 'pending'"),
+        ),
+        Index(
+            "ix_auction_lots_vision_pending", "id",
+            postgresql_where=text("vision_status = 'pending'"),
+        ),
+        Index(
+            "ix_auction_lots_notification_pending", "id",
+            postgresql_where=text("notification_status = 'pending'"),
+        ),
     )
 
 

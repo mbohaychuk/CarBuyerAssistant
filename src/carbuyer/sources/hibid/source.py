@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
@@ -26,13 +27,30 @@ from carbuyer.sources.hibid.parser import (
 )
 from carbuyer.sources.hibid.urls import catalog_url, lot_url, province_vehicles_url
 from carbuyer.sources.http import jittered_sleep, make_client
+from carbuyer.sources.resolver import canonicalize_url
 from carbuyer.sources.retry import RetryTransport
+
+_HIBID_CATALOG_URL = re.compile(
+    r"^https?://(?:www\.)?hibid\.com/(?:[a-z\-]+/)?catalog/(\d+)",
+)
 
 
 class HibidSource(AuctionSource):
     name: ClassVar[str] = "hibid"
     # Bump when parse_lot_summary or discover/fetch contracts change.
     version: ClassVar[str] = "1"
+
+    @classmethod
+    def parse_auction_url(cls, url: str) -> AuctionRef | None:
+        """Recognize HiBid catalog URLs (with or without province prefix or slug)."""
+        m = _HIBID_CATALOG_URL.match(url)
+        if m is None:
+            return None
+        return AuctionRef(
+            source=cls.name,
+            source_auction_id=m.group(1),
+            url=canonicalize_url(url),
+        )
 
     def __init__(
         self,
