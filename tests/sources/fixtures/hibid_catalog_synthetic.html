@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Synthetic HiBid catalog fixture (test only)</title>
+</head>
+<body>
+  <h1>Cars and Vehicles — Alberta</h1>
+  <p>Hand-written fixture exercising the parser contract: real HiBid keys
+     (eventItemId/lead/lotStatus.*), nested image arrays, and a string
+     containing brackets that must not confuse the bracket scanner.</p>
+  <script>
+    var lotModels = [
+      {
+        "eventItemId": 4242,
+        "lotNumber": "12B",
+        "lead": "1995 Ford F-150 4x4 [hood scratched]",
+        "description": "runs and drives, photos available",
+        "lotUrl": "/alberta/lot/300724160/1995-ford-f150",
+        "lotImages": [
+          "https://hibid-cdn.example/4242/1.jpg",
+          "https://hibid-cdn.example/4242/2.jpg",
+          "https://hibid-cdn.example/4242/3.jpg"
+        ],
+        "lotStatus": {
+          "highBid": "1500.00",
+          "bidCount": 7,
+          "timeLeft": "3 days"
+        },
+        "auctionEnd": "2026-06-01T18:30:00Z",
+        "auctionId": 740236,
+        "bidIncrement": 25,
+        "reserveStatus": "no_reserve",
+        "buyNowPrice": null,
+        "lotState": "open",
+        "shippingOffered": false,
+        "auctionCity": "Calgary",
+        "auctionState": "AB",
+        "companyName": "Acme Auctions"
+      },
+      {
+        "eventItemId": 5050,
+        "lotNumber": "13",
+        "lead": "2002 Toyota Tundra V8",
+        "description": "one owner, books and binders",
+        "lotUrl": "/alberta/lot/300724161/2002-toyota-tundra",
+        "lotImages": [],
+        "lotStatus": {
+          "highBid": 4250,
+          "bidCount": 2
+        },
+        "auctionEnd": 1748800800000,
+        "auctionId": 740236,
+        "bidIncrement": 50,
+        "reserveStatus": "reserve_not_met",
+        "lotState": "open",
+        "auctionCity": "Calgary",
+        "auctionState": "AB",
+        "companyName": "Acme Auctions"
+      }
+    ];
+  </script>
+</body>
+</html>
