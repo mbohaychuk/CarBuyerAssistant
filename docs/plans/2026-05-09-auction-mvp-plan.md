@@ -37,6 +37,49 @@
 
 ## Phase 0 — Foundation
 
+### Phase 0 — Design-decision overlay (post-deliberation 2026-05-09)
+
+Multi-discipline review (senior Python dev, DevOps/SRE, systems architect) raised the following concrete changes against the original Phase 0 plan. **The task code blocks below have been updated to reflect these decisions; this overlay documents the *why*.**
+
+**Must-fix (locked in to avoid Phase 7+ pain):**
+
+1. **Lazy DB engine, not module-level.** `engine = make_engine()` at import time creates a connection pool against the prod URL the moment any module imports `db.session` — even from a test that wants `carbuyer_test`. Replaced with `get_engine()` / `get_session_maker()` + `set_engine_for_testing()` so the conftest can install a test pool that all `get_session()` callers see. (Task 5, Task 8.)
+2. **Source ABC abstract async-generators must be `def`, not `async def`.** Pyright-strict treats `async def f() -> AsyncIterator[T]: ...` (with `...` body) as a coroutine returning the type, not a generator yielding it; concrete implementations would have to lie about their type. Abstract definitions use `def f(self) -> AsyncIterator[T]: ...`; concrete implementations are `async def + yield`, which is the idiomatic async-generator form. (Task 9.)
+3. **Strict-mode type annotations everywhere.** All function signatures get explicit parameter and return types. Bare `AsyncIterator` (no parameter) is invalid under strict — fixtures use `AsyncIterator[AsyncEngine]` etc. (Tasks 5, 8, 10.)
+4. **Per-worker pool ≤ Postgres `max_connections`.** `pool_size=5, max_overflow=5` × 11 workers = 110 connections, exceeding Postgres default `max_connections=100`. Pool defaults shrink to `pool_size=2, max_overflow=3` (≤55 baseline ceiling) and the docker-compose Postgres command bumps `max_connections=200`. (Task 2, Task 5.)
+5. **Postgres bound to `127.0.0.1`.** `0.0.0.0:5432` is open to the LAN. (Task 2.)
+6. **AsyncIterator abstract methods syntactically correct.** See item 2 above. (Task 9.)
+
+**Should-fix:**
+
+7. **Source ABC split.** `AuctionSource` lumps discovery + fetch + bid polling. The bid-poller and the farmauctionguide router need different subsets. Split into `AuctionDiscoverer / AuctionFetcher / BidPoller` mixins; `AuctionSource = AuctionDiscoverer + AuctionFetcher + BidPoller` for HiBid/McDougall. The Phase-10 router will only implement `AuctionDiscoverer`. (Task 9.)
+8. **`parser_version` on every plugin and on `auction_lots`.** When a parser changes, downstream rows have no way to know. Add `version: ClassVar[str]` to `Source`; add `parser_version: str | None` column to `auction_lots`. Cheap now, retroactive backfill later. (Task 6, Task 9.)
+9. **`StrEnum` for status fields, plain `String(16)` on the DB.** Magic-string comparisons are typo footguns; native PG enums are migration-painful. `StrEnum` gets type-safety on the Python side, no migration friction. Statuses: `EnrichmentStatus`, `ValuationStatus`, `VisionStatus`, `NotificationStatus`, `LotStatus`, `AuctionStatus`, `UserAction`. (Task 6.)
+10. **`extra: dict[str, Any]` escape hatch on `RawLot` and `RawAuction`.** Source-specific fields (Carfax URLs, reserve-met semantics, platform metadata) flow through enrichment without bloating the canonical schema. (Task 9.)
+11. **`SOURCES` registry.** Two-line registry + `register()` so the dashboard "needs-plugin" view (Phase 10) and the router (Phase 10) can enumerate covered platforms. (Task 9.)
+12. **Server-side defaults on non-nullable JSONB columns.** Python-side `default=list` doesn't apply to raw SQL inserts or migrations; `server_default=text("'[]'::jsonb")` does. (Task 6.)
+13. **Test DB created via `/docker-entrypoint-initdb.d/`.** Manual `docker exec ... CREATE DATABASE` is forgotten on every fresh volume. (Task 2, Task 8.)
+14. **Session-scoped engine + per-test savepoint rollback.** Per-test `drop_all/create_all` is ~150ms × N — tax that compounds. Schema built once; each test runs inside a transaction that rolls back. (Task 8.)
+15. **Drop `pytest-postgresql` dep.** Listed but unused; we're committed to docker-compose Postgres. (Task 1.)
+16. **Drop the no-op `get_sync_url()` Alembic helper.** psycopg3's `postgresql+psycopg://` URL works for both sync and async engines. (Task 7.)
+17. **Logger return type matches `make_filtering_bound_logger` output.** That returns `structlog.types.FilteringBoundLogger`, not `structlog.stdlib.BoundLogger`. Strict mode catches this. (Task 4.)
+18. **`configure_logging(level=None)` reads from `settings.log_level`.** Worker entrypoints call once with no args; per-unit `Environment=LOG_LEVEL=DEBUG` works. (Task 4.)
+19. **Postgres 17.** GA since Sept 2024; pin to `postgres:17`. (Task 2.)
+20. **`POSTGRES_PASSWORD` no fallback at runtime, only in `.env`.** Compose default of `local` makes it easy to ship the dev password. Compose still provides `${POSTGRES_PASSWORD:-local}` for the local dev case (paired with `.env` — gitignored), but the prod systemd unit will source from `infra/.env.prod` (Phase 12) with no fallback. (Task 2.)
+21. **Healthcheck `start_period: 30s`.** Initdb on slow disks can exceed the 5×10 retry window. (Task 2.)
+22. **HTTP client transport injection seam.** Phase 1 will add Retry-After + jittered exponential backoff. Wrapper accepts `transport` and merged headers now so the seam exists. UA pulled from `settings.http_user_agent` so the hardcoded "Chrome 126 / macOS 14.5" doesn't date the codebase. (Task 10.)
+23. **Column ownership documented in `models.py`.** Each column block in `AuctionLot` is labeled with the worker that writes it (`# Owned by: lot-scraper (initial), bid-poller (updates)`). Coding rule: workers `UPDATE` only their own columns; no whole-object `merge`. (Task 6.)
+
+**Deferred (acknowledged, not done in Phase 0):**
+
+- **`ListingSource` ABC** — phase 2 only. Task 9 title trimmed to `Source / AuctionSource (ListingSource deferred)`.
+- **Per-source rate-limiter / throttler** — first transient-error wave will tell us where this is needed. Phase 1 (HiBid) builds the first one.
+- **Native PG enum types** — see decision 9 above.
+
+End of overlay. Tasks below are the modified plan.
+
+---
+
 ### Task 1: Repo scaffolding (pyproject.toml + tooling configs)
 
 **Files:**
@@ -74,7 +117,6 @@ dependencies = [
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
-    "pytest-postgresql>=6.0",
     "ruff>=0.5",
     "pyright>=1.1.370",
     "respx>=0.21",
@@ -150,52 +192,78 @@ git commit -m "scaffold project: pyproject.toml, ruff, pyright"
 **Files:**
 - Create: `infra/docker-compose.yml`
 - Create: `infra/.env.example`
+- Create: `infra/initdb/01-create-test-db.sql`
 
 - [ ] **Step 1: Write `infra/docker-compose.yml`**
 
 ```yaml
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     container_name: carbuyer-pg
     environment:
       POSTGRES_USER: carbuyer
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local}
       POSTGRES_DB: carbuyer
+    # 11 worker pools × (2 + 3 overflow) = ~55 connections worst case;
+    # bump max_connections to 200 to leave headroom for ops/dashboard/Alembic.
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "effective_cache_size=2GB"
     ports:
-      - "5432:5432"
+      # Bound to localhost only — never expose Postgres on LAN.
+      # Host port 5433 (not 5432) to avoid collisions with a host-native
+      # Postgres install. DATABASE_URL must reference :5433 to match.
+      - "127.0.0.1:5433:5432"
     volumes:
       - carbuyer-pg-data:/var/lib/postgresql/data
+      # Runs on first volume init only; idempotent CREATE DATABASE for tests.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "carbuyer"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
 volumes:
   carbuyer-pg-data:
 ```
 
-- [ ] **Step 2: Write `infra/.env.example`**
+- [ ] **Step 2: Write `infra/initdb/01-create-test-db.sql`**
+
+```sql
+-- Runs once on first Postgres init (when carbuyer-pg-data volume is empty).
+-- Creates the test database used by pytest fixtures.
+CREATE DATABASE carbuyer_test OWNER carbuyer;
+```
+
+- [ ] **Step 3: Write `infra/.env.example`**
 
 ```
 POSTGRES_PASSWORD=local
 ```
 
-- [ ] **Step 3: Start Postgres and verify**
+- [ ] **Step 4: Start Postgres and verify**
 
 ```bash
 cd infra && docker compose up -d
 docker exec carbuyer-pg pg_isready -U carbuyer
+docker exec carbuyer-pg psql -U carbuyer -lqt | grep -E '^\s+carbuyer(_test)?\s'
 ```
 
-Expected: `accepting connections`.
+Expected: `accepting connections`; both `carbuyer` and `carbuyer_test` listed.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add infra/docker-compose.yml infra/.env.example
-git commit -m "infra: local Postgres via docker compose"
+git add infra/docker-compose.yml infra/.env.example infra/initdb/01-create-test-db.sql
+git commit -m "infra: local Postgres 17 via docker compose"
 ```
 
 ---
@@ -241,12 +309,23 @@ Expected: ImportError or ModuleNotFoundError on `carbuyer.shared.config`.
 - [ ] **Step 3: Write `src/carbuyer/shared/config.py`**
 
 ```python
-from typing import Literal
-from pydantic import Field
+from __future__ import annotations
+
+import json
+from typing import Any, Literal
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 Province = Literal["AB", "BC", "SK", "MB", "ON", "QC", "NS", "NB", "NL", "PE", "YT", "NT", "NU"]
+
+
+# Default UA. Update each quarter; can be overridden via HTTP_USER_AGENT env.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 class Settings(BaseSettings):
@@ -258,7 +337,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(
-        default="postgresql+psycopg://carbuyer:local@localhost:5432/carbuyer"
+        default="postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer"
     )
     openai_api_key: str = Field(default="")
     openai_model: str = Field(default="gpt-4o-mini")
@@ -280,6 +359,21 @@ class Settings(BaseSettings):
     flip_margin_pct: float = 0.10
 
     log_level: str = "INFO"
+    http_user_agent: str = DEFAULT_USER_AGENT
+
+    @field_validator("discord_channels", mode="before")
+    @classmethod
+    def _parse_discord_channels(cls, value: Any) -> dict[str, int]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise ValueError("DISCORD_CHANNELS must be a JSON object of name→channel_id")
+            return {str(k): int(v) for k, v in parsed.items()}
+        if isinstance(value, dict):
+            return {str(k): int(v) for k, v in value.items()}
+        raise TypeError(f"discord_channels: unexpected type {type(value).__name__}")
 
 
 settings = Settings()
@@ -326,6 +420,13 @@ def test_get_logger_returns_bound_logger() -> None:
     log = get_logger("test")
     assert log is not None
     log.info("hello", key="value")  # should not raise
+
+
+def test_configure_logging_default_reads_settings() -> None:
+    # Calling with no level argument falls back to settings.log_level (default INFO).
+    configure_logging()
+    log = get_logger("test")
+    log.info("ok")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -339,18 +440,25 @@ Expected: ImportError on `carbuyer.shared.logging`.
 - [ ] **Step 3: Implement `src/carbuyer/shared/logging.py`**
 
 ```python
+from __future__ import annotations
+
 import logging
 import sys
 from typing import Any
 
 import structlog
+from structlog.types import FilteringBoundLogger
+
+from carbuyer.shared.config import settings
 
 
-def configure_logging(level: str = "INFO") -> None:
+# stdout JSON only — systemd captures via journald in prod; do not add FileHandler.
+def configure_logging(level: str | None = None) -> None:
+    effective = (level or settings.log_level).upper()
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
-        level=getattr(logging, level.upper()),
+        level=getattr(logging, effective),
     )
     structlog.configure(
         processors=[
@@ -362,13 +470,13 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper())
+            getattr(logging, effective)
         ),
         cache_logger_on_first_use=True,
     )
 
 
-def get_logger(name: str, **initial_values: Any) -> structlog.stdlib.BoundLogger:
+def get_logger(name: str, **initial_values: Any) -> FilteringBoundLogger:
     return structlog.get_logger(name).bind(**initial_values)
 ```
 
@@ -405,16 +513,29 @@ git commit -m "shared: structlog JSON logging"
 import pytest
 from sqlalchemy import text
 
-from carbuyer.db.session import async_session_maker, engine
+from carbuyer.db.session import get_session, make_engine
 
 
 @pytest.mark.asyncio
-async def test_session_can_select_one() -> None:
-    async with async_session_maker() as session:
-        result = await session.execute(text("SELECT 1 AS x"))
-        row = result.one()
-        assert row.x == 1
-    await engine.dispose()
+async def test_make_engine_can_select_one() -> None:
+    # Throwaway engine for direct connectivity check; conftest's session-scoped
+    # engine fixture (Task 8) replaces the singleton without conflict.
+    eng = make_engine()
+    try:
+        async with eng.connect() as conn:
+            result = await conn.execute(text("SELECT 1 AS x"))
+            assert result.scalar_one() == 1
+    finally:
+        await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_session_yields_async_session() -> None:
+    # Validates the singleton accessor path; does NOT dispose, since other
+    # tests (post-Task-8) share the same engine via the conftest fixture.
+    async with get_session() as session:
+        result = await session.execute(text("SELECT 2 AS x"))
+        assert result.scalar_one() == 2
 ```
 
 - [ ] **Step 2: Verify it fails**
@@ -428,6 +549,8 @@ Expected: ImportError.
 - [ ] **Step 3: Implement `src/carbuyer/db/base.py`**
 
 ```python
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any
 
@@ -436,7 +559,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
 
-NAMING_CONVENTION = {
+NAMING_CONVENTION: dict[str, str] = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
     "ck": "ck_%(table_name)s_%(constraint_name)s",
@@ -465,6 +588,8 @@ class TimestampMixin:
 - [ ] **Step 4: Implement `src/carbuyer/db/session.py`**
 
 ```python
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -478,7 +603,17 @@ from sqlalchemy.ext.asyncio import (
 from carbuyer.shared.config import settings
 
 
-def make_engine(url: str | None = None, *, pool_size: int = 5, max_overflow: int = 5) -> AsyncEngine:
+# Pool sizing rationale: 11 worker processes; each opens its own pool. With
+# pool_size=2, max_overflow=3 the absolute upper bound is 5 × 11 = 55 sessions.
+# Postgres is configured for max_connections=200 (see infra/docker-compose.yml),
+# leaving headroom for ops, dashboard, and Alembic. Workers that do bursty DB
+# I/O can override per-process via make_engine(pool_size=..., max_overflow=...).
+def make_engine(
+    url: str | None = None,
+    *,
+    pool_size: int = 2,
+    max_overflow: int = 3,
+) -> AsyncEngine:
     return create_async_engine(
         url or settings.database_url,
         pool_size=pool_size,
@@ -486,20 +621,58 @@ def make_engine(url: str | None = None, *, pool_size: int = 5, max_overflow: int
         pool_pre_ping=True,
         pool_recycle=1800,
         connect_args={
-            "options": "-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000 -c lock_timeout=5000",
+            # statement_timeout=30s catches stuck OLTP queries; long-running
+            # comp aggregates in the valuator/distiller must SET LOCAL their own
+            # higher limit inside their transaction.
+            "options": (
+                "-c statement_timeout=30000 "
+                "-c idle_in_transaction_session_timeout=60000 "
+                "-c lock_timeout=5000"
+            ),
         },
     )
 
 
-engine: AsyncEngine = make_engine()
-async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    engine, expire_on_commit=False, autoflush=False
-)
+_engine: AsyncEngine | None = None
+_session_maker: async_sessionmaker[AsyncSession] | None = None
+
+
+def get_engine() -> AsyncEngine:
+    """Return the process-wide async engine (created lazily on first call)."""
+    global _engine
+    if _engine is None:
+        _engine = make_engine()
+    return _engine
+
+
+def get_session_maker() -> async_sessionmaker[AsyncSession]:
+    """Return the process-wide AsyncSession factory bound to get_engine()."""
+    global _session_maker
+    if _session_maker is None:
+        _session_maker = async_sessionmaker(
+            get_engine(), expire_on_commit=False, autoflush=False
+        )
+    return _session_maker
+
+
+async def set_engine_for_testing(engine: AsyncEngine) -> None:
+    """Test-only: replace the cached engine and session factory with a test pool.
+
+    Disposes any previously cached engine. After this call, every callsite that
+    uses get_session() / get_session_maker() / get_engine() will see the test
+    engine, including modules that imported the names earlier (since they are
+    looked up via these accessors, not module-level globals).
+    """
+    global _engine, _session_maker
+    if _engine is not None and _engine is not engine:
+        await _engine.dispose()
+    _engine = engine
+    _session_maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
-    async with async_session_maker() as session:
+    async with get_session_maker()() as session:
         yield session
 ```
 
@@ -529,6 +702,7 @@ git commit -m "db: SQLAlchemy async base + session factory"
 ### Task 6: ORM models for all MVP tables
 
 **Files:**
+- Create: `src/carbuyer/db/enums.py`
 - Create: `src/carbuyer/db/models.py`
 - Create: `tests/db/test_models.py`
 
@@ -536,10 +710,19 @@ git commit -m "db: SQLAlchemy async base + session factory"
 
 ```python
 # tests/db/test_models.py
+from carbuyer.db.enums import (
+    AuctionStatus,
+    EnrichmentStatus,
+    LotStatus,
+    NotificationStatus,
+    UserAction,
+    ValuationStatus,
+    VisionStatus,
+)
 from carbuyer.db.models import (
     Auction,
-    AuctionLot,
     AuctionBidHistory,
+    AuctionLot,
     HistoricalSale,
     Purchase,
     Search,
@@ -555,10 +738,22 @@ def test_models_importable() -> None:
     assert Search.__tablename__ == "searches"
 
 
+def test_status_enums_have_expected_values() -> None:
+    # StrEnum: comparable to plain strings; persisted as String(16) in DB.
+    assert EnrichmentStatus.PENDING == "pending"
+    assert ValuationStatus.DONE == "done"
+    assert VisionStatus.SKIPPED == "skipped"
+    assert NotificationStatus.PENDING == "pending"
+    assert LotStatus.OPEN == "open"
+    assert AuctionStatus.UPCOMING == "upcoming"
+    assert UserAction.INTERESTED == "interested"
+
+
 def test_auction_lot_has_required_columns() -> None:
     cols = {c.name for c in AuctionLot.__table__.columns}
     expected = {
         "id", "auction_id", "source_lot_id", "lot_number", "url",
+        "parser_version",
         "title", "description", "photos",
         "year", "make", "model", "trim", "engine", "transmission", "drivetrain",
         "mileage_km", "vin", "title_status", "province_of_origin",
@@ -596,16 +791,94 @@ uv run pytest tests/db/test_models.py -v
 
 Expected: ImportError.
 
-- [ ] **Step 3: Implement `src/carbuyer/db/models.py`**
+- [ ] **Step 3: Implement `src/carbuyer/db/enums.py`**
 
 ```python
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+# Worker-pipeline stage statuses (one column per stage on auction_lots).
+# StrEnum compares equal to plain strings so existing string queries keep working
+# without TypeDecorator boilerplate; the DB column is still String(16).
+class EnrichmentStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class ValuationStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    FAILED = "failed"
+    INSUFFICIENT_COMPS = "insufficient_comps"
+
+
+class VisionStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+class NotificationStatus(StrEnum):
+    PENDING = "pending"
+    DONE = "done"
+    SKIPPED = "skipped"
+
+
+class LotStatus(StrEnum):
+    OPEN = "open"
+    CLOSING_SOON = "closing_soon"
+    EXTENDED = "extended"
+    CLOSED = "closed"
+    UNSOLD = "unsold"
+    SOLD = "sold"
+
+
+class AuctionStatus(StrEnum):
+    UPCOMING = "upcoming"
+    LIVE = "live"
+    CLOSING = "closing"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
+
+
+class UserAction(StrEnum):
+    INTERESTED = "interested"
+    MAYBE = "maybe"
+    NOT_INTERESTED = "not_interested"
+
+
+class AuctionSubtype(StrEnum):
+    ESTATE = "estate"
+    COMMERCIAL = "commercial"  # phase-2 RB / Michener Allen
+```
+
+- [ ] **Step 4: Implement `src/carbuyer/db/models.py`**
+
+> **Worker column-ownership rule:** Each block under `AuctionLot` is annotated
+> with the worker that owns the columns. Workers UPDATE only their own columns;
+> never `session.merge(lot)` the whole row back. Bid-poller updates bid-state;
+> enricher updates enrichment + rarity (LLM); valuator updates valuation +
+> historical_comp_count; vision-batcher updates vision_*; notifier updates
+> *_notified_at; user actions come from the dashboard.
+
+```python
+from __future__ import annotations
+
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, JSON,
-    Numeric, String, Text, UniqueConstraint,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer,
+    Numeric, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -620,7 +893,9 @@ class Auction(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     source_auction_id: Mapped[str] = mapped_column(String(128), nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
-    auction_subtype: Mapped[str] = mapped_column(String(32), nullable=False, default="estate")
+    auction_subtype: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="estate", server_default="estate",
+    )
     auctioneer_name: Mapped[str | None] = mapped_column(String(255))
     auctioneer_external_id: Mapped[str | None] = mapped_column(String(128))
     title: Mapped[str | None] = mapped_column(Text)
@@ -638,10 +913,14 @@ class Auction(Base, TimestampMixin):
     online_bidding_fee_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     gst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     pst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="upcoming", index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="upcoming", server_default="upcoming", index=True,
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    discovery_confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="high")
+    discovery_confidence: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="high", server_default="high",
+    )
     needs_plugin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     routing_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -655,16 +934,23 @@ class Auction(Base, TimestampMixin):
 class AuctionLot(Base, TimestampMixin):
     __tablename__ = "auction_lots"
 
+    # ── Owned by: lot-scraper (initial insert + URL/photo refresh) ──────────
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     auction_id: Mapped[int] = mapped_column(ForeignKey("auctions.id", ondelete="CASCADE"), index=True)
     source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
     lot_number: Mapped[str | None] = mapped_column(String(64))
     url: Mapped[str] = mapped_column(Text, nullable=False)
+    # parser_version: the source plugin's parser version at the time this row
+    # was scraped. Used to detect rows that need re-enrichment after a parser
+    # change (Source.version on the plugin → propagated here on every upsert).
+    parser_version: Mapped[str | None] = mapped_column(String(32))
     title: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
-    photos: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, nullable=False)
+    photos: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+    )
 
-    # Normalized vehicle facts
+    # ── Owned by: lot-scraper (initial), description-enricher (LLM normalization) ──
     year: Mapped[int | None] = mapped_column(Integer)
     make: Mapped[str | None] = mapped_column(String(64), index=True)
     model: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -674,44 +960,66 @@ class AuctionLot(Base, TimestampMixin):
     drivetrain: Mapped[str | None] = mapped_column(String(16))
     mileage_km: Mapped[int | None] = mapped_column(Integer)
     vin: Mapped[str | None] = mapped_column(String(32))
-    title_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    title_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+    )
     province_of_origin: Mapped[str | None] = mapped_column(String(8))
 
-    # LLM enrichment
+    # ── Owned by: description-enricher (LLM description pass) ───────────────
     condition_categorical: Mapped[str | None] = mapped_column(String(16))
     condition_confidence: Mapped[float | None] = mapped_column()
-    red_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
-    green_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
-    showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    red_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    green_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
     summary: Mapped[str | None] = mapped_column(Text)
     carfax_url: Mapped[str | None] = mapped_column(Text)
     carfax_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    # Rarity
-    desirable_trim_or_spec: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    classic_or_collector: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    desirability_signals: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
-    desirability_evidence: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    # ── Owned by: description-enricher (rarity/desirability fields, LLM) ────
+    desirable_trim_or_spec: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    classic_or_collector: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    desirability_signals: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    desirability_evidence: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    # historical_comp_count: written by valuator (DB-derived signal).
     historical_comp_count: Mapped[int | None] = mapped_column(Integer)
     recent_appreciation: Mapped[float | None] = mapped_column()
+    # rarity_score: combined LLM + DB; written by valuator.
     rarity_score: Mapped[float | None] = mapped_column()
 
-    # Vision (filled by vision-batcher)
+    # ── Owned by: vision-batcher (nightly two-pass) ─────────────────────────
     vision_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     vision_condition_overall: Mapped[str | None] = mapped_column(String(16))
     vision_confidence: Mapped[float | None] = mapped_column()
-    vision_contradictions: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    vision_contradictions: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
 
-    # Bid state
+    # ── Owned by: bid-poller (continuous tiered cadence) ────────────────────
     current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     last_bid_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bid_count_visible: Mapped[int | None] = mapped_column(Integer)
     reserve_met: Mapped[bool | None] = mapped_column(Boolean)
-    lot_status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
+    lot_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="open", server_default="open", index=True,
+    )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
-    # Valuation
+    # ── Owned by: valuator ──────────────────────────────────────────────────
     comp_count: Mapped[int | None] = mapped_column(Integer)
     value_low_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     value_mid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -723,18 +1031,30 @@ class AuctionLot(Base, TimestampMixin):
     price_deal_score: Mapped[float | None] = mapped_column()
     flag_score: Mapped[int | None] = mapped_column(Integer)
     confidence_bucket: Mapped[str | None] = mapped_column(String(16))
-    suspicious_underprice_flag: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    suspicious_underprice_flag: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
     scoring_version: Mapped[str | None] = mapped_column(String(32))
     weights_hash: Mapped[str | None] = mapped_column(String(64))
 
-    # Worker statuses
-    enrichment_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
-    valuation_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
-    vision_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
-    notification_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    # ── Owned by: pipeline workers (each writes its own status column) ──────
+    # See carbuyer.db.enums for valid values; column is String(16) so PG enum
+    # migration churn is avoided. Workers compare against StrEnum members.
+    enrichment_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
+    valuation_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
+    vision_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
+    notification_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True,
+    )
     enrichment_version: Mapped[str | None] = mapped_column(String(32))
 
-    # Per-trigger notification timestamps
+    # ── Owned by: notifier (one timestamp per trigger type) ─────────────────
     early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cheap_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closing_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -742,10 +1062,12 @@ class AuctionLot(Base, TimestampMixin):
     extended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_notified_channel: Mapped[str | None] = mapped_column(String(64))
 
-    # User action
+    # ── Owned by: dashboard (user input) ────────────────────────────────────
     user_action: Mapped[str | None] = mapped_column(String(16), index=True)
     notes: Mapped[str | None] = mapped_column(Text)
-    was_purchased_by_us: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    was_purchased_by_us: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False, index=True,
+    )
 
     auction: Mapped["Auction"] = relationship(back_populates="lots", lazy="raise")
     bid_history: Mapped[list["AuctionBidHistory"]] = relationship(
@@ -790,7 +1112,9 @@ class HistoricalSale(Base, TimestampMixin):
     drivetrain: Mapped[str | None] = mapped_column(String(16))
     mileage_km: Mapped[int | None] = mapped_column(Integer)
     vin: Mapped[str | None] = mapped_column(String(32))
-    title_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    title_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+    )
     province_of_origin: Mapped[str | None] = mapped_column(String(8))
     condition_categorical: Mapped[str | None] = mapped_column(String(16))
     final_listed_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -803,11 +1127,19 @@ class HistoricalSale(Base, TimestampMixin):
     seller_city: Mapped[str | None] = mapped_column(String(128))
     observed_first_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    disposition_reason: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
-    was_notified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    was_purchased_by_us: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    disposition_reason: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown", server_default="unknown",
+    )
+    was_notified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    was_purchased_by_us: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
     notes: Mapped[str | None] = mapped_column(Text)
-    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1"),
+    )
 
 
 class Purchase(Base, TimestampMixin):
@@ -834,13 +1166,19 @@ class Search(Base, TimestampMixin):
     __tablename__ = "searches"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, default="me")
+    user_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="me", server_default="me",
+    )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"),
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False,
+    )
 ```
 
-- [ ] **Step 4: Run test**
+- [ ] **Step 5: Run test**
 
 ```bash
 uv run pytest tests/db/test_models.py -v
@@ -848,11 +1186,11 @@ uv run pytest tests/db/test_models.py -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/carbuyer/db/models.py tests/db/test_models.py
-git commit -m "db: ORM models for all MVP tables"
+git add src/carbuyer/db/enums.py src/carbuyer/db/models.py tests/db/test_models.py
+git commit -m "db: ORM models + status StrEnums for all MVP tables"
 ```
 
 ---
@@ -883,15 +1221,21 @@ sqlalchemy.url =
 - [ ] **Step 3: Replace `alembic/env.py` with:**
 
 ```python
+from __future__ import annotations
+
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
+from carbuyer.db import models  # noqa: F401  -- ensure models register with metadata
 from carbuyer.db.base import Base
-from carbuyer.db import models  # noqa: F401  -- ensure models are imported
 from carbuyer.shared.config import settings
 
+
+# psycopg3's "postgresql+psycopg" URL is consumed by both create_engine (sync)
+# and create_async_engine (async). Alembic only needs a sync engine, so we use
+# create_engine directly with the same URL — no rewrite required.
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -899,14 +1243,9 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def get_sync_url() -> str:
-    # Alembic uses sync; convert async URL
-    return settings.database_url.replace("+psycopg", "+psycopg")
-
-
 def run_migrations_offline() -> None:
     context.configure(
-        url=get_sync_url(),
+        url=settings.database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -916,9 +1255,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    cfg = config.get_section(config.config_ini_section) or {}
-    cfg["sqlalchemy.url"] = get_sync_url()
-    connectable = engine_from_config(cfg, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    connectable = create_engine(settings.database_url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
@@ -972,53 +1309,97 @@ git commit -m "db: alembic init + initial migration"
 - [ ] **Step 1: Write `tests/conftest.py`**
 
 ```python
+from __future__ import annotations
+
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
 
 from carbuyer.db.base import Base
-from carbuyer.db.session import make_engine
+from carbuyer.db.session import set_engine_for_testing
 from carbuyer.shared.config import settings
 
 
+def _test_url() -> str:
+    # Append _test to the DB name. Test DB is auto-created by the
+    # /docker-entrypoint-initdb.d/ script in infra/docker-compose.yml.
+    url = settings.database_url
+    if url.endswith("/carbuyer"):
+        return url[: -len("/carbuyer")] + "/carbuyer_test"
+    if url.endswith("/carbuyer_test"):
+        return url
+    raise RuntimeError(
+        f"Refusing to run tests against non-carbuyer database URL: {url}"
+    )
+
+
 @pytest.fixture(scope="session")
-def event_loop_policy():
-    import asyncio
+def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
     return asyncio.DefaultEventLoopPolicy()
 
 
-@pytest_asyncio.fixture(scope="function")
-async def engine() -> AsyncIterator:
-    # Use a separate test schema by appending _test to the DB name in the URL
-    test_url = settings.database_url
-    if "/carbuyer" in test_url and not test_url.endswith("_test"):
-        test_url = test_url.replace("/carbuyer", "/carbuyer_test")
-    eng = make_engine(test_url, pool_size=1, max_overflow=0)
+@pytest_asyncio.fixture(scope="session")
+async def engine() -> AsyncIterator[AsyncEngine]:
+    # NullPool: each connection is fresh — no pool deadlocks, no cross-test
+    # connection state. Schema is built once per session; tests use savepoints
+    # for isolation (see `session` fixture).
+    eng = create_async_engine(_test_url(), poolclass=NullPool)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    # Make get_session() / get_session_maker() in production code resolve to
+    # this test engine for every test in the session.
+    await set_engine_for_testing(eng)
     yield eng
     await eng.dispose()
 
 
 @pytest_asyncio.fixture
-async def session(engine) -> AsyncIterator[AsyncSession]:
-    maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
-    async with maker() as s:
-        yield s
+async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """Per-test AsyncSession that rolls back on teardown.
+
+    Pattern: open one outer connection, begin an outer transaction, bind a
+    sessionmaker to that connection with `join_transaction_mode='create_savepoint'`
+    so every commit inside a test becomes a SAVEPOINT release; the outer
+    rollback at teardown undoes everything. No drop/create per test.
+    """
+    conn: AsyncConnection
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        maker = async_sessionmaker(
+            bind=conn,
+            expire_on_commit=False,
+            autoflush=False,
+            join_transaction_mode="create_savepoint",
+        )
+        async with maker() as s:
+            yield s
+        await outer.rollback()
 ```
 
-- [ ] **Step 2: Create the test database**
+- [ ] **Step 2: Verify the test DB exists (created on first compose up)**
+
+```bash
+docker exec carbuyer-pg psql -U carbuyer -lqt | grep carbuyer_test
+```
+
+Expected: a line for `carbuyer_test`. If missing (older volume), recreate it:
 
 ```bash
 docker exec carbuyer-pg psql -U carbuyer -c "CREATE DATABASE carbuyer_test;"
 ```
 
-Expected: `CREATE DATABASE` (or "already exists" if rerun — that's fine).
-
-- [ ] **Step 3: Verify with a smoke test (run existing test_session.py — it should still pass against the main DB)**
+- [ ] **Step 3: Verify with a smoke test (run existing test_session.py — it now points at carbuyer_test via the engine fixture)**
 
 ```bash
 uv run pytest tests/db/test_session.py -v
@@ -1030,12 +1411,12 @@ Expected: PASS.
 
 ```bash
 git add tests/conftest.py
-git commit -m "tests: shared fixtures (test DB, async session)"
+git commit -m "tests: session-scoped test engine + per-test savepoint isolation"
 ```
 
 ---
 
-### Task 9: Source plugin ABCs (Source / AuctionSource / ListingSource)
+### Task 9: Source plugin ABCs (Source / AuctionSource — ListingSource deferred)
 
 **Files:**
 - Create: `src/carbuyer/sources/__init__.py`
@@ -1047,20 +1428,60 @@ git commit -m "tests: shared fixtures (test DB, async session)"
 
 ```python
 # tests/sources/test_base.py
+import dataclasses
+import inspect
+
+import pytest
+
 from carbuyer.sources.base import (
-    AuctionRef, LotRef, BidObservation, RawAuction, RawLot,
+    SOURCES,
+    AuctionDiscoverer,
+    AuctionFetcher,
+    AuctionRef,
     AuctionSource,
+    BidPoller,
+    LotRef,
+    RawLot,
+    Source,
+    register,
 )
 
 
-def test_auction_ref_is_constructible() -> None:
+def test_auction_ref_is_constructible_and_frozen() -> None:
     ref = AuctionRef(source="hibid", source_auction_id="A123", url="https://x")
     assert ref.source == "hibid"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ref.source = "other"  # type: ignore[misc]
 
 
-def test_auction_source_is_abstract() -> None:
-    import inspect
+def test_raw_lot_has_extra_escape_hatch() -> None:
+    raw = RawLot(
+        ref=LotRef(source="hibid", source_auction_id="A1", source_lot_id="L1", url="https://x"),
+        lot_number="1", title="Truck", description=None,
+    )
+    assert raw.extra == {}
+    raw.extra["carfax_url"] = "https://carfax/abc"
+    assert raw.extra["carfax_url"].endswith("abc")
+
+
+def test_role_abcs_are_abstract() -> None:
+    assert inspect.isabstract(AuctionDiscoverer)
+    assert inspect.isabstract(AuctionFetcher)
+    assert inspect.isabstract(BidPoller)
     assert inspect.isabstract(AuctionSource)
+
+
+def test_register_adds_source_to_registry() -> None:
+    SOURCES.clear()
+
+    class _StubSource(Source):
+        name = "stub"
+        version = "0.0.1"
+
+    src = _StubSource()
+    register(src)
+    assert SOURCES["stub"] is src
+    SOURCES.clear()
 ```
 
 - [ ] **Step 2: Verify it fails**
@@ -1074,16 +1495,20 @@ Expected: ImportError.
 - [ ] **Step 3: Implement `src/carbuyer/sources/base.py`**
 
 ```python
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, ClassVar, Literal
 
 
 SourceType = Literal["listing", "auction"]
 
+
+# ── Reference / value objects ───────────────────────────────────────────────
 
 @dataclass(frozen=True, slots=True)
 class AuctionRef:
@@ -1117,6 +1542,9 @@ class RawAuction:
     online_bidding_fee_pct: Decimal | None
     terms_text: str | None
     auction_subtype: str = "estate"
+    # Source-specific fields that don't yet warrant a canonical column.
+    # Promote to a real field once 2+ sources surface the same key.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1137,6 +1565,9 @@ class RawLot:
     reserve_met: bool | None = None
     scheduled_end_at: datetime | None = None
     lot_status: str = "open"
+    # See RawAuction.extra. Common uses today: carfax_url, reserve_price_cad,
+    # buy_now_price_cad, raw HTML for downstream parsers.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1145,31 +1576,70 @@ class BidObservation:
     observed_at: datetime
     current_high_bid_cad: Decimal | None
     end_time_at_observation: datetime | None
-    status_at_observation: str
+    status_at_observation: str  # See db.enums.LotStatus for canonical values.
 
+
+# ── Plugin role ABCs ────────────────────────────────────────────────────────
+# Roles split so that a router (Phase 10) can implement only AuctionDiscoverer
+# while a full plugin (HiBid, McDougall) implements all three via AuctionSource.
+#
+# NOTE: abstract async-generator methods are declared `def f(...) -> AsyncIterator[T]`
+# (not `async def`). Concrete implementations are async generators
+# (`async def f(...) -> AsyncIterator[T]: yield ...`); pyright accepts that
+# pairing under strict mode. `async def f() -> AsyncIterator[T]: ...` (with `...`
+# body) would be a coroutine returning an iterator — wrong shape, runtime bug.
 
 class Source(ABC):
-    type: SourceType
-    name: str
+    """Marker base for all sources. Subclasses must define `name` and `version`."""
+
+    name: ClassVar[str]
+    # Bumped when the parser/discovery contract changes. Persisted to
+    # `auction_lots.parser_version` so the enricher / valuator can re-run on
+    # rows scraped by a stale version.
+    version: ClassVar[str]
 
 
-class AuctionSource(Source):
-    type = "auction"
+class AuctionDiscoverer(Source):
+    kind: ClassVar[SourceType] = "auction"
 
     @abstractmethod
-    async def discover_auctions(self) -> AsyncIterator[AuctionRef]: ...
+    def discover_auctions(self) -> AsyncIterator[AuctionRef]: ...
+
+
+class AuctionFetcher(Source):
+    kind: ClassVar[SourceType] = "auction"
 
     @abstractmethod
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction: ...
 
     @abstractmethod
-    async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]: ...
+    def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]: ...
 
     @abstractmethod
     async def fetch_lot(self, ref: LotRef) -> RawLot: ...
 
+
+class BidPoller(Source):
+    kind: ClassVar[SourceType] = "auction"
+
     @abstractmethod
     async def poll_bid(self, ref: LotRef) -> BidObservation: ...
+
+
+class AuctionSource(AuctionDiscoverer, AuctionFetcher, BidPoller):
+    """Convenience union for plugins that implement all three auction roles."""
+
+
+# ── Registry ────────────────────────────────────────────────────────────────
+# Plugins call `register(self)` at module import time; the lot-scraper /
+# discoverer / dashboard read SOURCES to enumerate covered platforms (used by
+# the Phase-10 "needs-plugin" alerting and the dashboard health view).
+
+SOURCES: dict[str, Source] = {}
+
+
+def register(source: Source) -> None:
+    SOURCES[source.name] = source
 ```
 
 - [ ] **Step 4: Create `__init__.py` files**
@@ -1205,11 +1675,10 @@ git commit -m "sources: AuctionSource ABC and dataclasses"
 
 ```python
 # tests/sources/test_http.py
-import httpx
 import pytest
 import respx
 
-from carbuyer.sources.http import make_client
+from carbuyer.sources.http import build_default_headers, make_client
 
 
 @pytest.mark.asyncio
@@ -1222,6 +1691,30 @@ async def test_make_client_sends_browser_headers() -> None:
         sent = route.calls.last.request
         assert "Mozilla" in sent.headers["User-Agent"]
         assert "Accept-Language" in sent.headers
+
+
+@pytest.mark.asyncio
+async def test_make_client_merges_custom_headers() -> None:
+    async with respx.mock(base_url="https://example.test") as mock:
+        route = mock.get("/").respond(200)
+        async with make_client(headers={"X-Plugin": "hibid"}) as client:
+            await client.get("https://example.test/")
+        sent = route.calls.last.request
+        assert sent.headers["X-Plugin"] == "hibid"
+        assert "Mozilla" in sent.headers["User-Agent"]
+
+
+def test_build_default_headers_uses_settings_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_USER_AGENT", "TestUA/1.0")
+    # Reload settings to pick up the env var override.
+    from importlib import reload
+
+    import carbuyer.shared.config as config_mod
+    reload(config_mod)
+    import carbuyer.sources.http as http_mod
+    reload(http_mod)
+    headers = http_mod.build_default_headers()
+    assert headers["User-Agent"] == "TestUA/1.0"
 ```
 
 - [ ] **Step 2: Verify it fails**
@@ -1233,6 +1726,8 @@ uv run pytest tests/sources/test_http.py -v
 - [ ] **Step 3: Implement `src/carbuyer/sources/http.py`**
 
 ```python
+from __future__ import annotations
+
 import asyncio
 import random
 from collections.abc import AsyncIterator
@@ -1240,33 +1735,49 @@ from contextlib import asynccontextmanager
 
 import httpx
 
+from carbuyer.shared.config import settings
 
-DEFAULT_HEADERS: dict[str, str] = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-CA,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-}
+
+# HTTP/2 is disabled by default: HTTP/2 fingerprinting (h2c settings frame
+# ordering, etc.) is more revealing than UA, and httpx's H2 backend requires
+# the `httpx[http2]` extra which we don't depend on.
+#
+# Phase 1 wraps this with a RetryTransport that honors Retry-After and applies
+# jittered exponential backoff on {429, 502, 503, 504}. The `transport`
+# parameter is the seam.
+
+def build_default_headers() -> dict[str, str]:
+    return {
+        "User-Agent": settings.http_user_agent,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-CA,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+    }
 
 
 @asynccontextmanager
 async def make_client(
-    *, timeout: float = 30.0, follow_redirects: bool = True
+    *,
+    timeout: float = 30.0,
+    follow_redirects: bool = True,
+    headers: dict[str, str] | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
+    merged_headers = build_default_headers()
+    if headers:
+        merged_headers.update(headers)
     async with httpx.AsyncClient(
-        headers=DEFAULT_HEADERS,
+        headers=merged_headers,
         timeout=timeout,
         follow_redirects=follow_redirects,
         http2=False,
+        transport=transport,
     ) as client:
         yield client
 
@@ -1300,6 +1811,59 @@ End of Phase 0. Postgres is up, schema is migrated, ORM models exist, source ABC
 
 HiBid (`hibid.com`) is the primary source. Pages embed a `<script>` block of the form `var lotModels = [{...}, ...];`. Our parser extracts that JSON literal and walks it. No headless browser. Conservative pacing (4–8s jitter). Reference fixture: capture one real catalog page during implementation; commit the HTML to `tests/sources/fixtures/`.
 
+### Phase 1 — Design-decision overlay (post-deliberation 2026-05-09)
+
+Multi-discipline review (senior dev, scraping/web research) raised concrete realities and code issues against original Phase 1. **Tasks below have been updated to reflect these decisions; this overlay documents the *why*.**
+
+**Hard reality found via live investigation:**
+
+- **Cloudflare bot management is active on hibid.com.** Plain `curl` with full Chrome headers returns HTTP 403 (`__cf_bm` cookie set, "Sorry, you have been blocked"). Anthropic's WebFetch passes through (different IP/JA3 fingerprint), so the site is reachable in principle. **A self-hosted Python httpx scraper as designed in the original plan will not work.** Three viable strategies:
+  1. **`curl_cffi`** (or similar) — TLS fingerprint matching Chrome via libcurl-impersonate. Drop-in `requests`-like API. **Recommended for MVP** — minimal infra, works for sites with Bot Fight Mode (which HiBid is — no Turnstile interstitial was observed).
+  2. **Playwright** (headed/headless with stealth plugins) — heavier, slower, higher hosting cost.
+  3. **Residential proxy provider** — ongoing cost, simpler code.
+- The plan **defers the CF-bypass implementation to a follow-up** (Phase 1.5 below). Phase 1 builds the plumbing against a hand-written synthetic fixture so the parser, URL builders, and `AuctionSource` integration are correct and unit-tested. The live integration test (original Task 14) becomes a **deferred Cloudflare-bypass spike**, with detailed acceptance criteria captured in the new task description.
+
+**HiBid data realities discovered:**
+
+- **Real `lotModels` lot-summary keys** (per the only public scraper found, [jkoelmel/texas_auctions_scraper](https://github.com/jkoelmel/texas_auctions_scraper)):
+  - `eventItemId` (int) — per-auction lot id used in listing endpoints.
+  - `lead` (string) — headline / title.
+  - `quantity` (int).
+  - `companyName` (string) — auctioneer.
+  - `auctionCity`, `auctionState` (strings) — location.
+  - `lotStatus.highBid` (number) — **nested** under `lotStatus`.
+  - `lotStatus.bidCount` (int).
+  - `lotStatus.timeLeft` (countdown string).
+  - `shippingOffered` (bool).
+  - The plan's original guesses (`lotId/lotID/id`, `title/lotTitle`, flat `highBid`, `saleEnd`, `lotImages`, `auctionId`, `url/lotUrl`) **do not match** observed HiBid output. `HibidLotSummary` is rewritten below.
+- **Year/make/model are NOT separate fields** in `lotModels` — they're embedded in the `lead` text. Parsing them out is the description-enricher's job (Phase 3); leave `year/make/model = None` in `parse_lot_summary`.
+- **Public lot URL uses a different global lot id** (`/lot/300724160/peterbilt-389`) than `eventItemId`. Persist `eventItemId` as `source_lot_id` (it's the listing-scoped key); the URL field comes from `lotUrl` if present.
+- **Discovery URL.** The original plan's `/{province}/auctions/700006/cars-and-vehicles?status=OPEN` is the **catalogs view** (auction-event listing). For per-lot enumeration, `/{province}/lots/700006/cars-and-vehicles?status=open` is the lots view. The discoverer wants the catalogs view (we record auctions, the lot-scraper enumerates lots within an auction). Status query param is lowercase `open` in the rendered UI; either case works server-side.
+- **Cross-border lots:** the AB province auction list contains some BC-located auctioneers (border operators). Don't assume `province path = pickup province`; post-filter on `auctionState` if needed.
+
+**Must-fix code issues:**
+
+1. **Balanced-bracket extraction, not regex `\[.*?\]`.** Non-greedy `\[.*?\]` with `re.DOTALL` matches from first `[` to first `]` — truncates on every nested array (HiBid lots embed `images: [...]`, etc.). Replace with a string-aware depth scanner. (Task 12.)
+2. **`HibidSource` declares `version: ClassVar[str]`.** Phase 0 design decision #8 makes this a contract on every plugin. (Task 13.)
+3. **`HibidSource` calls `register()` at module import.** Phase 0 design decision #11. (Task 13.)
+4. **`_parse_dt` returns UTC-aware datetimes.** Phase 7's soft-close logic compares to `datetime.now(UTC)`; mixing aware/naive crashes. (Task 12.)
+5. **Defensive `_to_decimal` helper.** `Decimal(str(bid))` blows up on stringified currency (`"1,200.00"`, `"$1,200"`). Single bad lot must not crash the whole catalog parse. (Task 12.)
+
+**Should-fix code issues:**
+
+6. **Retry transport in this phase.** Phase 0's HTTP wrapper already has a `transport=` seam; the comment promises Phase 1 will fill it. New module `src/carbuyer/sources/retry.py` with `RetryTransport` that honors Retry-After + jittered exponential backoff on `{429, 502, 503, 504}`. Used by HibidSource via `make_client(transport=RetryTransport(...))`. (New Task 11.5.)
+7. **`HibidSource` is an async context manager owning one client.** Phase 7 will poll continuously — per-call `make_client()` thrashes TLS handshakes. Workers wrap their main loop in `async with HibidSource(...) as src:`. (Task 13.)
+8. **Populate `RawLot.extra` with HiBid-specific fields:** `bidIncrement`, `reserveStatus`, `buyNowPrice`, `lotState`. The valuator (Phase 4) and soft-close detector (Phase 7) want them; capturing now is one line. (Task 13.)
+9. **Hand-written synthetic fixture in addition to (or instead of) a live capture.** `tests/sources/fixtures/hibid_catalog_synthetic.html` is the contract; if a live capture lands later, it's the canary. Synthetic fixture exercises: nested array in lot, `}],{` quirk, two lots with known ids/bids/end-times. (Task 12.)
+
+**Deferred (acknowledged, captured as Phase 1.5):**
+
+- **Cloudflare bypass** — Task 14 rewritten as Phase 1.5 spike: evaluate `curl_cffi` first, fall back to Playwright if 403'd. Acceptance: one real Alberta auction discovered + one lot fetched. Until done, the auction-discoverer worker (Phase 2) cannot run against live HiBid; it can run against a local mock for end-to-end-pipeline testing.
+
+End of overlay.
+
+---
+
 ### Task 11: HiBid constants and URL builders
 
 **Files:**
@@ -1312,38 +1876,79 @@ HiBid (`hibid.com`) is the primary source. Pages embed a `<script>` block of the
 
 ```python
 # tests/sources/hibid/test_urls.py
-from carbuyer.sources.hibid.urls import province_vehicles_url, lot_url, catalog_url
+from carbuyer.sources.hibid.urls import (
+    catalog_url,
+    lot_url,
+    province_lots_url,
+    province_vehicles_url,
+)
 
 
 def test_province_vehicles_url() -> None:
-    assert province_vehicles_url("AB") == "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=OPEN"
+    # Catalogs/events view — used by auction-discoverer to enumerate auctions.
+    assert (
+        province_vehicles_url("AB")
+        == "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=open"
+    )
+
+
+def test_province_lots_url() -> None:
+    # Per-lot listing view — used when scraping lots without a known auction.
+    assert (
+        province_lots_url("BC")
+        == "https://hibid.com/british-columbia/lots/700006/cars-and-vehicles?status=open"
+    )
 
 
 def test_lot_url() -> None:
     assert lot_url("12345", "1995-ford-f150") == "https://hibid.com/lot/12345/1995-ford-f150"
 
 
+def test_lot_url_no_slug() -> None:
+    assert lot_url("12345") == "https://hibid.com/lot/12345"
+
+
 def test_catalog_url() -> None:
-    assert catalog_url("740236", "vehicle-equipment-with-nl-power-auction") == \
-        "https://hibid.com/catalog/740236/vehicle-equipment-with-nl-power-auction"
+    assert (
+        catalog_url("740236", "vehicle-equipment-with-nl-power-auction")
+        == "https://hibid.com/catalog/740236/vehicle-equipment-with-nl-power-auction"
+    )
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/sources/hibid/urls.py`**
 
 ```python
-PROVINCE_PATH = {
+from __future__ import annotations
+
+# Western Canadian provinces. Other provinces (ON, QC, etc.) follow the same
+# slug pattern but are out-of-scope for the MVP.
+PROVINCE_PATH: dict[str, str] = {
     "AB": "alberta",
     "BC": "british-columbia",
     "SK": "saskatchewan",
     "MB": "manitoba",
 }
 
+# HiBid's "Cars & Vehicles" category id.
 CARS_VEHICLES_CATEGORY = "700006"
 
 
 def province_vehicles_url(province: str) -> str:
+    """URL for the catalogs/events view (auctions hosting vehicle lots)."""
     path = PROVINCE_PATH[province]
-    return f"https://hibid.com/{path}/auctions/{CARS_VEHICLES_CATEGORY}/cars-and-vehicles?status=OPEN"
+    return (
+        f"https://hibid.com/{path}/auctions/{CARS_VEHICLES_CATEGORY}"
+        f"/cars-and-vehicles?status=open"
+    )
+
+
+def province_lots_url(province: str) -> str:
+    """URL for the per-lot view (individual lots flattened across auctions)."""
+    path = PROVINCE_PATH[province]
+    return (
+        f"https://hibid.com/{path}/lots/{CARS_VEHICLES_CATEGORY}"
+        f"/cars-and-vehicles?status=open"
+    )
 
 
 def lot_url(lot_id: str, slug: str = "") -> str:
@@ -1376,91 +1981,371 @@ git commit -m "hibid: URL builders and constants"
 
 ---
 
+### Task 11.5: RetryTransport (httpx) for transient errors
+
+**Why this task is here:** Phase 0 carved a `transport=` seam in `make_client()` and the docstring promised Phase 1 would add a retry transport. Every real scraper Phase 7 will run hits transient 429/503; without retry, the workers crash-loop on the first hiccup.
+
+**Files:**
+- Create: `src/carbuyer/sources/retry.py`
+- Create: `tests/sources/test_retry.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/sources/test_retry.py
+import httpx
+import pytest
+
+from carbuyer.sources.http import make_client
+from carbuyer.sources.retry import RetryTransport
+
+
+@pytest.mark.asyncio
+async def test_retry_transport_retries_503_then_succeeds() -> None:
+    call_count = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            return httpx.Response(503, headers={"Retry-After": "0"})
+        return httpx.Response(200, text="ok")
+
+    inner = httpx.MockTransport(handler)
+    transport = RetryTransport(inner, max_retries=4, base=0.01, cap=0.05)
+    async with make_client(transport=transport) as client:
+        r = await client.get("https://example.test/")
+    assert r.status_code == 200
+    assert call_count["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_transport_gives_up_after_max() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, headers={"Retry-After": "0"})
+
+    transport = RetryTransport(httpx.MockTransport(handler), max_retries=2, base=0.01, cap=0.05)
+    async with make_client(transport=transport) as client:
+        r = await client.get("https://example.test/")
+    assert r.status_code == 503  # exhausted retries; final response returned
+
+
+@pytest.mark.asyncio
+async def test_retry_transport_does_not_retry_404() -> None:
+    call_count = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        return httpx.Response(404)
+
+    transport = RetryTransport(httpx.MockTransport(handler), max_retries=4, base=0.01, cap=0.05)
+    async with make_client(transport=transport) as client:
+        r = await client.get("https://example.test/")
+    assert r.status_code == 404
+    assert call_count["n"] == 1  # 404 is terminal
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/sources/retry.py`**
+
+```python
+from __future__ import annotations
+
+import asyncio
+import random
+from email.utils import parsedate_to_datetime
+from datetime import UTC, datetime
+
+import httpx
+
+
+RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+
+
+def _parse_retry_after(value: str) -> float | None:
+    # RFC 7231: Retry-After is either delta-seconds (int) or HTTP-date.
+    s = value.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return float(s)
+    try:
+        when = parsedate_to_datetime(s)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
+class RetryTransport(httpx.AsyncBaseTransport):
+    """Wrap an inner transport; retry transient errors with backoff.
+
+    Honors Retry-After when present; otherwise uses jittered exponential
+    backoff capped at `cap` seconds. Status codes outside RETRYABLE_STATUS
+    are returned to the caller without retry.
+    """
+
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        *,
+        max_retries: int = 4,
+        base: float = 1.0,
+        cap: float = 30.0,
+    ) -> None:
+        self._inner = inner
+        self._max_retries = max_retries
+        self._base = base
+        self._cap = cap
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        last: httpx.Response | None = None
+        for attempt in range(self._max_retries + 1):
+            response = await self._inner.handle_async_request(request)
+            if response.status_code not in RETRYABLE_STATUS:
+                return response
+            last = response
+            if attempt == self._max_retries:
+                return response
+            # Drain and close the body before retrying so the connection can
+            # be reused.
+            await response.aread()
+            await response.aclose()
+            ra = response.headers.get("Retry-After")
+            delay = _parse_retry_after(ra) if ra else None
+            if delay is None:
+                delay = min(self._cap, self._base * (2 ** attempt))
+            delay = delay + random.uniform(0, max(delay * 0.25, 0.05))  # jitter
+            await asyncio.sleep(delay)
+        # Unreachable, but keep mypy/pyright happy.
+        assert last is not None
+        return last
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+```
+
+- [ ] **Step 3: Run test**
+
+```bash
+uv run pytest tests/sources/test_retry.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/carbuyer/sources/retry.py tests/sources/test_retry.py
+git commit -m "sources: RetryTransport — Retry-After + jittered exponential backoff"
+```
+
+---
+
 ### Task 12: HiBid `lotModels` JSON extractor
 
 **Files:**
 - Create: `src/carbuyer/sources/hibid/parser.py`
 - Create: `tests/sources/hibid/test_parser.py`
-- Create: `tests/sources/fixtures/hibid_catalog_sample.html`
+- Create: `tests/sources/fixtures/hibid_catalog_synthetic.html`
 
-- [ ] **Step 1: Capture a fixture (manual; run once to seed tests)**
+- [ ] **Step 1: Hand-write a synthetic fixture**
 
-This is the only manual step in the plan. Save a real catalog page HTML to the fixture path:
+The original plan called for capturing a real HiBid page. The Cloudflare bot
+management investigation (see Phase 1 overlay) means a self-hosted curl/httpx
+cannot fetch the page; the live capture is deferred to Phase 1.5. Instead, we
+hand-write a synthetic fixture that exercises the parser's contract:
+nested arrays, the `}],{` quirk, two lots with known ids/bids/end-times, and
+the real HiBid schema (`eventItemId`, `lead`, `lotStatus.*`).
 
-```bash
-curl -s "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=OPEN" \
-  -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" \
-  > tests/sources/fixtures/hibid_catalog_sample.html
-```
+Create `tests/sources/fixtures/hibid_catalog_synthetic.html` (see test below
+for the exact expected fields).
 
-Then verify it contains `lotModels`:
-
-```bash
-grep -c "lotModels" tests/sources/fixtures/hibid_catalog_sample.html
-```
-
-Expected: at least 1.
-
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing test (and the synthetic fixture inline)**
 
 ```python
 # tests/sources/hibid/test_parser.py
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
-from carbuyer.sources.hibid.parser import extract_lot_models, parse_lot_summary
+import pytest
+
+from carbuyer.sources.hibid.parser import (
+    extract_lot_models,
+    parse_lot_summary,
+    raw_lot_id,
+)
+
+FIXTURE_PATH = Path("tests/sources/fixtures/hibid_catalog_synthetic.html")
 
 
-FIXTURE = Path("tests/sources/fixtures/hibid_catalog_sample.html").read_text()
+def test_extract_lot_models_handles_nested_arrays() -> None:
+    html = """
+    <html><body><script>
+    var lotModels = [
+      {"eventItemId": 1, "lead": "Truck A", "images": ["a.jpg", "b.jpg"]},
+      {"eventItemId": 2, "lead": "Truck B", "images": []}
+    ];
+    </script></body></html>
+    """
+    lots = extract_lot_models(html)
+    assert len(lots) == 2
+    assert lots[0]["eventItemId"] == 1
+    assert lots[0]["images"] == ["a.jpg", "b.jpg"]
 
 
-def test_extract_lot_models_returns_list() -> None:
-    lots = extract_lot_models(FIXTURE)
-    assert isinstance(lots, list)
-    assert len(lots) > 0
-    first = lots[0]
-    assert "id" in first or "lotId" in first or "lotID" in first
+def test_extract_lot_models_no_match() -> None:
+    assert extract_lot_models("<html>no script here</html>") == []
 
 
-def test_parse_lot_summary_normalizes_keys() -> None:
-    lots = extract_lot_models(FIXTURE)
-    summary = parse_lot_summary(lots[0])
-    assert summary.source_lot_id
-    assert summary.title is not None
+def test_extract_lot_models_handles_string_with_brackets() -> None:
+    # Strings containing brackets must NOT confuse the bracket scanner.
+    html = 'var lotModels = [{"lead": "Hood [scratched]", "eventItemId": 7}];'
+    lots = extract_lot_models(html)
+    assert lots == [{"lead": "Hood [scratched]", "eventItemId": 7}]
+
+
+def test_parse_lot_summary_real_keys() -> None:
+    raw = {
+        "eventItemId": 4242,
+        "lotNumber": "12B",
+        "lead": "1995 Ford F-150 4x4",
+        "description": "runs and drives",
+        "lotUrl": "/alberta/lot/300724160/1995-ford-f150",
+        "lotStatus": {
+            "highBid": "1500.00",
+            "bidCount": 7,
+        },
+        "auctionEnd": "2026-06-01T18:30:00Z",
+        "auctionId": 740236,
+        "bidIncrement": 25,
+        "reserveStatus": "no_reserve",
+        "lotState": "open",
+    }
+    summary = parse_lot_summary(raw)
+    assert summary.source_lot_id == "4242"
+    assert summary.lot_number == "12B"
+    assert summary.title == "1995 Ford F-150 4x4"
+    assert summary.description == "runs and drives"
+    assert summary.current_high_bid_cad == Decimal("1500.00")
+    assert summary.bid_count_visible == 7
+    assert summary.url == "/alberta/lot/300724160/1995-ford-f150"
+    assert summary.auction_external_id == "740236"
+    assert summary.end_at == datetime(2026, 6, 1, 18, 30, 0, tzinfo=UTC)
+    # Year/make/model are NOT separate fields in HiBid; left None for enricher.
+    assert summary.year is None
+    assert summary.make is None
+    # Extra fields captured for downstream consumers.
+    assert summary.extra["bidIncrement"] == 25
+    assert summary.extra["reserveStatus"] == "no_reserve"
+    assert summary.extra["lotState"] == "open"
+
+
+def test_parse_lot_summary_handles_messy_currency() -> None:
+    raw = {"eventItemId": 1, "lead": "x", "lotStatus": {"highBid": "$1,200.00"}}
+    summary = parse_lot_summary(raw)
+    assert summary.current_high_bid_cad == Decimal("1200.00")
+
+
+def test_parse_lot_summary_handles_missing_lot_status() -> None:
+    raw = {"eventItemId": 1, "lead": "x"}
+    summary = parse_lot_summary(raw)
+    assert summary.current_high_bid_cad is None
+    assert summary.bid_count_visible is None
+
+
+def test_raw_lot_id_falls_through_key_variants() -> None:
+    assert raw_lot_id({"eventItemId": 5}) == "5"
+    assert raw_lot_id({"lotId": 6}) == "6"
+    assert raw_lot_id({"id": 7}) == "7"
+    assert raw_lot_id({}) is None
+
+
+def test_extract_lot_models_against_synthetic_fixture() -> None:
+    if not FIXTURE_PATH.exists():
+        pytest.skip(f"synthetic fixture missing: {FIXTURE_PATH}")
+    html = FIXTURE_PATH.read_text()
+    lots = extract_lot_models(html)
+    assert len(lots) >= 2
+    s = parse_lot_summary(lots[0])
+    assert s.source_lot_id
+    assert s.title is not None
 ```
 
 - [ ] **Step 3: Implement `src/carbuyer/sources/hibid/parser.py`**
 
 ```python
-import json
+from __future__ import annotations
+
 import re
-from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
+import json
 
 
-_LOT_MODELS_RE = re.compile(
-    r"var\s+lotModels\s*=\s*(\[.*?\])\s*;", re.DOTALL
-)
+_LOT_MODELS_START = re.compile(r"var\s+lotModels\s*=\s*\[")
 
 
 def extract_lot_models(html: str) -> list[dict[str, Any]]:
     """Extract the embedded `var lotModels = [...];` array from a HiBid page.
 
-    Uses a tolerant cleanup pass: HiBid sometimes emits malformed comma sequences
-    (`}],{` instead of `},{`) when serializing nested objects; we patch those
-    before json.loads.
+    Uses a string-aware balanced-bracket scan rather than a non-greedy regex,
+    because lot objects embed nested arrays (images, categories) which a
+    simple `\\[.*?\\]` regex would truncate at the first inner `]`.
     """
-    m = _LOT_MODELS_RE.search(html)
+    m = _LOT_MODELS_START.search(html)
     if not m:
         return []
-    blob = m.group(1)
-    blob = blob.replace("}],{", "},{")  # tolerated HiBid quirk
-    try:
-        result = json.loads(blob)
-    except json.JSONDecodeError:
-        return []
-    return result if isinstance(result, list) else []
+    start = m.end() - 1  # index of the opening `[`
+    depth = 0
+    in_str = False
+    escape = False
+    quote = ""
+    for i in range(start, len(html)):
+        c = html[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == quote:
+                in_str = False
+            continue
+        if c in ('"', "'"):
+            in_str = True
+            quote = c
+            continue
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                blob = html[start : i + 1]
+                try:
+                    parsed = json.loads(blob)
+                except json.JSONDecodeError:
+                    return []
+                return parsed if isinstance(parsed, list) else []
+    return []
+
+
+# Keys we copy from raw lotModels entries into RawLot.extra so the valuator and
+# soft-close detector can use them without re-scraping.
+_EXTRA_KEYS = (
+    "bidIncrement",
+    "reserveStatus",
+    "buyNowPrice",
+    "lotState",
+    "saleType",
+    "shippingOffered",
+    "auctionCity",
+    "auctionState",
+    "companyName",
+)
 
 
 @dataclass(slots=True)
@@ -1469,66 +2354,133 @@ class HibidLotSummary:
     lot_number: str | None
     title: str | None
     description: str | None
+    # year/make/model are NOT separate fields in HiBid lotModels; the description
+    # enricher (Phase 3) parses them out of the title text.
     year: int | None
     make: str | None
     model: str | None
     current_high_bid_cad: Decimal | None
+    bid_count_visible: int | None
     photos: list[str]
     end_at: datetime | None
     auction_external_id: str | None
     url: str | None
+    extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
 
 
 def _get(obj: dict[str, Any], *keys: str) -> Any:
     for k in keys:
-        if k in obj:
+        if k in obj and obj[k] is not None:
             return obj[k]
     return None
 
 
-def parse_lot_summary(raw: dict[str, Any]) -> HibidLotSummary:
-    lot_id = str(_get(raw, "lotId", "lotID", "id") or "")
-    bid = _get(raw, "highBid", "currentBid", "bidAmount")
-    end = _get(raw, "saleEnd", "endTime", "scheduledEnd")
+def raw_lot_id(raw: dict[str, Any]) -> str | None:
+    """Return the lot id from a raw lotModels entry, falling through key variants."""
+    value = _get(raw, "eventItemId", "lotId", "lotID", "id")
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _to_decimal(v: Any) -> Decimal | None:
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return v
+    if isinstance(v, (int, float)):
+        return Decimal(str(v))
+    if isinstance(v, str):
+        cleaned = re.sub(r"[^\d.\-]", "", v)
+        if not cleaned or cleaned in {"-", "."}:
+            return None
+        try:
+            return Decimal(cleaned)
+        except InvalidOperation:
+            return None
+    return None
+
+
+def _to_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse the various date shapes HiBid emits, always returning UTC-aware."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        # Heuristic: > 1e11 implies milliseconds since epoch.
+        seconds = value / 1000 if value > 1e11 else value
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    if isinstance(value, str):
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%d %H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+            return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+    return None
+
+
+def _extract_photos(raw: dict[str, Any]) -> list[str]:
     photos_raw = _get(raw, "lotImages", "images") or []
-    photos = []
-    for p in photos_raw if isinstance(photos_raw, list) else []:
+    if not isinstance(photos_raw, list):
+        return []
+    photos: list[str] = []
+    for p in photos_raw:  # type: ignore[reportUnknownVariableType]
         if isinstance(p, str):
             photos.append(p)
         elif isinstance(p, dict):
             url = p.get("url") or p.get("imageUrl") or p.get("largeUrl")
             if isinstance(url, str):
                 photos.append(url)
+    return photos
+
+
+def parse_lot_summary(raw: dict[str, Any]) -> HibidLotSummary:
+    lot_status = raw.get("lotStatus") if isinstance(raw.get("lotStatus"), dict) else {}
+    bid = _get(lot_status, "highBid", "currentBid") if lot_status else None
+    if bid is None:
+        bid = _get(raw, "highBid", "currentBid", "bidAmount")
+    bid_count = _get(lot_status, "bidCount") if lot_status else None
+    end = _get(raw, "auctionEnd", "saleEnd", "endTime", "scheduledEnd")
+    extra = {k: raw[k] for k in _EXTRA_KEYS if k in raw and raw[k] is not None}
     return HibidLotSummary(
-        source_lot_id=lot_id,
+        source_lot_id=raw_lot_id(raw) or "",
         lot_number=str(_get(raw, "lotNumber", "lotNum") or "") or None,
-        title=_get(raw, "title", "lotTitle"),
+        title=_get(raw, "lead", "title", "lotTitle"),
         description=_get(raw, "description", "longDescription"),
-        year=_get(raw, "year"),
-        make=_get(raw, "make"),
-        model=_get(raw, "model"),
-        current_high_bid_cad=Decimal(str(bid)) if bid is not None else None,
-        photos=photos,
+        year=None,
+        make=None,
+        model=None,
+        current_high_bid_cad=_to_decimal(bid),
+        bid_count_visible=_to_int(bid_count),
+        photos=_extract_photos(raw),
         end_at=_parse_dt(end),
         auction_external_id=str(_get(raw, "auctionId", "auctionID") or "") or None,
-        url=_get(raw, "url", "lotUrl"),
+        url=_get(raw, "lotUrl", "url"),
+        extra=extra,
     )
-
-
-def _parse_dt(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value / 1000 if value > 1e11 else value)
-    if isinstance(value, str):
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                pass
-    return None
 ```
 
 - [ ] **Step 4: Run test**
@@ -1554,85 +2506,192 @@ git commit -m "hibid: lotModels JSON extractor"
 - Create: `src/carbuyer/sources/hibid/source.py`
 - Create: `tests/sources/hibid/test_source.py`
 
+**Notes from Phase 1 deliberation:**
+- `HibidSource` declares `version: ClassVar[str]` (Phase 0 contract).
+- Calls `register(...)` at module import.
+- Async context manager owning a single httpx client wired with `RetryTransport`.
+- Per-call `make_client()` was removed — the source owns the client lifecycle.
+- Live integration is deferred to Phase 1.5 (Cloudflare bypass). Tests use a
+  MockTransport against the synthetic fixture.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/sources/hibid/test_source.py
 from pathlib import Path
 
+import httpx
 import pytest
-import respx
-from httpx import Response
 
+from carbuyer.sources.base import SOURCES, AuctionRef, LotRef
 from carbuyer.sources.hibid.source import HibidSource
 
 
-FIXTURE = Path("tests/sources/fixtures/hibid_catalog_sample.html").read_text()
+FIXTURE = Path("tests/sources/fixtures/hibid_catalog_synthetic.html").read_text()
+
+
+def _mock_transport(*, body: str = FIXTURE, status: int = 200) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body)
+    return httpx.MockTransport(handler)
+
+
+def test_hibid_source_registered_at_import() -> None:
+    assert "hibid" in SOURCES
+    src = SOURCES["hibid"]
+    assert src.name == "hibid"
+    assert src.version  # any non-empty string
+
+
+def test_hibid_source_has_classvar_name_and_version() -> None:
+    assert HibidSource.name == "hibid"
+    assert HibidSource.version  # ClassVar
 
 
 @pytest.mark.asyncio
 async def test_discover_auctions_yields_unique_refs() -> None:
-    src = HibidSource(provinces=["AB"])
-    with respx.mock(base_url="https://hibid.com") as mock:
-        mock.get(url__regex=r"/alberta/auctions/700006/.*").mock(
-            return_value=Response(200, text=FIXTURE)
-        )
-        refs = []
-        async for ref in src.discover_auctions():
-            refs.append(ref)
-            if len(refs) >= 5:
-                break
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        refs = [ref async for ref in src.discover_auctions()]
     assert len(refs) > 0
     assert all(r.source == "hibid" for r in refs)
     assert len({r.source_auction_id for r in refs}) == len(refs)
+
+
+@pytest.mark.asyncio
+async def test_fetch_lots_yields_lot_refs() -> None:
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        ref = AuctionRef(source="hibid", source_auction_id="740236", url="https://hibid.com/catalog/740236")
+        lots = [r async for r in src.fetch_lots(ref)]
+    assert len(lots) >= 2
+    assert all(r.source_auction_id == "740236" for r in lots)
+
+
+@pytest.mark.asyncio
+async def test_fetch_lot_returns_raw_lot_with_extra() -> None:
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        ref = LotRef(
+            source="hibid", source_auction_id="740236",
+            source_lot_id="4242", url="https://hibid.com/lot/4242",
+        )
+        raw = await src.fetch_lot(ref)
+    assert raw.title is not None and "Ford" in raw.title
+    assert raw.extra.get("bidIncrement") == 25
+    assert raw.extra.get("reserveStatus") == "no_reserve"
+
+
+@pytest.mark.asyncio
+async def test_poll_bid_returns_observation() -> None:
+    async with HibidSource(provinces=["AB"], _transport=_mock_transport()) as src:
+        ref = LotRef(
+            source="hibid", source_auction_id="740236",
+            source_lot_id="4242", url="https://hibid.com/lot/4242",
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.current_high_bid_cad is not None
+    assert obs.observed_at.tzinfo is not None
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/sources/hibid/source.py`**
 
 ```python
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import TracebackType
+from typing import ClassVar, Self
+
+import httpx
 
 from carbuyer.sources.base import (
-    AuctionRef, AuctionSource, BidObservation, LotRef, RawAuction, RawLot,
+    AuctionRef,
+    AuctionSource,
+    BidObservation,
+    LotRef,
+    RawAuction,
+    RawLot,
+    register,
 )
-from carbuyer.sources.hibid.parser import extract_lot_models, parse_lot_summary
+from carbuyer.sources.hibid.parser import (
+    extract_lot_models,
+    parse_lot_summary,
+    raw_lot_id,
+)
 from carbuyer.sources.hibid.urls import catalog_url, lot_url, province_vehicles_url
 from carbuyer.sources.http import jittered_sleep, make_client
+from carbuyer.sources.retry import RetryTransport
 
 
 class HibidSource(AuctionSource):
-    name = "hibid"
+    name: ClassVar[str] = "hibid"
+    # Bump when parse_lot_summary or discover/fetch contracts change.
+    version: ClassVar[str] = "1"
 
-    def __init__(self, provinces: list[str]) -> None:
+    def __init__(
+        self,
+        provinces: list[str],
+        *,
+        _transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.provinces = provinces
+        # Tests inject a MockTransport; production wires a RetryTransport
+        # around an httpx.AsyncHTTPTransport in __aenter__.
+        self._injected_transport = _transport
+        self._client_cm: AbstractAsyncContextManager[httpx.AsyncClient] | None = None
+        self._client: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> Self:
+        transport = self._injected_transport or RetryTransport(
+            httpx.AsyncHTTPTransport()
+        )
+        self._client_cm = make_client(transport=transport)
+        self._client = await self._client_cm.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if self._client_cm is not None:
+            await self._client_cm.__aexit__(exc_type, exc, tb)
+        self._client_cm = None
+        self._client = None
+
+    @property
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None:
+            raise RuntimeError(
+                "HibidSource used outside `async with` — wrap in context manager",
+            )
+        return self._client
 
     async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
         seen: set[str] = set()
-        async with make_client() as client:
-            for province in self.provinces:
-                url = province_vehicles_url(province)
-                resp = await client.get(url)
-                resp.raise_for_status()
-                lots = extract_lot_models(resp.text)
-                for raw in lots:
-                    summary = parse_lot_summary(raw)
-                    auction_id = summary.auction_external_id
-                    if not auction_id or auction_id in seen:
-                        continue
-                    seen.add(auction_id)
-                    yield AuctionRef(
-                        source="hibid",
-                        source_auction_id=auction_id,
-                        url=catalog_url(auction_id),
-                    )
+        for i, province in enumerate(self.provinces):
+            url = province_vehicles_url(province)
+            resp = await self._http.get(url)
+            resp.raise_for_status()
+            for raw in extract_lot_models(resp.text):
+                summary = parse_lot_summary(raw)
+                auction_id = summary.auction_external_id
+                if not auction_id or auction_id in seen:
+                    continue
+                seen.add(auction_id)
+                yield AuctionRef(
+                    source="hibid",
+                    source_auction_id=auction_id,
+                    url=catalog_url(auction_id),
+                )
+            if i < len(self.provinces) - 1:
                 await jittered_sleep()
 
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
         # The catalog page contains both auction-level metadata (in the page
         # header) and lotModels. For MVP, we record minimum metadata; richer
         # extraction (BP, terms_text) is left to a follow-up.
@@ -1648,37 +2707,30 @@ class HibidSource(AuctionSource):
             pickup_city=None,
             pickup_province=None,
             pickup_window_text=None,
-            buyer_premium_pct=Decimal("0.10"),  # conservative default; refined per-source later
+            buyer_premium_pct=Decimal("0.10"),  # conservative default
             online_bidding_fee_pct=None,
             terms_text=None,
             auction_subtype="estate",
         )
 
     async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-            for raw in extract_lot_models(resp.text):
-                summary = parse_lot_summary(raw)
-                if not summary.source_lot_id:
-                    continue
-                yield LotRef(
-                    source="hibid",
-                    source_auction_id=ref.source_auction_id,
-                    source_lot_id=summary.source_lot_id,
-                    url=summary.url or lot_url(summary.source_lot_id),
-                )
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
+        for raw in extract_lot_models(resp.text):
+            summary = parse_lot_summary(raw)
+            if not summary.source_lot_id:
+                continue
+            yield LotRef(
+                source="hibid",
+                source_auction_id=ref.source_auction_id,
+                source_lot_id=summary.source_lot_id,
+                url=summary.url or lot_url(summary.source_lot_id),
+            )
 
     async def fetch_lot(self, ref: LotRef) -> RawLot:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-        lots = extract_lot_models(resp.text)
-        target = next(
-            (parse_lot_summary(r) for r in lots
-             if str(r.get("lotId") or r.get("lotID") or r.get("id") or "") == ref.source_lot_id),
-            None,
-        )
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
+        target = self._find_summary(resp.text, ref.source_lot_id)
         if target is None:
             raise ValueError(f"lot {ref.source_lot_id} not found at {ref.url}")
         return RawLot(
@@ -1691,24 +2743,22 @@ class HibidSource(AuctionSource):
             make=target.make,
             model=target.model,
             current_high_bid_cad=target.current_high_bid_cad,
+            bid_count_visible=target.bid_count_visible,
             scheduled_end_at=target.end_at,
             lot_status="open",
+            extra=target.extra,
         )
 
     async def poll_bid(self, ref: LotRef) -> BidObservation:
-        async with make_client() as client:
-            resp = await client.get(ref.url)
-            resp.raise_for_status()
-        lots = extract_lot_models(resp.text)
-        target = next(
-            (parse_lot_summary(r) for r in lots
-             if str(r.get("lotId") or r.get("lotID") or r.get("id") or "") == ref.source_lot_id),
-            None,
-        )
+        resp = await self._http.get(ref.url)
+        resp.raise_for_status()
+        target = self._find_summary(resp.text, ref.source_lot_id)
         if target is None:
             return BidObservation(
-                ref=ref, observed_at=datetime.now(UTC),
-                current_high_bid_cad=None, end_time_at_observation=None,
+                ref=ref,
+                observed_at=datetime.now(UTC),
+                current_high_bid_cad=None,
+                end_time_at_observation=None,
                 status_at_observation="missing",
             )
         return BidObservation(
@@ -1718,6 +2768,20 @@ class HibidSource(AuctionSource):
             end_time_at_observation=target.end_at,
             status_at_observation="open",
         )
+
+    @staticmethod
+    def _find_summary(html: str, source_lot_id: str):
+        for raw in extract_lot_models(html):
+            if raw_lot_id(raw) == source_lot_id:
+                return parse_lot_summary(raw)
+        return None
+
+
+# Register at import time so the lot-scraper / discoverer worker / dashboard
+# health view can enumerate covered platforms via SOURCES (Phase 0 design #11).
+# Provinces default to AB/BC/SK/MB; phase-2 workers can re-instantiate with a
+# different list and call register() again with the same name to override.
+register(HibidSource(provinces=["AB", "BC", "SK", "MB"]))
 ```
 
 - [ ] **Step 3: Run test**
@@ -1737,12 +2801,23 @@ git commit -m "hibid: AuctionSource implementation (discover + fetch + poll)"
 
 ---
 
-### Task 14: HiBidSource integration smoke test (live network, opt-in)
+### Task 14: HiBidSource integration smoke test (DEFERRED — Phase 1.5 spike)
 
-**Files:**
-- Create: `tests/sources/hibid/test_source_live.py`
+**Status:** Deferred. The original plan called for a live opt-in smoke test that runs `HibidSource(provinces=["AB"]).discover_auctions()` against real HiBid. The Phase 1 deliberation discovered that **Cloudflare bot management on hibid.com 403s plain Python httpx** regardless of headers (any combination of UA, sec-fetch-*, accept-language, etc.). The structural plumbing (URL builders, parser, AuctionSource integration, RetryTransport) is complete and tested against a synthetic fixture; the missing piece is the CF bypass.
 
-- [ ] **Step 1: Write the test (skipped by default)**
+**Phase 1.5 scope (separate spike):**
+
+1. **Evaluate `curl_cffi`** as a drop-in replacement for `httpx.AsyncClient`. It uses libcurl-impersonate to match Chrome/Firefox TLS fingerprints and is the lowest-friction option for sites with Cloudflare Bot Fight Mode. No JS execution needed (HiBid is server-rendered).
+2. **If `curl_cffi` is 403'd**, fall back to **Playwright** (headed or headless-with-stealth). Slower; higher infra footprint.
+3. **Acceptance criteria:**
+   - Fetch one Alberta catalog page (`https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=open`), confirm response contains `lotModels`.
+   - Run `HibidSource.discover_auctions()` and confirm at least one `AuctionRef` is yielded.
+   - Run `HibidSource.fetch_lot()` against one yielded lot and confirm `RawLot` is populated.
+4. **Wiring:** the chosen backend becomes the default `_transport` in production; tests still use `httpx.MockTransport` against fixtures.
+
+**Phase 1.5 unblocks:** the auction-discoverer worker (Phase 2) running against live HiBid. Phase 2 plumbing can be built and tested without it (mocked transport against synthetic fixtures), so the project is not blocked.
+
+**Skipped test placeholder (committed for documentation only):**
 
 ```python
 # tests/sources/hibid/test_source_live.py
@@ -1756,46 +2831,347 @@ from carbuyer.sources.hibid.source import HibidSource
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     os.getenv("RUN_LIVE_SCRAPE_TESTS") != "1",
-    reason="live scrape — opt in with RUN_LIVE_SCRAPE_TESTS=1",
+    reason=(
+        "live scrape — opt in with RUN_LIVE_SCRAPE_TESTS=1; "
+        "currently 403'd by Cloudflare. Phase 1.5 spike adds a CF-bypass transport."
+    ),
 )
 async def test_live_discover_at_least_one_alberta_auction() -> None:
-    src = HibidSource(provinces=["AB"])
-    refs = []
-    async for ref in src.discover_auctions():
-        refs.append(ref)
-        if len(refs) >= 1:
-            break
+    """When run with RUN_LIVE_SCRAPE_TESTS=1, discovers ≥1 Alberta auction.
+
+    As of 2026-05-09 this fails with HTTP 403 from Cloudflare bot management.
+    See Phase 1 overlay for the deferred bypass spike.
+    """
+    async with HibidSource(provinces=["AB"]) as src:
+        refs = []
+        async for ref in src.discover_auctions():
+            refs.append(ref)
+            if len(refs) >= 1:
+                break
     assert len(refs) >= 1
 ```
 
-- [ ] **Step 2: Run opt-in (manual; one-time check that real scrape works)**
-
-```bash
-RUN_LIVE_SCRAPE_TESTS=1 uv run pytest tests/sources/hibid/test_source_live.py -v
-```
-
-Expected: PASS (one Alberta auction found).
-
-- [ ] **Step 3: Commit (regardless of live test outcome — the skip path is what's checked-in)**
+- [ ] **Step 1: Commit the placeholder test**
 
 ```bash
 git add tests/sources/hibid/test_source_live.py
-git commit -m "hibid: opt-in live scrape smoke test"
+git commit -m "hibid: placeholder live test (deferred to phase 1.5 — CF bypass)"
 ```
 
 ---
 
-End of Phase 1. HiBid source plugin is fully implemented and tested against a captured fixture and against the live network.
+End of Phase 1. HiBid source plugin plumbing is implemented and tested against a synthetic fixture; live integration deferred to Phase 1.5 once a Cloudflare-bypass strategy is chosen.
 
 ---
 
 ## Phase 2 — Pipeline workers (queue infrastructure + discoverer + lot-scraper)
+
+### Phase 2 — Design-decision overlay (post-deliberation 2026-05-09)
+
+Three role-specialized reviews (senior async dev, Postgres DBA, systems architect) raised concrete issues. The original Phase 2 plan had multiple Phase-0 contract violations (gone-but-still-imported `async_session_maker`, source not used as async context manager, `configure_logging(settings.log_level)`) plus several SQL-correctness and recovery bugs. The user also requested the **multi-router/dedup design** be folded into this phase.
+
+**Net effect:** Phase 2 grows by two small tasks (14.6 multi-router infrastructure; 15.5 listener catch-up sweep) and Tasks 15–19 are all rewritten.
+
+**Must-fix decisions:**
+
+1. **`pg_notify(:c, :p)` parameterized, not f-string `NOTIFY`.** The original `f"NOTIFY {channel}, '{safe}'"` is SQL-injection-vulnerable on `channel` and brittle on `payload`. Use `text("SELECT pg_notify(:c, :p)")` with bound params + 7900-byte payload check + channel-name allowlist regex.
+2. **`UPSERT` via `INSERT ... ON CONFLICT DO UPDATE`, not SELECT-then-INSERT.** The plan's two-statement check-then-insert races on the unique constraint and aborts the whole transaction on `IntegrityError`. Use the Postgres-native UPSERT.
+3. **Source plugins as async context managers.** Phase 1 contract: `HibidSource` raises `RuntimeError` when used without `async with`. Workers wrap a long-lived `AsyncExitStack` over all registered plugins for the worker's lifetime — one HTTP client per plugin per process, not per-call.
+4. **Module-level `async_session_maker` is gone.** Phase 0 replaced it with `get_session()` / `get_session_maker()`. Every call site updated.
+5. **`configure_logging()` (no args).** Reads `settings.log_level` internally; passing it explicitly is contract drift.
+6. **`upsert_lot` writes `parser_version=source.version`.** Phase 0 design #8 mandates it; the original plan didn't.
+7. **Status-reset cascade:** when content fields change (`title/description/photos/year/make/model/vin/mileage_km` or `parser_version`), reset `enrichment_status = valuation_status = vision_status = notification_status = "pending"`. When only bid fields change, reset NOTHING (bid-poller's domain). Lot-scraper does **not** write bid columns.
+8. **Per-lot transaction in `process_auction`** (was: one outer transaction over all 200 lots). The outer-txn pattern violates `idle_in_transaction_session_timeout=60s`, holds locks across HTTP I/O, and floods the listener with N NOTIFYs at single-commit time. Per-lot commit gives durability + paces NOTIFYs naturally + never holds a txn across HTTP.
+9. **Two-phase SKIP LOCKED claim:** `claim_pending_lots` commits immediately after flipping rows to `'in_progress'`. The `'in_progress'` flag IS the ownership marker; the row-lock isn't held across the worker's downstream HTTP work. Avoids the `idle_in_transaction_session_timeout` tripwire.
+10. **`raw.x or existing.x` → `if raw.x is not None: existing.x = raw.x`.** Short-circuit `or` discards `Decimal("0")`, `0`, `""`. Subtle data-loss bug.
+11. **`listen()` reconnects on connection drop.** psycopg's `OperationalError` mid-stream killed the worker; now wrapped in a backoff retry loop. `_runner.py` calls `loop.shutdown_asyncgens()` before `loop.close()` so the dedicated psycopg connection is properly closed on SIGTERM.
+12. **Listener-startup catchup sweep.** Every continuous worker that uses `LISTEN` first runs `SELECT id WHERE status='pending'` and enqueues those rows, then enters `LISTEN`. Otherwise notifications fired during a worker outage are lost forever. Same helper used by all four queue workers (lot-scraper, enricher, valuator, notifier).
+13. **Channel-name allowlist + payload size cap** in `notify()` and `listen()`: regex `^[a-z][a-z0-9_]{0,62}$` for channels, ≤7900-byte payload. Avoids identifier-injection and the Postgres 8KB NOTIFY limit.
+14. **Lot-scraper skips `unknown:{host}` sources** with an INFO log instead of erroring. The discoverer creates these rows from routers (Phase 10); the lot-scraper has no fetcher for them. The dashboard's "needs-plugin" view (Phase 10 Task 42) keys off `source LIKE 'unknown:%'`.
+15. **Partial indexes on `*_status='pending'`.** Five indexes — `enrichment_pending`, `valuation_pending`, `vision_pending`, `notification_pending`, `lot_status_open` — created in the multi-router migration so the queue queries scan a tiny index instead of the full table.
+16. **`canonical_url` migration is three-step:** (a) add nullable column, (b) backfill from `url` via Python, (c) `SET NOT NULL`. Safe regardless of how many auction rows exist when the migration runs.
+
+**Should-fix decisions:**
+
+17. **`parse_auction_url` is a classmethod on the `Source` ABC, default `return None`.** Replaces `getattr(src, "parse_auction_url", None)` duck-typing — pyright knows the contract; typos in subclass override silently never match → loud test failure instead.
+18. **`discovered_via` is a `text[]` column with native `array_append` + dedup inside the UPSERT.** JSONB array would need `MutableList.as_mutable(JSONB)` or app-side read-modify-write (race-prone). Postgres-native is cleaner.
+19. **Per-plugin try/except + timeout in discoverer.** A failing HiBid sweep shouldn't block farmauctionguide.
+20. **Loud `WARNING` log on every `unknown:{host}` discovery.** Until the Phase-10 dashboard exists, `journalctl -u auction-discoverer | grep "unknown platform"` is the operator's only signal that a new platform showed up.
+21. **`canonicalize_url` strips known tracking params** (`utm_*, ref, fbclid, gclid, mc_eid`) plus fragment + trailing slash; lowercases the host. Per-plugin override hook (`Source.canonicalize_url(cls, url)`) deferred until a real platform forces it.
+
+**Deferred (acknowledged):**
+
+- **Watchdog worker** for stuck `in_progress` rows. Documented as a follow-up task (Phase 2.5). Not strictly needed for MVP; revisit when Phase 4 (valuator) starts seeing real OpenAI failures.
+- **Per-plugin `canonicalize_url`** override hook. Default stripper handles HiBid; revisit when a second platform demands a different rule.
+- **`pg_advisory_xact_lock`** for singleton-discoverer correctness. Enforced today by deployment (one systemd unit); add lock if multi-replica becomes a concern.
+
+End of overlay.
+
+---
+
+### Task 14.6: Multi-router URL resolver + schema additions
+
+**Why this task is here:** Routers (farmauctionguide.com et al.) discover auctions hosted on other platforms. The infrastructure must let plugins parse incoming URLs into `(source, source_auction_id)` tuples, dedupe across routers, and flag URLs no plugin recognizes. The `auctions` schema gains `canonical_url` and `discovered_via` columns; the `Source` ABC gains a `parse_auction_url` classmethod; new module `sources/resolver.py` provides the URL-resolution helpers.
+
+**Files:**
+- Create: `src/carbuyer/sources/resolver.py`
+- Modify: `src/carbuyer/sources/base.py` (add `parse_auction_url` classmethod default + `canonicalize_url` classmethod default)
+- Modify: `src/carbuyer/db/models.py` (add `canonical_url`, `discovered_via` columns)
+- Modify: `src/carbuyer/sources/hibid/source.py` (override `parse_auction_url` for `hibid.com/.../catalog/{id}` URLs)
+- Create: `tests/sources/test_resolver.py`
+- Create: Alembic migration `alembic/versions/<hash>_canonical_url_discovered_via.py`
+
+- [ ] **Step 1: Tests for the resolver**
+
+```python
+# tests/sources/test_resolver.py
+from carbuyer.sources.base import SOURCES
+from carbuyer.sources.hibid.source import HibidSource  # noqa: F401  -- registers
+from carbuyer.sources.resolver import (
+    canonicalize_url,
+    resolve_auction_url,
+    unknown_platform_ref,
+)
+
+
+def test_canonicalize_url_strips_fragment_and_tracking() -> None:
+    raw = "https://Example.COM/Foo/Bar/?utm_source=newsletter&ref=fag&id=42#hash"
+    assert canonicalize_url(raw) == "https://example.com/Foo/Bar?id=42"
+
+
+def test_canonicalize_url_idempotent() -> None:
+    once = canonicalize_url("https://hibid.com/catalog/740236/?utm_campaign=x")
+    twice = canonicalize_url(once)
+    assert once == twice
+
+
+def test_resolve_auction_url_finds_hibid() -> None:
+    ref = resolve_auction_url("https://hibid.com/catalog/740236/some-slug")
+    assert ref is not None
+    assert ref.source == "hibid"
+    assert ref.source_auction_id == "740236"
+
+
+def test_resolve_auction_url_returns_none_for_unknown() -> None:
+    assert resolve_auction_url("https://example.com/auction/99") is None
+
+
+def test_unknown_platform_ref_is_deterministic() -> None:
+    a = unknown_platform_ref("https://foo.ca/auction/123/?utm_source=x")
+    b = unknown_platform_ref("https://foo.ca/auction/123#hash")
+    assert a.source == "unknown:foo.ca"
+    assert a.source_auction_id == b.source_auction_id  # same canonical → same id
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/sources/resolver.py`**
+
+```python
+from __future__ import annotations
+
+import hashlib
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+from carbuyer.sources.base import SOURCES, AuctionRef
+
+
+# Tracking params we strip universally. Platform-specific overrides come via
+# Source.canonicalize_url when a real platform needs different handling.
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+    "ref", "fbclid", "gclid", "mc_eid", "mc_cid", "_ga",
+})
+
+
+def canonicalize_url(url: str) -> str:
+    """Strip tracking params and fragment; lowercase host. Idempotent."""
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    pairs = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+        if k.lower() not in _TRACKING_PARAMS
+    ]
+    query = urlencode(pairs)
+    path = parsed.path.rstrip("/") or "/"
+    if path == "/":
+        path = ""
+    return urlunparse((parsed.scheme, netloc, path, parsed.params, query, ""))
+
+
+def resolve_auction_url(url: str) -> AuctionRef | None:
+    """Walk SOURCES (sorted by name for determinism); return the first match."""
+    for name in sorted(SOURCES.keys()):
+        ref = SOURCES[name].parse_auction_url(url)
+        if ref is not None:
+            return ref
+    return None
+
+
+def unknown_platform_ref(url: str) -> AuctionRef:
+    canonical = canonicalize_url(url)
+    host = urlparse(canonical).hostname or "unknown"
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+    return AuctionRef(source=f"unknown:{host}", source_auction_id=digest, url=canonical)
+```
+
+- [ ] **Step 3: Add `parse_auction_url` and `canonicalize_url` defaults to `Source` ABC**
+
+In `sources/base.py`, after the `Source` class definition:
+
+```python
+class Source(ABC):
+    name: ClassVar[str]
+    version: ClassVar[str]
+
+    @classmethod
+    def parse_auction_url(cls, url: str) -> AuctionRef | None:
+        """Return AuctionRef if THIS source is authoritative for the URL, else None.
+
+        Overrides in concrete plugins. Default is `None` (plugin doesn't claim
+        this URL); the `resolve_auction_url` helper walks all registered sources.
+        """
+        del url  # default impl ignores
+        return None
+```
+
+- [ ] **Step 4: Override `parse_auction_url` on `HibidSource`**
+
+In `sources/hibid/source.py`:
+
+```python
+@classmethod
+def parse_auction_url(cls, url: str) -> AuctionRef | None:
+    # https://hibid.com/catalog/{id}[/slug]
+    # https://hibid.com/{province}/catalog/{id}[/slug]
+    m = re.match(r"^https?://(?:www\.)?hibid\.com/(?:[a-z\-]+/)?catalog/(\d+)", url)
+    if m is None:
+        return None
+    from carbuyer.sources.resolver import canonicalize_url
+    return AuctionRef(source=cls.name, source_auction_id=m.group(1), url=canonicalize_url(url))
+```
+
+- [ ] **Step 5: Add `canonical_url` and `discovered_via` columns to `Auction`**
+
+In `db/models.py`:
+
+```python
+canonical_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+# text[] (not JSONB) so we can append + dedupe atomically inside ON CONFLICT.
+# Each entry is the name of a Source (plugin or router) that has surfaced
+# this auction. Used by Phase 10 "needs-plugin" alerting and the dashboard.
+discovered_via: Mapped[list[str]] = mapped_column(
+    ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+)
+```
+
+- [ ] **Step 6: Alembic migration with backfill**
+
+Hand-edit the autogenerated migration to do three steps:
+
+```python
+def upgrade() -> None:
+    op.add_column("auctions", sa.Column("canonical_url", sa.Text(), nullable=True))
+    op.add_column(
+        "auctions",
+        sa.Column(
+            "discovered_via",
+            postgresql.ARRAY(sa.Text()),
+            nullable=False,
+            server_default=sa.text("'{}'::text[]"),
+        ),
+    )
+    # Backfill canonical_url from url. Conservative: copy URL as-is if no rows
+    # exist (which is the case post-Phase-1); this avoids needing the Python
+    # canonicalizer in the migration.
+    op.execute("UPDATE auctions SET canonical_url = url WHERE canonical_url IS NULL")
+    op.alter_column("auctions", "canonical_url", nullable=False)
+    op.create_index("ix_auctions_canonical_url", "auctions", ["canonical_url"])
+    # Partial indexes for queue-claim queries on auction_lots.
+    op.execute(
+        "CREATE INDEX ix_auction_lots_enrichment_pending "
+        "ON auction_lots(id) WHERE enrichment_status = 'pending'"
+    )
+    op.execute(
+        "CREATE INDEX ix_auction_lots_valuation_pending "
+        "ON auction_lots(id) WHERE valuation_status = 'pending'"
+    )
+    op.execute(
+        "CREATE INDEX ix_auction_lots_vision_pending "
+        "ON auction_lots(id) WHERE vision_status = 'pending'"
+    )
+    op.execute(
+        "CREATE INDEX ix_auction_lots_notification_pending "
+        "ON auction_lots(id) WHERE notification_status = 'pending'"
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_auction_lots_notification_pending", "auction_lots")
+    op.drop_index("ix_auction_lots_vision_pending", "auction_lots")
+    op.drop_index("ix_auction_lots_valuation_pending", "auction_lots")
+    op.drop_index("ix_auction_lots_enrichment_pending", "auction_lots")
+    op.drop_index("ix_auctions_canonical_url", "auctions")
+    op.drop_column("auctions", "discovered_via")
+    op.drop_column("auctions", "canonical_url")
+```
+
+Add the partial indexes to the ORM model so future autogenerate compares them:
+
+```python
+__table_args__ = (
+    UniqueConstraint(...),
+    Index("ix_auction_lots_make_model_year", ...),
+    Index("ix_auction_lots_price_deal_score", "price_deal_score", "lot_status"),
+    Index("ix_auction_lots_rarity_score", "rarity_score"),
+    Index(
+        "ix_auction_lots_enrichment_pending", "id",
+        postgresql_where=text("enrichment_status = 'pending'"),
+    ),
+    Index(
+        "ix_auction_lots_valuation_pending", "id",
+        postgresql_where=text("valuation_status = 'pending'"),
+    ),
+    Index(
+        "ix_auction_lots_vision_pending", "id",
+        postgresql_where=text("vision_status = 'pending'"),
+    ),
+    Index(
+        "ix_auction_lots_notification_pending", "id",
+        postgresql_where=text("notification_status = 'pending'"),
+    ),
+)
+```
+
+- [ ] **Step 7: Run tests + apply migration**
+
+```bash
+uv run pytest tests/sources/test_resolver.py -v
+uv run alembic upgrade head
+uv run pytest -v
+```
+
+Expected: all pass; migration applies cleanly.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/carbuyer/sources/resolver.py src/carbuyer/sources/base.py src/carbuyer/db/models.py \
+        src/carbuyer/sources/hibid/source.py tests/sources/test_resolver.py alembic/versions/
+git commit -m "sources: multi-router URL resolver + canonical_url/discovered_via on auctions"
+```
+
+---
 
 ### Task 15: LISTEN/NOTIFY async helper (dedicated psycopg connection)
 
 **Files:**
 - Create: `src/carbuyer/db/notify.py`
 - Create: `tests/db/test_notify.py`
+
+**Notes from deliberation:**
+- `notify()` uses parameterized `pg_notify(:c, :p)` — never f-string `NOTIFY`. Channel name is allowlisted; payload size capped at 7900 bytes (Postgres limit is 8000).
+- `listen()` reconnects on `psycopg.OperationalError` with backoff. The dedicated psycopg connection is not in the SA pool and deliberately has no `statement_timeout` (LISTEN must block).
+- `_to_psycopg_url` accepts known SA driver-prefixed URLs (psycopg / asyncpg / psycopg2) — fails fast on anything else.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1804,14 +3180,19 @@ End of Phase 1. HiBid source plugin is fully implemented and tested against a ca
 import asyncio
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from carbuyer.db.notify import notify, listen
+from carbuyer.db.notify import _CHANNEL_RE, listen, notify
 from carbuyer.shared.config import settings
 
 
+def _test_url() -> str:
+    url = settings.database_url
+    return url if url.endswith("_test") else url.replace("/carbuyer", "/carbuyer_test")
+
+
 @pytest.mark.asyncio
-async def test_notify_round_trip(session) -> None:
+async def test_notify_round_trip(session: AsyncSession) -> None:
     received: list[str] = []
 
     async def reader() -> None:
@@ -1821,54 +3202,123 @@ async def test_notify_round_trip(session) -> None:
 
     task = asyncio.create_task(reader())
     await asyncio.sleep(0.2)
-    await session.execute(text("NOTIFY test_channel, 'hello'"))
+    await notify(session, "test_channel", "hello")
     await session.commit()
     await asyncio.wait_for(task, timeout=2.0)
     assert received == ["hello"]
 
 
-def _test_url() -> str:
-    url = settings.database_url
-    if "/carbuyer" in url and not url.endswith("_test"):
-        url = url.replace("/carbuyer", "/carbuyer_test")
-    return url
+@pytest.mark.asyncio
+async def test_notify_rejects_invalid_channel(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="invalid channel name"):
+        await notify(session, "bad-channel!", "x")
+    with pytest.raises(ValueError, match="invalid channel name"):
+        await notify(session, "1starts-with-digit", "x")
+
+
+@pytest.mark.asyncio
+async def test_notify_rejects_oversized_payload(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="payload"):
+        await notify(session, "test_channel", "x" * 8000)
+
+
+def test_channel_regex() -> None:
+    assert _CHANNEL_RE.match("auction_pending")
+    assert _CHANNEL_RE.match("a")
+    assert not _CHANNEL_RE.match("Auction_Pending")  # uppercase
+    assert not _CHANNEL_RE.match("auction-pending")  # dash
+    assert not _CHANNEL_RE.match("1auction")          # starts with digit
+    assert not _CHANNEL_RE.match("")
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/db/notify.py`**
 
 ```python
+from __future__ import annotations
+
+import asyncio
+import re
 from collections.abc import AsyncIterator
 
 import psycopg
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
+
+
+_CHANNEL_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+# Postgres NOTIFY hard limit is 8000 bytes; leave headroom for protocol overhead.
+_MAX_PAYLOAD_BYTES = 7900
+
+
+log = get_logger("db.notify")
+
+
+def _check_channel(channel: str) -> None:
+    if not _CHANNEL_RE.match(channel):
+        raise ValueError(f"invalid channel name: {channel!r}")
 
 
 def _to_psycopg_url(sa_url: str) -> str:
-    # SQLAlchemy uses 'postgresql+psycopg://...' — psycopg wants 'postgresql://...'
-    return sa_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    """SQLAlchemy URL → psycopg URL (drops the +driver suffix)."""
+    for prefix in ("postgresql+psycopg://", "postgresql+asyncpg://", "postgresql+psycopg2://"):
+        if sa_url.startswith(prefix):
+            return "postgresql://" + sa_url[len(prefix):]
+    if sa_url.startswith("postgresql://"):
+        return sa_url
+    raise ValueError(f"unsupported database URL scheme: {sa_url[:30]}...")
 
 
 async def notify(session: AsyncSession, channel: str, payload: str = "") -> None:
-    safe = payload.replace("'", "''")
-    await session.execute(text(f"NOTIFY {channel}, '{safe}'"))
+    """Send a NOTIFY using `pg_notify()` so both args are properly bound."""
+    _check_channel(channel)
+    if len(payload.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
+        raise ValueError(
+            f"NOTIFY payload exceeds {_MAX_PAYLOAD_BYTES} bytes",
+        )
+    await session.execute(
+        text("SELECT pg_notify(:c, :p)").bindparams(c=channel, p=payload),
+    )
 
 
-async def listen(channel: str, *, url: str | None = None) -> AsyncIterator[str]:
+async def listen(
+    channel: str,
+    *,
+    url: str | None = None,
+    reconnect_max_backoff: float = 30.0,
+) -> AsyncIterator[str]:
+    """Yield NOTIFY payloads on `channel`, reconnecting on connection drops.
+
+    The connection is autocommit + has no statement_timeout (LISTEN must block).
+    On psycopg.OperationalError or OSError, sleep with exponential backoff and
+    reconnect. Caller is responsible for catchup-pending sweeps via db.queue.
+    """
+    _check_channel(channel)
     psycopg_url = _to_psycopg_url(url or settings.database_url)
-    aconn = await psycopg.AsyncConnection.connect(psycopg_url, autocommit=True)
-    try:
-        async with aconn.cursor() as cur:
-            await cur.execute(f"LISTEN {channel}")
-        async for n in aconn.notifies():
-            yield n.payload
-    finally:
-        await aconn.close()
+    backoff = 1.0
+    while True:
+        try:
+            aconn = await psycopg.AsyncConnection.connect(psycopg_url, autocommit=True)
+            try:
+                async with aconn.cursor() as cur:
+                    # Channel name has already been validated above, so f-string is safe.
+                    await cur.execute(f"LISTEN {channel}")  # noqa: S608  -- channel validated
+                backoff = 1.0
+                async for n in aconn.notifies():
+                    yield n.payload
+            finally:
+                await aconn.close()
+        except (psycopg.OperationalError, OSError) as exc:
+            log.warning(
+                "listen reconnect", channel=channel, error=str(exc), backoff=backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, reconnect_max_backoff)
 ```
 
-- [ ] **Step 3: Run test**
+- [ ] **Step 3: Run tests**
 
 ```bash
 uv run pytest tests/db/test_notify.py -v
@@ -1880,101 +3330,185 @@ Expected: PASS.
 
 ```bash
 git add src/carbuyer/db/notify.py tests/db/test_notify.py
-git commit -m "db: LISTEN/NOTIFY async helpers"
+git commit -m "db: LISTEN/NOTIFY helpers (pg_notify + reconnect + channel allowlist)"
 ```
 
 ---
 
-### Task 16: SKIP LOCKED queue-claim helper
+### Task 16: SKIP LOCKED queue-claim helper + catchup-pending sweep
 
 **Files:**
 - Create: `src/carbuyer/db/queue.py`
 - Create: `tests/db/test_queue.py`
 
+**Notes from deliberation:**
+- **Two-phase claim:** `claim_pending_lots` opens its own short transaction, flips rows to `'in_progress'`, commits, returns ids. The downstream worker processes each id in a fresh transaction. Avoids holding `FOR UPDATE` locks across HTTP I/O and dodges `idle_in_transaction_session_timeout=60s`.
+- **Catchup sweep:** `select_pending_ids()` returns `pending` ids with no locking — listener-startup code uses it to enqueue rows that NOTIFYed during a worker outage.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/db/test_queue.py
-import pytest
 from datetime import UTC, datetime
+from typing import cast
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.db.enums import EnrichmentStatus
 from carbuyer.db.models import Auction, AuctionLot
-from carbuyer.db.queue import claim_pending_lots
+from carbuyer.db.queue import claim_pending_ids, select_pending_ids
 
 
 @pytest.mark.asyncio
-async def test_claim_pending_lots_skips_locked(session) -> None:
-    # Seed auction and three pending lots
+async def test_claim_pending_ids_marks_in_progress(session: AsyncSession) -> None:
     a = Auction(
-        source="test", source_auction_id="A1", url="x", auction_subtype="estate",
+        source="test", source_auction_id="A1", url="x",
+        auction_subtype="estate", canonical_url="x",
         first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
     )
     session.add(a)
     await session.flush()
     for i in range(3):
         session.add(AuctionLot(
-            auction_id=a.id, source_lot_id=f"L{i}", url=f"u{i}",
-            enrichment_status="pending",
+            auction_id=cast(int, a.id), source_lot_id=f"L{i}", url=f"u{i}",
         ))
     await session.commit()
 
-    claimed = await claim_pending_lots(session, status_field="enrichment_status", limit=2)
-    assert len(claimed) == 2
-    for lot in claimed:
-        assert lot.enrichment_status == "in_progress"
+    ids = await claim_pending_ids(session, status_field="enrichment_status", limit=2)
+    assert len(ids) == 2
+
+    # Verify the rows are marked in_progress.
+    for lot_id in ids:
+        lot = await session.get(AuctionLot, lot_id)
+        assert lot is not None
+        assert lot.enrichment_status == EnrichmentStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_select_pending_ids_does_not_modify_rows(session: AsyncSession) -> None:
+    a = Auction(
+        source="test", source_auction_id="A2", url="x",
+        auction_subtype="estate", canonical_url="x",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    await session.flush()
+    session.add(AuctionLot(
+        auction_id=cast(int, a.id), source_lot_id="L0", url="u0",
+    ))
+    await session.commit()
+
+    ids = await select_pending_ids(session, status_field="enrichment_status")
+    assert len(ids) == 1
+    # Status unchanged.
+    lot = await session.get(AuctionLot, ids[0])
+    assert lot is not None
+    assert lot.enrichment_status == EnrichmentStatus.PENDING
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/db/queue.py`**
 
 ```python
+from __future__ import annotations
+
 from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from carbuyer.db.enums import (
+    EnrichmentStatus,
+    NotificationStatus,
+    ValuationStatus,
+    VisionStatus,
+)
 from carbuyer.db.models import AuctionLot
 
 
 StatusField = Literal[
-    "enrichment_status", "valuation_status", "vision_status", "notification_status"
+    "enrichment_status", "valuation_status", "vision_status", "notification_status",
 ]
 
+_IN_PROGRESS_BY_FIELD: dict[StatusField, str] = {
+    "enrichment_status": EnrichmentStatus.IN_PROGRESS,
+    "valuation_status": ValuationStatus.IN_PROGRESS,
+    "vision_status": VisionStatus.IN_PROGRESS,
+    # NotificationStatus has no IN_PROGRESS — notifier flips PENDING → DONE/SKIPPED.
+}
 
-async def claim_pending_lots(
+
+async def claim_pending_ids(
     session: AsyncSession,
     *,
     status_field: StatusField,
     limit: int = 50,
-) -> list[AuctionLot]:
+) -> list[int]:
+    """Claim up to `limit` pending lot ids; commit immediately so the lock releases.
+
+    The returned ids are owned by the caller; downstream processing happens in a
+    fresh transaction. The 'in_progress' marker (rather than the row lock) IS the
+    ownership signal — a watchdog can later flip stuck 'in_progress' rows back to
+    'pending' (Phase 2.5).
+    """
+    if status_field not in _IN_PROGRESS_BY_FIELD:
+        raise ValueError(f"{status_field} has no IN_PROGRESS state — use NotificationStatus.DONE/SKIPPED directly")
     column = getattr(AuctionLot, status_field)
     stmt = (
-        select(AuctionLot)
+        select(AuctionLot.id)
         .where(column == "pending")
         .order_by(AuctionLot.id)
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
-    result = await session.execute(stmt)
-    rows = list(result.scalars().all())
-    for lot in rows:
-        setattr(lot, status_field, "in_progress")
-    await session.flush()
-    return rows
+    rows = (await session.execute(stmt)).scalars().all()
+    if not rows:
+        await session.commit()
+        return []
+    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
+    update_stmt = (
+        AuctionLot.__table__.update()
+        .where(AuctionLot.id.in_(rows))
+        .values({status_field: in_progress_value})
+    )
+    await session.execute(update_stmt)
+    await session.commit()
+    return list(rows)
+
+
+async def select_pending_ids(
+    session: AsyncSession,
+    *,
+    status_field: StatusField,
+    limit: int = 1000,
+) -> list[int]:
+    """Read-only catchup sweep. Returns ids of pending rows without locking them.
+
+    Used at listener startup and on reconnect to recover NOTIFY-fired-while-down
+    rows. Caller dispatches each id (typically by issuing a NOTIFY).
+    """
+    column = getattr(AuctionLot, status_field)
+    stmt = (
+        select(AuctionLot.id)
+        .where(column == "pending")
+        .order_by(AuctionLot.id)
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return list(rows)
 ```
 
-- [ ] **Step 3: Run test**
+- [ ] **Step 3: Run tests**
 
 ```bash
 uv run pytest tests/db/test_queue.py -v
 ```
 
-Expected: PASS.
-
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/carbuyer/db/queue.py tests/db/test_queue.py
-git commit -m "db: SKIP LOCKED queue-claim helper"
+git commit -m "db: two-phase SKIP LOCKED claim + catchup-pending sweep"
 ```
 
 ---
@@ -1984,21 +3518,73 @@ git commit -m "db: SKIP LOCKED queue-claim helper"
 **Files:**
 - Create: `src/carbuyer/apps/__init__.py`
 - Create: `src/carbuyer/apps/_runner.py`
+- Create: `tests/apps/__init__.py`
+- Create: `tests/apps/test_runner.py`
 
-- [ ] **Step 1: Implement `src/carbuyer/apps/_runner.py`**
+**Notes from deliberation:**
+- `configure_logging()` (no args) — reads `settings.log_level` internally.
+- `loop.shutdown_asyncgens()` runs before `loop.close()` so the dedicated psycopg LISTEN connection in `db.notify.listen()` is properly closed on SIGTERM.
+
+- [ ] **Step 1: Test**
 
 ```python
+# tests/apps/test_runner.py
+import asyncio
+
+import pytest
+
+from carbuyer.apps._runner import run_worker
+
+
+def test_run_worker_runs_to_completion() -> None:
+    fired = {"n": 0}
+
+    async def main() -> None:
+        fired["n"] += 1
+
+    run_worker("test", main)
+    assert fired["n"] == 1
+
+
+def test_run_worker_propagates_exception() -> None:
+    async def main() -> None:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_worker("test", main)
+
+
+def test_run_worker_handles_cancellation() -> None:
+    async def main() -> None:
+        await asyncio.sleep(60)  # would block, but the test cancels via the loop
+
+    # Manual cancellation via injected handler — patched in via the implementation.
+    # See implementation for the testable cancel hook (run_worker_for_test).
+```
+
+- [ ] **Step 2: Implement `src/carbuyer/apps/_runner.py`**
+
+```python
+from __future__ import annotations
+
 import asyncio
 import signal
 from collections.abc import Awaitable, Callable
 
-from carbuyer.shared.config import settings
 from carbuyer.shared.logging import configure_logging, get_logger
 
 
 def run_worker(name: str, main: Callable[[], Awaitable[None]]) -> None:
-    """Run an async worker with graceful shutdown on SIGTERM/SIGINT."""
-    configure_logging(settings.log_level)
+    """Run an async worker with graceful shutdown on SIGTERM/SIGINT.
+
+    On signal:
+      1. The worker task is cancelled.
+      2. CancelledError propagates out of `main()`.
+      3. `loop.shutdown_asyncgens()` runs to ensure async-generator finalizers
+         (e.g. psycopg LISTEN connection close) are awaited.
+      4. The loop closes.
+    """
+    configure_logging()
     log = get_logger(name)
     loop = asyncio.new_event_loop()
 
@@ -2029,28 +3615,24 @@ def run_worker(name: str, main: Callable[[], Awaitable[None]]) -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        loop.close()
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 ```
 
-- [ ] **Step 2: Create `__init__.py`**
+- [ ] **Step 3: Run tests**
 
 ```bash
-touch src/carbuyer/apps/__init__.py
+uv run pytest tests/apps/test_runner.py -v
 ```
-
-- [ ] **Step 3: Smoke check**
-
-```bash
-uv run python -c "from carbuyer.apps._runner import run_worker; print('ok')"
-```
-
-Expected: `ok`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/carbuyer/apps/__init__.py src/carbuyer/apps/_runner.py
-git commit -m "apps: shared worker entrypoint with graceful shutdown"
+git add src/carbuyer/apps/__init__.py src/carbuyer/apps/_runner.py \
+        tests/apps/__init__.py tests/apps/test_runner.py
+git commit -m "apps: worker entrypoint with shutdown_asyncgens for clean LISTEN close"
 ```
 
 ---
@@ -2061,132 +3643,291 @@ git commit -m "apps: shared worker entrypoint with graceful shutdown"
 - Create: `src/carbuyer/apps/auction_discoverer/__init__.py`
 - Create: `src/carbuyer/apps/auction_discoverer/__main__.py`
 - Create: `src/carbuyer/apps/auction_discoverer/discoverer.py`
-- Create: `tests/apps/__init__.py`
 - Create: `tests/apps/test_auction_discoverer.py`
+
+**Notes from deliberation:**
+- `INSERT ... ON CONFLICT DO UPDATE` (atomic UPSERT), not SELECT-then-INSERT.
+- Sources entered via `AsyncExitStack` for the worker's lifetime; per-method `async with HibidSource(...)` thrash avoided.
+- Per-plugin try/except + per-source short timeout — a failing HiBid sweep doesn't block farmauctionguide.
+- `discovered_via` = source's own `name` (HiBid surfaced this auction itself); routers append their name through the same UPSERT path.
+- `unknown:{host}` AuctionRefs (from routers in Phase 10) skip the `fetch_auction` call — there's no fetcher plugin for them — and write a minimal Auction row with only `canonical_url` populated.
+- `if raw.x is not None: existing.x = raw.x` semantics — never short-circuit `or` (would discard `Decimal("0")`).
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/apps/test_auction_discoverer.py
-import pytest
 from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.auction_discoverer.discoverer import upsert_auction
 from carbuyer.db.models import Auction
 from carbuyer.sources.base import AuctionRef, RawAuction
-from decimal import Decimal
+
+
+def _raw(title: str = "t1", **overrides: object) -> RawAuction:
+    base = {
+        "ref": AuctionRef(source="test", source_auction_id="A1", url="https://x/a/1"),
+        "title": title,
+        "description": None,
+        "auctioneer_name": "A Co",
+        "auctioneer_external_id": "ac1",
+        "scheduled_start_at": None,
+        "scheduled_end_at": None,
+        "pickup_address": None,
+        "pickup_city": None,
+        "pickup_province": "AB",
+        "pickup_window_text": None,
+        "buyer_premium_pct": Decimal("0.10"),
+        "online_bidding_fee_pct": None,
+        "terms_text": None,
+        "auction_subtype": "estate",
+    }
+    base.update(overrides)
+    return RawAuction(**base)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
-async def test_upsert_auction_inserts_then_updates(session) -> None:
-    ref = AuctionRef(source="test", source_auction_id="A1", url="https://x/a/1")
-    raw = RawAuction(
-        ref=ref, title="t1", description=None, auctioneer_name="A Co",
-        auctioneer_external_id="ac1",
-        scheduled_start_at=None, scheduled_end_at=None,
-        pickup_address=None, pickup_city=None, pickup_province="AB",
-        pickup_window_text=None, buyer_premium_pct=Decimal("0.10"),
-        online_bidding_fee_pct=None, terms_text=None, auction_subtype="estate",
-    )
-    a1 = await upsert_auction(session, raw)
+async def test_upsert_auction_inserts_then_updates(session: AsyncSession) -> None:
+    a1 = await upsert_auction(session, _raw(title="t1"), discovered_via="hibid")
     await session.commit()
     assert a1.id is not None
+    assert a1.discovered_via == ["hibid"]
 
-    raw.title = "t1-renamed"
-    a2 = await upsert_auction(session, raw)
+    a2 = await upsert_auction(session, _raw(title="t1-renamed"), discovered_via="hibid")
     await session.commit()
     assert a2.id == a1.id
     assert a2.title == "t1-renamed"
 
-    rows = (await session.execute(select(Auction).where(Auction.source == "test"))).scalars().all()
+    rows = (await session.execute(
+        select(Auction).where(Auction.source == "test"),
+    )).scalars().all()
     assert len(list(rows)) == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_auction_dedupes_discovered_via(session: AsyncSession) -> None:
+    a = await upsert_auction(session, _raw(), discovered_via="hibid")
+    await session.commit()
+    a = await upsert_auction(session, _raw(), discovered_via="hibid")  # duplicate
+    await session.commit()
+    a = await upsert_auction(session, _raw(), discovered_via="farmauctionguide")
+    await session.commit()
+    assert sorted(a.discovered_via) == ["farmauctionguide", "hibid"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_auction_does_not_overwrite_with_none(session: AsyncSession) -> None:
+    a = await upsert_auction(session, _raw(title="t1"), discovered_via="hibid")
+    await session.commit()
+    raw = _raw(title=None)  # later sweep sees no title
+    a2 = await upsert_auction(session, raw, discovered_via="hibid")
+    await session.commit()
+    assert a2.id == a.id
+    assert a2.title == "t1"  # original preserved
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/apps/auction_discoverer/discoverer.py`**
 
 ```python
-import asyncio
+from __future__ import annotations
+
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.models import Auction
 from carbuyer.db.notify import notify
-from carbuyer.db.session import async_session_maker
+from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
-from carbuyer.sources.base import AuctionSource, RawAuction
-
+from carbuyer.sources.base import (
+    SOURCES,
+    AuctionDiscoverer,
+    AuctionFetcher,
+    AuctionRef,
+    RawAuction,
+)
+from carbuyer.sources.resolver import canonicalize_url
 
 log = get_logger("auction_discoverer")
 
 
-async def upsert_auction(session: AsyncSession, raw: RawAuction) -> Auction:
-    stmt = select(Auction).where(
-        Auction.source == raw.ref.source,
-        Auction.source_auction_id == raw.ref.source_auction_id,
+def _minimal_raw_auction(ref: AuctionRef) -> RawAuction:
+    """For unknown-platform refs (routers, no fetcher plugin) — record bare metadata."""
+    return RawAuction(
+        ref=ref,
+        title=None, description=None,
+        auctioneer_name=None, auctioneer_external_id=None,
+        scheduled_start_at=None, scheduled_end_at=None,
+        pickup_address=None, pickup_city=None, pickup_province=None,
+        pickup_window_text=None,
+        buyer_premium_pct=None, online_bidding_fee_pct=None,
+        terms_text=None, auction_subtype="estate",
     )
-    existing = (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def upsert_auction(
+    session: AsyncSession,
+    raw: RawAuction,
+    *,
+    discovered_via: str,
+) -> Auction:
+    """Atomic UPSERT keyed on (source, source_auction_id).
+
+    On conflict: refresh `last_seen_at`, copy non-None fields from `raw` (never
+    overwrite with None), and append `discovered_via` to the array if not already
+    present.
+    """
     now = datetime.now(UTC)
-    if existing is None:
-        a = Auction(
-            source=raw.ref.source,
-            source_auction_id=raw.ref.source_auction_id,
-            url=raw.ref.url,
-            auction_subtype=raw.auction_subtype,
-            auctioneer_name=raw.auctioneer_name,
-            auctioneer_external_id=raw.auctioneer_external_id,
-            title=raw.title,
-            description=raw.description,
-            terms_text=raw.terms_text,
-            scheduled_start_at=raw.scheduled_start_at,
-            scheduled_end_at=raw.scheduled_end_at,
-            pickup_address=raw.pickup_address,
-            pickup_city=raw.pickup_city,
-            pickup_province=raw.pickup_province,
-            pickup_window_text=raw.pickup_window_text,
-            buyer_premium_pct=raw.buyer_premium_pct,
-            online_bidding_fee_pct=raw.online_bidding_fee_pct,
-            status="upcoming",
-            first_seen_at=now,
-            last_seen_at=now,
-        )
-        session.add(a)
-        await session.flush()
-        return a
-    existing.url = raw.ref.url
-    existing.title = raw.title or existing.title
-    existing.description = raw.description or existing.description
-    existing.scheduled_end_at = raw.scheduled_end_at or existing.scheduled_end_at
-    existing.last_seen_at = now
-    await session.flush()
-    return existing
+    canonical = canonicalize_url(raw.ref.url)
+
+    insert_values: dict[str, object] = {
+        "source": raw.ref.source,
+        "source_auction_id": raw.ref.source_auction_id,
+        "url": raw.ref.url,
+        "canonical_url": canonical,
+        "discovered_via": [discovered_via],
+        "auction_subtype": raw.auction_subtype,
+        "auctioneer_name": raw.auctioneer_name,
+        "auctioneer_external_id": raw.auctioneer_external_id,
+        "title": raw.title,
+        "description": raw.description,
+        "terms_text": raw.terms_text,
+        "scheduled_start_at": raw.scheduled_start_at,
+        "scheduled_end_at": raw.scheduled_end_at,
+        "pickup_address": raw.pickup_address,
+        "pickup_city": raw.pickup_city,
+        "pickup_province": raw.pickup_province,
+        "pickup_window_text": raw.pickup_window_text,
+        "buyer_premium_pct": raw.buyer_premium_pct,
+        "online_bidding_fee_pct": raw.online_bidding_fee_pct,
+        "status": "upcoming",
+        "first_seen_at": now,
+        "last_seen_at": now,
+    }
+    stmt = pg_insert(Auction).values(**insert_values)
+
+    # Excluded refs the proposed-insert row's value; coalesce keeps existing
+    # non-None values when the new row has None.
+    excluded = stmt.excluded
+    update_set = {
+        "url": excluded.url,
+        "canonical_url": excluded.canonical_url,
+        "auction_subtype": func.coalesce(excluded.auction_subtype, Auction.auction_subtype),
+        "auctioneer_name": func.coalesce(excluded.auctioneer_name, Auction.auctioneer_name),
+        "auctioneer_external_id": func.coalesce(
+            excluded.auctioneer_external_id, Auction.auctioneer_external_id,
+        ),
+        "title": func.coalesce(excluded.title, Auction.title),
+        "description": func.coalesce(excluded.description, Auction.description),
+        "terms_text": func.coalesce(excluded.terms_text, Auction.terms_text),
+        "scheduled_start_at": func.coalesce(
+            excluded.scheduled_start_at, Auction.scheduled_start_at,
+        ),
+        "scheduled_end_at": func.coalesce(
+            excluded.scheduled_end_at, Auction.scheduled_end_at,
+        ),
+        "pickup_address": func.coalesce(excluded.pickup_address, Auction.pickup_address),
+        "pickup_city": func.coalesce(excluded.pickup_city, Auction.pickup_city),
+        "pickup_province": func.coalesce(excluded.pickup_province, Auction.pickup_province),
+        "pickup_window_text": func.coalesce(
+            excluded.pickup_window_text, Auction.pickup_window_text,
+        ),
+        "buyer_premium_pct": func.coalesce(
+            excluded.buyer_premium_pct, Auction.buyer_premium_pct,
+        ),
+        "online_bidding_fee_pct": func.coalesce(
+            excluded.online_bidding_fee_pct, Auction.online_bidding_fee_pct,
+        ),
+        "last_seen_at": excluded.last_seen_at,
+        # Atomic dedup-append: array || EXCLUDED.array, then DISTINCT via ARRAY(SELECT DISTINCT ...).
+        "discovered_via": text(
+            "ARRAY(SELECT DISTINCT unnest(auctions.discovered_via || EXCLUDED.discovered_via))",
+        ),
+    }
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["source", "source_auction_id"],
+        set_=update_set,
+    ).returning(Auction)
+    result = await session.execute(stmt)
+    auction = result.scalar_one()
+    return auction
 
 
-async def discover_once(sources: list[AuctionSource]) -> int:
+async def _sweep_one_discoverer(
+    discoverer: AuctionDiscoverer,
+    fetchers: dict[str, AuctionFetcher],
+) -> int:
     found = 0
-    for source in sources:
-        log.info("discovering", source=source.name)
-        async for ref in source.discover_auctions():
-            try:
-                raw = await source.fetch_auction(ref)
-            except Exception:
-                log.exception("fetch_auction failed", source=source.name, ref=ref)
-                continue
-            async with async_session_maker() as session:
-                async with session.begin():
-                    auction = await upsert_auction(session, raw)
-                    await notify(session, "auction_pending", str(auction.id))
-            found += 1
-    log.info("discovery complete", found=found)
+    log.info("discovering", source=discoverer.name)
+    async for ref in discoverer.discover_auctions():
+        if ref.source.startswith("unknown:"):
+            log.warning(
+                "unknown platform discovered",
+                router=discoverer.name, source=ref.source, url=ref.url,
+            )
+            raw = _minimal_raw_auction(ref)
+        else:
+            fetcher = fetchers.get(ref.source)
+            if fetcher is None:
+                log.warning(
+                    "no fetcher for resolved source — recording metadata only",
+                    router=discoverer.name, source=ref.source,
+                )
+                raw = _minimal_raw_auction(ref)
+            else:
+                try:
+                    raw = await fetcher.fetch_auction(ref)
+                except Exception:
+                    log.exception(
+                        "fetch_auction failed",
+                        source=ref.source, ref_url=ref.url,
+                    )
+                    continue
+        async with get_session() as session, session.begin():
+            auction = await upsert_auction(
+                session, raw, discovered_via=discoverer.name,
+            )
+            await notify(session, "auction_pending", str(auction.id))
+        found += 1
     return found
 
 
+async def discover_once() -> int:
+    """One sweep across every registered discoverer; returns auctions surfaced."""
+    discoverers = [s for s in SOURCES.values() if isinstance(s, AuctionDiscoverer)]
+    fetchers: dict[str, AuctionFetcher] = {
+        s.name: s for s in SOURCES.values() if isinstance(s, AuctionFetcher)
+    }
+    total = 0
+    async with AsyncExitStack() as stack:
+        # Enter every plugin's async-CM ONCE for the duration of the sweep.
+        for d in discoverers:
+            await stack.enter_async_context(d)
+        for f in fetchers.values():
+            if f not in discoverers:
+                await stack.enter_async_context(f)
+        for d in discoverers:
+            try:
+                total += await _sweep_one_discoverer(d, fetchers)
+            except Exception:
+                log.exception("discoverer sweep failed", source=d.name)
+                continue
+    log.info("discovery complete", found=total)
+    return total
+
+
 async def main() -> None:
-    from carbuyer.sources.hibid.source import HibidSource
-    sources: list[AuctionSource] = [HibidSource(provinces=["AB", "BC", "SK", "MB"])]
-    await discover_once(sources)
+    # Importing the plugin module triggers `register(...)`. Add new platforms here.
+    import carbuyer.sources.hibid.source  # noqa: F401  -- registers HibidSource
+    await discover_once()
 ```
 
 - [ ] **Step 3: Implement `src/carbuyer/apps/auction_discoverer/__main__.py`**
@@ -2200,20 +3941,18 @@ if __name__ == "__main__":
     run_worker("auction_discoverer", main)
 ```
 
-- [ ] **Step 4: Create `__init__.py` files and run tests**
+- [ ] **Step 4: Create `__init__.py` and run tests**
 
 ```bash
-touch src/carbuyer/apps/auction_discoverer/__init__.py tests/apps/__init__.py
+touch src/carbuyer/apps/auction_discoverer/__init__.py
 uv run pytest tests/apps/test_auction_discoverer.py -v
 ```
-
-Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/carbuyer/apps/auction_discoverer/ tests/apps/__init__.py tests/apps/test_auction_discoverer.py
-git commit -m "apps: auction-discoverer worker"
+git add src/carbuyer/apps/auction_discoverer/ tests/apps/test_auction_discoverer.py
+git commit -m "apps: auction-discoverer with UPSERT + AsyncExitStack + multi-router support"
 ```
 
 ---
@@ -2226,147 +3965,351 @@ git commit -m "apps: auction-discoverer worker"
 - Create: `src/carbuyer/apps/lot_scraper/scraper.py`
 - Create: `tests/apps/test_lot_scraper.py`
 
+**Notes from deliberation:**
+- **Per-lot transaction** (was: outer txn over all 200 lots). HTTP I/O outside the txn; commit per lot; NOTIFY paced naturally.
+- **`INSERT ... ON CONFLICT DO UPDATE`** on `(auction_id, source_lot_id)` — atomic UPSERT.
+- **`parser_version` written on every upsert** (Phase 0 design #8).
+- **Status-reset cascade:** if any of `{title, description, photos, year, make, model, vin, mileage_km, parser_version}` changed, reset all four worker statuses to `'pending'`. Bid columns NOT touched by the lot-scraper (bid-poller's domain).
+- **`unknown:{host}` source rows are skipped** with an INFO log (no fetcher plugin to dispatch to).
+- **Catchup sweep** at startup + reconnect: scan auctions where any associated lot has `enrichment_status='pending'` and re-NOTIFY, so notifications fired during a worker outage are recovered.
+- **Sources entered via `AsyncExitStack`** for the worker's lifetime; serial processing (one auction at a time per worker; scale by running multiple systemd units).
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/apps/test_lot_scraper.py
-import pytest
 from datetime import UTC, datetime
 from decimal import Decimal
-from sqlalchemy import select
+from typing import cast
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.lot_scraper.scraper import upsert_lot
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
+from carbuyer.db.models import Auction
 from carbuyer.sources.base import LotRef, RawLot
 
 
-@pytest.mark.asyncio
-async def test_upsert_lot_inserts(session) -> None:
-    a = Auction(source="test", source_auction_id="A1", url="x", auction_subtype="estate",
-                first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC))
-    session.add(a)
-    await session.flush()
-    ref = LotRef(source="test", source_auction_id="A1", source_lot_id="L1", url="https://x/lot/1")
-    raw = RawLot(
-        ref=ref, lot_number="1", title="1995 Ford F-150",
-        description="runs and drives",
-        photos=["https://x/p1.jpg"], year=1995, make="Ford", model="F-150",
-        current_high_bid_cad=Decimal("2500"),
-        scheduled_end_at=datetime(2026, 6, 1, tzinfo=UTC),
+def _seed_auction(session: AsyncSession) -> Auction:
+    a = Auction(
+        source="test", source_auction_id="A1", url="x",
+        canonical_url="x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
     )
-    lot = await upsert_lot(session, a.id, raw)
+    session.add(a)
+    return a
+
+
+def _lot_raw(title: str = "1995 Ford F-150", **overrides: object) -> RawLot:
+    base = {
+        "ref": LotRef(source="test", source_auction_id="A1", source_lot_id="L1",
+                      url="https://x/lot/1"),
+        "lot_number": "1",
+        "title": title,
+        "description": "runs and drives",
+        "photos": ["https://x/p1.jpg"],
+        "year": 1995, "make": "Ford", "model": "F-150",
+        "current_high_bid_cad": Decimal("2500"),
+        "scheduled_end_at": datetime(2026, 6, 1, tzinfo=UTC),
+    }
+    base.update(overrides)
+    return RawLot(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_inserts_with_parser_version(session: AsyncSession) -> None:
+    a = _seed_auction(session)
+    await session.flush()
+    lot = await upsert_lot(session, cast(int, a.id), _lot_raw(), parser_version="v1")
     await session.commit()
     assert lot.id is not None
-    assert lot.enrichment_status == "pending"
     assert lot.title == "1995 Ford F-150"
+    assert lot.parser_version == "v1"
+    assert lot.enrichment_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_resets_statuses_when_content_changes(
+    session: AsyncSession,
+) -> None:
+    a = _seed_auction(session)
+    await session.flush()
+    lot = await upsert_lot(session, cast(int, a.id), _lot_raw(), parser_version="v1")
+    # Simulate downstream having processed it.
+    lot.enrichment_status = EnrichmentStatus.DONE
+    lot.valuation_status = ValuationStatus.DONE
+    await session.commit()
+    # Re-scrape with new title.
+    lot2 = await upsert_lot(
+        session, cast(int, a.id), _lot_raw(title="1995 Ford F-150 (revised)"),
+        parser_version="v1",
+    )
+    await session.commit()
+    assert lot2.id == lot.id
+    assert lot2.title == "1995 Ford F-150 (revised)"
+    assert lot2.enrichment_status == EnrichmentStatus.PENDING
+    assert lot2.valuation_status == ValuationStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_resets_when_parser_version_changes(
+    session: AsyncSession,
+) -> None:
+    a = _seed_auction(session)
+    await session.flush()
+    lot = await upsert_lot(session, cast(int, a.id), _lot_raw(), parser_version="v1")
+    lot.enrichment_status = EnrichmentStatus.DONE
+    await session.commit()
+    lot2 = await upsert_lot(session, cast(int, a.id), _lot_raw(), parser_version="v2")
+    await session.commit()
+    assert lot2.parser_version == "v2"
+    assert lot2.enrichment_status == EnrichmentStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_upsert_lot_does_not_overwrite_with_none(session: AsyncSession) -> None:
+    a = _seed_auction(session)
+    await session.flush()
+    await upsert_lot(session, cast(int, a.id), _lot_raw(title="t1"), parser_version="v1")
+    await session.commit()
+    # Re-scrape returns no title — original must be preserved.
+    raw = _lot_raw(title=None)
+    lot = await upsert_lot(session, cast(int, a.id), raw, parser_version="v1")
+    await session.commit()
+    assert lot.title == "t1"
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/apps/lot_scraper/scraper.py`**
 
 ```python
-import asyncio
-from datetime import UTC, datetime
+from __future__ import annotations
+
+from contextlib import AsyncExitStack
+from typing import cast
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from carbuyer.db.enums import (
+    EnrichmentStatus,
+    NotificationStatus,
+    ValuationStatus,
+    VisionStatus,
+)
 from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.db.notify import listen, notify
-from carbuyer.db.session import async_session_maker
+from carbuyer.db.queue import select_pending_ids
+from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
-from carbuyer.sources.base import AuctionSource, LotRef, RawLot
-
+from carbuyer.sources.base import (
+    SOURCES,
+    AuctionFetcher,
+    AuctionRef,
+    RawLot,
+)
 
 log = get_logger("lot_scraper")
 
 
-async def upsert_lot(session: AsyncSession, auction_id: int, raw: RawLot) -> AuctionLot:
-    stmt = select(AuctionLot).where(
-        AuctionLot.auction_id == auction_id,
-        AuctionLot.source_lot_id == raw.ref.source_lot_id,
+# Fields that, when changed, invalidate downstream worker output.
+_CONTENT_TRIGGER_FIELDS = (
+    "title", "description", "photos",
+    "year", "make", "model", "vin", "mileage_km",
+)
+
+
+async def upsert_lot(
+    session: AsyncSession,
+    auction_id: int,
+    raw: RawLot,
+    *,
+    parser_version: str,
+) -> AuctionLot:
+    """Atomic UPSERT on (auction_id, source_lot_id). Resets downstream worker
+    statuses to PENDING when content fields or parser_version change.
+    """
+    insert_values: dict[str, object] = {
+        "auction_id": auction_id,
+        "source_lot_id": raw.ref.source_lot_id,
+        "lot_number": raw.lot_number,
+        "url": raw.ref.url,
+        "parser_version": parser_version,
+        "title": raw.title,
+        "description": raw.description,
+        "photos": raw.photos,
+        "year": raw.year,
+        "make": raw.make,
+        "model": raw.model,
+        "trim": raw.trim,
+        "mileage_km": raw.mileage_km,
+        "vin": raw.vin,
+        "lot_status": raw.lot_status,
+    }
+    stmt = pg_insert(AuctionLot).values(**insert_values).returning(AuctionLot.id)
+    excluded = stmt.excluded
+
+    # Per Phase 0 column-ownership: lot-scraper does NOT write bid columns.
+    # On conflict, the only mutations are content (with coalesce) + parser_version.
+    update_values = {
+        "url": excluded.url,
+        "lot_number": excluded.lot_number,
+        "parser_version": excluded.parser_version,
+        "lot_status": excluded.lot_status,
+    }
+    # coalesce(EXCLUDED, AuctionLot) on every content field — never overwrite with None.
+    from sqlalchemy import func
+    for field in _CONTENT_TRIGGER_FIELDS + ("trim",):
+        update_values[field] = func.coalesce(
+            getattr(excluded, field), getattr(AuctionLot, field),
+        )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["auction_id", "source_lot_id"],
+        set_=update_values,
     )
-    existing = (await session.execute(stmt)).scalar_one_or_none()
-    if existing is None:
-        lot = AuctionLot(
-            auction_id=auction_id,
-            source_lot_id=raw.ref.source_lot_id,
-            lot_number=raw.lot_number,
-            url=raw.ref.url,
-            title=raw.title,
-            description=raw.description,
-            photos=raw.photos,
-            year=raw.year,
-            make=raw.make,
-            model=raw.model,
-            trim=raw.trim,
-            mileage_km=raw.mileage_km,
-            vin=raw.vin,
-            current_high_bid_cad=raw.current_high_bid_cad,
-            lot_status=raw.lot_status,
-            enrichment_status="pending",
-            valuation_status="pending",
-            vision_status="pending",
-            notification_status="pending",
+    await session.execute(stmt)
+
+    # Re-fetch to apply the status-reset cascade — needed because UPSERT alone
+    # cannot conditionally branch on "did any trigger field change".
+    result = await session.execute(
+        select(AuctionLot).where(
+            AuctionLot.auction_id == auction_id,
+            AuctionLot.source_lot_id == raw.ref.source_lot_id,
+        ),
+    )
+    lot = result.scalar_one()
+    return lot
+
+
+async def upsert_lot_with_status_cascade(
+    session: AsyncSession,
+    auction_id: int,
+    raw: RawLot,
+    *,
+    parser_version: str,
+) -> AuctionLot:
+    """Wrapper that resets statuses if any content trigger field changed.
+
+    Compares pre-write snapshot against post-write row, then mutates statuses
+    in a follow-up UPDATE if needed.
+    """
+    pre = (
+        await session.execute(
+            select(AuctionLot).where(
+                AuctionLot.auction_id == auction_id,
+                AuctionLot.source_lot_id == raw.ref.source_lot_id,
+            ),
         )
-        session.add(lot)
+    ).scalar_one_or_none()
+    pre_snapshot = (
+        {f: getattr(pre, f) for f in _CONTENT_TRIGGER_FIELDS}
+        if pre is not None
+        else None
+    )
+    pre_parser_version = pre.parser_version if pre is not None else None
+
+    lot = await upsert_lot(session, auction_id, raw, parser_version=parser_version)
+
+    if pre is None:
+        return lot  # fresh insert; statuses already PENDING from server defaults
+    post_snapshot = {f: getattr(lot, f) for f in _CONTENT_TRIGGER_FIELDS}
+    content_changed = post_snapshot != pre_snapshot
+    parser_changed = lot.parser_version != pre_parser_version
+    if content_changed or parser_changed:
+        lot.enrichment_status = EnrichmentStatus.PENDING
+        lot.valuation_status = ValuationStatus.PENDING
+        lot.vision_status = VisionStatus.PENDING
+        lot.notification_status = NotificationStatus.PENDING
         await session.flush()
-        return lot
-    existing.title = raw.title or existing.title
-    existing.description = raw.description or existing.description
-    existing.photos = raw.photos or existing.photos
-    existing.current_high_bid_cad = raw.current_high_bid_cad
-    if existing.title != raw.title or existing.description != raw.description:
-        existing.enrichment_status = "pending"
-        existing.valuation_status = "pending"
-    await session.flush()
-    return existing
+    return lot
 
 
-def _build_sources() -> dict[str, AuctionSource]:
-    from carbuyer.sources.hibid.source import HibidSource
-    return {"hibid": HibidSource(provinces=["AB", "BC", "SK", "MB"])}
-
-
-async def process_auction(auction_id: int, sources: dict[str, AuctionSource]) -> int:
-    count = 0
-    async with async_session_maker() as session:
-        auction = await session.get(Auction, auction_id)
-        if auction is None:
-            return 0
-        source = sources.get(auction.source)
-        if source is None:
-            log.warning("no source plugin", source=auction.source)
-            return 0
-        ref = type("AR", (), {})()  # construct AuctionRef on the fly
-        from carbuyer.sources.base import AuctionRef
-        aref = AuctionRef(
-            source=auction.source,
-            source_auction_id=auction.source_auction_id,
-            url=auction.url,
+async def process_auction(
+    auction_id: int,
+    fetchers: dict[str, AuctionFetcher],
+) -> int:
+    """Scrape every lot for one auction. Per-lot transaction; HTTP outside txn."""
+    async with get_session() as s:
+        auction = await s.get(Auction, auction_id)
+    if auction is None:
+        log.warning("auction not found", auction_id=auction_id)
+        return 0
+    if auction.source.startswith("unknown:"):
+        log.info(
+            "skipping unknown-platform auction (no fetcher)",
+            auction_id=auction_id, source=auction.source,
         )
-        async for lot_ref in source.fetch_lots(aref):
-            try:
-                raw = await source.fetch_lot(lot_ref)
-            except Exception:
-                log.exception("fetch_lot failed", lot_ref=lot_ref)
-                continue
-            async with session.begin_nested():
-                lot = await upsert_lot(session, auction.id, raw)
-                await notify(session, "enrichment_pending", str(lot.id))
-                count += 1
-        await session.commit()
+        return 0
+    fetcher = fetchers.get(auction.source)
+    if fetcher is None:
+        log.warning(
+            "no fetcher plugin registered",
+            auction_id=auction_id, source=auction.source,
+        )
+        return 0
+    aref = AuctionRef(
+        source=auction.source,
+        source_auction_id=auction.source_auction_id,
+        url=auction.url,
+    )
+    count = 0
+    async for lot_ref in fetcher.fetch_lots(aref):
+        try:
+            raw = await fetcher.fetch_lot(lot_ref)
+        except Exception:
+            log.exception("fetch_lot failed", lot_ref_url=lot_ref.url)
+            continue
+        # Per-lot transaction — HTTP I/O is OUTSIDE the txn.
+        async with get_session() as session, session.begin():
+            lot = await upsert_lot_with_status_cascade(
+                session, cast(int, auction.id), raw,
+                parser_version=fetcher.version,
+            )
+            await notify(session, "enrichment_pending", str(lot.id))
+        count += 1
     return count
 
 
+async def _catchup_sweep(fetchers: dict[str, AuctionFetcher]) -> None:
+    """On startup + reconnect, find auctions whose lots haven't been scraped
+    yet (i.e. nothing in auction_lots for them) and process them. NOTIFYs fired
+    while the worker was down land here."""
+    async with get_session() as s:
+        # Auctions that have NEVER produced a lot row yet.
+        result = await s.execute(
+            select(Auction.id).where(
+                ~select(AuctionLot.id)
+                .where(AuctionLot.auction_id == Auction.id)
+                .exists(),
+                ~Auction.source.startswith("unknown:"),
+            ),
+        )
+        ids = list(result.scalars().all())
+    for auction_id in ids:
+        log.info("catchup processing", auction_id=auction_id)
+        await process_auction(auction_id, fetchers)
+
+
 async def main() -> None:
-    sources = _build_sources()
-    async for payload in listen("auction_pending"):
-        try:
-            auction_id = int(payload)
-        except ValueError:
-            continue
-        log.info("processing", auction_id=auction_id)
-        await process_auction(auction_id, sources)
+    import carbuyer.sources.hibid.source  # noqa: F401  -- registers HibidSource
+    fetchers: dict[str, AuctionFetcher] = {
+        s.name: s for s in SOURCES.values() if isinstance(s, AuctionFetcher)
+    }
+    async with AsyncExitStack() as stack:
+        for f in fetchers.values():
+            await stack.enter_async_context(f)
+        await _catchup_sweep(fetchers)
+        async for payload in listen("auction_pending"):
+            try:
+                auction_id = int(payload)
+            except ValueError:
+                continue
+            log.info("processing", auction_id=auction_id)
+            try:
+                await process_auction(auction_id, fetchers)
+            except Exception:
+                log.exception("process_auction failed", auction_id=auction_id)
 ```
 
 - [ ] **Step 3: Implement `src/carbuyer/apps/lot_scraper/__main__.py`**
@@ -2387,13 +4330,11 @@ touch src/carbuyer/apps/lot_scraper/__init__.py
 uv run pytest tests/apps/test_lot_scraper.py -v
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/carbuyer/apps/lot_scraper/ tests/apps/test_lot_scraper.py
-git commit -m "apps: lot-scraper worker (consumes auction_pending)"
+git commit -m "apps: lot-scraper with per-lot UPSERT + status cascade + parser_version + catchup"
 ```
 
 ---

@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: carbuyer-pg
+    environment:
+      POSTGRES_USER: carbuyer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local}
+      POSTGRES_DB: carbuyer
+    # 11 worker pools × (2 + 3 overflow) = ~55 connections worst case;
+    # bump max_connections to 200 to leave headroom for ops/dashboard/Alembic.
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "effective_cache_size=2GB"
+    ports:
+      # Bound to localhost only — never expose Postgres on LAN.
+      # Host port 5433 (not 5432) to avoid collisions with a host-native
+      # Postgres install. DATABASE_URL must reference :5433 to match.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - carbuyer-pg-data:/var/lib/postgresql/data
+      # Runs on first volume init only; idempotent CREATE DATABASE for tests.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "carbuyer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  carbuyer-pg-data:
