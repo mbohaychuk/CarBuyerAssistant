@@ -1,0 +1,1 @@
+"""Bid-poller worker package."""
