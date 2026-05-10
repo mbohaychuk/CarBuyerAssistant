@@ -1,8 +1,10 @@
+"""Stateless trigger evaluator: maps a LotState snapshot to notification trigger events."""
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class LotState:
     lot_id: int
     rarity_score: float | None
@@ -17,9 +19,9 @@ class LotState:
     last_cheap_score: float | None
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class TriggerResult:
-    trigger: str  # "early_warning" | "going_cheap" | "skip"
+    trigger: str  # "early_warning" | "going_cheap"
     reason: str
 
 
