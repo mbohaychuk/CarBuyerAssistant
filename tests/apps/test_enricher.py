@@ -4,7 +4,13 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from openai import APIError, RateLimitError
+from openai import (
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +21,8 @@ from carbuyer.apps.enricher.enricher import (
     _classify_failure,
     _EnrichmentResult,
     _process_one,
+    main,
+    process_pending,
 )
 from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot
@@ -68,7 +76,11 @@ def _seed_auction_and_lot(
     session: AsyncSession,
     *,
     title: str = "2010 Ford F150",
-    description: str = "runs and drives, see carfax",
+    description: str = (
+        "Runs and drives. 280,000 km. Single owner since 2014. "
+        "Recent timing chain replacement at 250k. New tires, fresh oil change. "
+        "Some surface rust on rocker panels. See carfax in description."
+    ),
 ) -> tuple[Auction, AuctionLot]:
     a = Auction(
         source="test", source_auction_id="A1", url="https://x",
@@ -162,6 +174,61 @@ async def test_apply_to_lot_preserves_unknown_transmission_drivetrain(
 
 
 @pytest.mark.asyncio
+async def test_apply_to_lot_preserves_title_status_on_unknown(
+    session: AsyncSession,
+) -> None:
+    """Phase 3 review: re-enrichment with low confidence must not regress
+    a previously confident title_status='NORMAL' to 'UNKNOWN'."""
+    _, lot = _seed_auction_and_lot(session)
+    lot.title_status = "NORMAL"
+    session.add(lot)
+    await session.flush()
+
+    out = _enrichment()
+    out_with_unknown = out.model_copy(update={"title_status": "UNKNOWN"})
+    result = _EnrichmentResult(output=out_with_unknown, carfax_findings=None)
+    _apply_to_lot(lot, result, raw_carfax_url=None)
+    assert lot.title_status == "NORMAL"  # preserved
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_preserves_engine_on_unknown_string(
+    session: AsyncSession,
+) -> None:
+    """The schema has no Literal for `engine`; if the LLM returns the string
+    'unknown', we must treat it as 'preserve existing'."""
+    _, lot = _seed_auction_and_lot(session)
+    lot.engine = "5.4L V8"
+    session.add(lot)
+    await session.flush()
+
+    out = _enrichment()
+    out_unknown_engine = out.model_copy(update={
+        "normalized_vehicle": out.normalized_vehicle.model_copy(
+            update={"engine": "unknown"},
+        ),
+    })
+    result = _EnrichmentResult(output=out_unknown_engine, carfax_findings=None)
+    _apply_to_lot(lot, result, raw_carfax_url=None)
+    assert lot.engine == "5.4L V8"
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_overrides_description_quality_on_thin(
+    session: AsyncSession,
+) -> None:
+    """Cheap defense against the LLM rating a 50-char listing 'detailed'."""
+    _, lot = _seed_auction_and_lot(session, description="too short")
+    session.add(lot)
+    await session.flush()
+
+    out = _enrichment(description_quality="detailed")
+    result = _EnrichmentResult(output=out, carfax_findings=None)
+    _apply_to_lot(lot, result, raw_carfax_url=None)
+    assert lot.description_quality == "thin"
+
+
+@pytest.mark.asyncio
 async def test_apply_to_lot_attaches_carfax_findings(
     session: AsyncSession,
 ) -> None:
@@ -184,13 +251,7 @@ async def test_apply_to_lot_attaches_carfax_findings(
 
 
 def test_classify_failure_rate_limit_is_transient() -> None:
-    fake = MagicMock(spec=RateLimitError)
-    fake.__class__ = RateLimitError
     assert _classify_failure(RateLimitError.__new__(RateLimitError)) == "transient"
-
-
-def test_classify_failure_api_error_is_transient() -> None:
-    assert _classify_failure(APIError.__new__(APIError)) == "transient"
 
 
 def test_classify_failure_validation_is_permanent() -> None:
@@ -198,6 +259,37 @@ def test_classify_failure_validation_is_permanent() -> None:
         EnrichmentOutput.model_validate({"junk": True})
     except ValidationError as exc:
         assert _classify_failure(exc) == "permanent"
+
+
+def test_classify_failure_4xx_is_permanent() -> None:
+    """Phase 3 review must-fix: AuthenticationError / BadRequestError /
+    PermissionDeniedError are 4xx and the SDK does NOT retry them. Treat as
+    permanent so a revoked-key incident doesn't burn 3 attempt cycles."""
+    response_mock = MagicMock()
+    response_mock.status_code = 401
+    auth_err = AuthenticationError(
+        message="invalid key", response=response_mock, body=None,
+    )
+    assert _classify_failure(auth_err) == "permanent"
+
+    response_mock.status_code = 400
+    bad_req = BadRequestError(
+        message="bad request", response=response_mock, body=None,
+    )
+    assert _classify_failure(bad_req) == "permanent"
+
+    response_mock.status_code = 403
+    perm_err = PermissionDeniedError(
+        message="forbidden", response=response_mock, body=None,
+    )
+    assert _classify_failure(perm_err) == "permanent"
+
+
+def test_classify_failure_5xx_is_transient() -> None:
+    response_mock = MagicMock()
+    response_mock.status_code = 500
+    err = InternalServerError(message="boom", response=response_mock, body=None)
+    assert _classify_failure(err) == "transient"
 
 
 def test_classify_failure_unknown_is_transient() -> None:
@@ -217,9 +309,10 @@ def _patched_get_session(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncSession:
-    """Patch enricher's `get_session` to spawn a *new* nested session against
-    the test connection on every call. The outer transaction remains the test's
-    rolled-back-on-teardown txn; each fresh session creates its own savepoint.
+    """Patch enricher's `get_session` AND `get_session_maker` to spawn fresh
+    sessions against the test connection on every call. The outer transaction
+    remains the test's rolled-back-on-teardown txn; each fresh session
+    creates its own savepoint.
     """
     maker = session.info["maker"]
 
@@ -228,7 +321,11 @@ def _patched_get_session(
         async with maker() as s:
             yield s
 
+    def fake_get_session_maker() -> object:
+        return maker
+
     monkeypatch.setattr(enricher_mod, "get_session", fake_get_session)
+    monkeypatch.setattr(enricher_mod, "get_session_maker", fake_get_session_maker)
     return session
 
 
@@ -246,8 +343,8 @@ async def test_process_one_success_marks_done_and_pending_valuation(
     provider.model = "gpt-4o-mini"
     provider.describe = AsyncMock(return_value=_enrichment())
 
-    ok = await _process_one(lot.id, provider=provider)
-    assert ok is True
+    outcome = await _process_one(lot.id, provider=provider)
+    assert outcome == "done"
     await session.refresh(lot)
     assert lot.enrichment_status == EnrichmentStatus.DONE
     assert lot.valuation_status == ValuationStatus.PENDING
@@ -351,3 +448,124 @@ async def test_process_one_emits_valuation_pending_notify(
     await _process_one(lot.id, provider=provider)
 
     assert ("valuation_pending", str(lot.id)) in notified
+
+
+# ─── process_pending round trip ───
+
+
+@pytest.mark.asyncio
+async def test_process_pending_claims_and_processes(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: pending lots → claim_pending_ids → _process_one each →
+    NOTIFY. Phase 3 review must-fix #5."""
+    session = _patched_get_session
+    notified: list[tuple[str, str]] = []
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        notified.append((channel, payload))
+
+    monkeypatch.setattr(enricher_mod, "notify", fake_notify)
+    # Sequential claim loop in tests — savepoints can't safely fan out on a
+    # single shared connection. In production each coroutine pulls a separate
+    # pooled connection, so concurrency > 1 is parallel-safe.
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.openai_concurrency", 1,
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.enrichment_batch_size", 10,
+    )
+
+    a = Auction(
+        source="test", source_auction_id="A1", url="https://x",
+        canonical_url="https://x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    await session.flush()
+
+    expected_lot_count = 3
+    lots = [
+        AuctionLot(
+            auction_id=a.id, source_lot_id=f"L{i}",
+            url=f"https://x/lot/{i}", title=f"lot {i}",
+            description="x" * 200,  # > THIN_DESCRIPTION_BYTES
+        )
+        for i in range(expected_lot_count)
+    ]
+    session.add_all(lots)
+    await session.flush()
+    lot_ids = {lot.id for lot in lots}
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_enrichment())
+
+    n = await process_pending(provider)
+    assert n == expected_lot_count
+
+    # All three lots got the valuation_pending NOTIFY.
+    notified_payloads = {payload for ch, payload in notified if ch == "valuation_pending"}
+    assert {str(i) for i in lot_ids} <= notified_payloads
+
+
+@pytest.mark.asyncio
+async def test_process_pending_self_notifies_on_transient_leftover(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3 review must-fix: when transient failure leaves rows at PENDING,
+    self-NOTIFY enrichment_pending so the listener loop drains them without
+    waiting for the next worker restart."""
+    session = _patched_get_session
+    notified: list[tuple[str, str]] = []
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        notified.append((channel, payload))
+
+    monkeypatch.setattr(enricher_mod, "notify", fake_notify)
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.enrichment_max_attempts", 5,
+    )
+
+    a = Auction(
+        source="test", source_auction_id="A1", url="https://x",
+        canonical_url="https://x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    await session.flush()
+    lot = AuctionLot(
+        auction_id=a.id, source_lot_id="L1", url="https://x/lot/1",
+        title="t", description="x" * 200,
+    )
+    session.add(lot)
+    await session.flush()
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(side_effect=RuntimeError("transient blip"))
+
+    await process_pending(provider)
+
+    # Self-NOTIFY on enrichment_pending so the listen loop wakes up.
+    self_notifies = [n for n in notified if n[0] == "enrichment_pending"]
+    assert len(self_notifies) == 1
+
+
+# ─── main() fail-fast ───
+
+
+@pytest.mark.asyncio
+async def test_main_exits_when_openai_api_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3 design overlay #16: fail at startup, not on first lot."""
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.openai_api_key", "",
+    )
+    with pytest.raises(SystemExit, match="OPENAI_API_KEY not configured"):
+        await main()

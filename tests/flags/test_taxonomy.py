@@ -13,9 +13,9 @@ from carbuyer.flags.taxonomy import (
 # Phase 3 design overlay #23: taxonomies expanded post-deliberation. These
 # minimums are the as-shipped seed sizes; bumps must update the asserts so the
 # next reviewer can see the seed grew (or the diff justifies why it shrank).
-MIN_RED_FLAGS = 22
+MIN_RED_FLAGS = 26
 MIN_GREEN_FLAGS = 16
-MIN_SHOWSTOPPERS = 11
+MIN_SHOWSTOPPERS = 9
 MIN_DESIRABLE = 25
 MIN_CLASSIC = 25
 MIN_GOTCHAS = 27
@@ -99,10 +99,31 @@ def test_critical_red_flag_additions_present() -> None:
 def test_critical_showstopper_additions_present() -> None:
     keys = {f["flag"] for f in SHOWSTOPPER_TAXONOMY}
     for required in (
-        "vin_mismatch", "stolen_recovered", "no_title", "outstanding_lien",
-        "non_repairable_brand",
+        "vin_mismatch", "stolen_recovered", "no_title",
+        "non_repairable_brand", "engine_seized", "for_parts_only",
+        "flood_damage_total",
     ):
         assert required in keys, f"missing {required}"
+
+
+def test_salvage_outstanding_lien_lemon_buyback_are_red_not_showstopper() -> None:
+    """Phase 3 review: these aren't dispositive for flippers / wholesale
+    buyers / post-fix retail. Demoted to -4 red flags."""
+    show_keys = {f["flag"] for f in SHOWSTOPPER_TAXONOMY}
+    red_keys = {f["flag"] for f in RED_FLAG_TAXONOMY}
+    for f in ("salvage_not_rebuilt", "outstanding_lien", "lemon_law_buyback"):
+        assert f not in show_keys, f"{f} should not be a showstopper"
+        assert f in red_keys, f"{f} should be a red flag"
+    salvage = next(f for f in RED_FLAG_TAXONOMY if f["flag"] == "salvage_not_rebuilt")
+    assert salvage["weight"] == -4  # noqa: PLR2004 -- domain calibration
+
+
+def test_flood_damage_split_total_vs_partial() -> None:
+    show_keys = {f["flag"] for f in SHOWSTOPPER_TAXONOMY}
+    red_keys = {f["flag"] for f in RED_FLAG_TAXONOMY}
+    assert "flood_damage_total" in show_keys
+    assert "flood_damage_partial" in red_keys
+    assert "flood_damage" not in show_keys  # original generic removed
 
 
 def test_critical_green_flag_additions_present() -> None:

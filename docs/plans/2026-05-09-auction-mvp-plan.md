@@ -4419,6 +4419,38 @@ Four role-specialized reviews (senior dev / LLM eng, devops / SRE, auction-buyer
 
 27. **`OpenAIProvider` is an async context manager.** `__aenter__` returns `self`; `__aexit__` calls `await self.client.close()`. Worker uses `async with OpenAIProvider() as provider:`. Symmetric with how `Source` plugins are managed.
 
+**Post-implementation review (2026-05-09 second pass):**
+
+After three reviewers (senior dev / architect / domain) audited the merged Phase 3 code, the following follow-ups landed in a final review-fix commit:
+
+28. **`is_no_reserve` derivation was inverted.** `lot.reserve_met is False` means "reserve set, not yet met" — the *opposite* of "no reserve". Until Phase 7 bid-poller surfaces a real `is_no_reserve` signal, hardcoded to `False` (honest unknown).
+
+29. **`_classify_failure` retried 4xx auth/badreq as transient.** OpenAI's 4xx (Authentication, BadRequest, PermissionDenied, NotFound, UnprocessableEntity) all subclass `APIStatusError`; the SDK does not retry them. Now classified as permanent so a revoked-key incident doesn't burn 3 attempt cycles per lot. `LengthFinishReasonError` (model hit `max_tokens` mid-JSON) also classified permanent.
+
+30. **`title_status` and `engine` re-enrichment regression preserved.** `title_status="UNKNOWN"` and `engine="unknown"` now skip the write — same idiom as transmission/drivetrain. Previously a low-confidence re-run could clobber a known-good `NORMAL` to `UNKNOWN`.
+
+31. **`description_quality` post-validation guard.** If the model says "detailed" on a 50-char listing, the worker overrides to "thin" based on `len(description) < 100` (matches the prompt's boundary).
+
+32. **Showstoppers re-categorized to heavy red flags (-4):** `salvage_not_rebuilt`, `outstanding_lien`, `lemon_law_buyback` are no longer dispositive exclusions — flippers want salvage deals; auction houses pay liens at sale; lemon-buybacks post-fix are common. They remain heavy red flags so cumulative-score-threshold logic in Phase 4 can still exclude them when that's the right call.
+
+33. **`flood_damage` split into `flood_damage_total` (showstopper) and `flood_damage_partial` (-3 red).** Waterline-above-seats is dispositive; rear floor wet is a $500 dryer rental.
+
+34. **Per-showstopper trigger phrasing in prompt.** Each showstopper entry now spells out the trigger phrasing the LLM should require ("frame is bent", "engine seized", "flood title brand"). Without this, the over-fire rate on showstoppers was the dominant Phase 3 quality risk.
+
+35. **Self-NOTIFY when leaving lots PENDING after transient failure.** Without this, transient-failed rows wait until next worker restart's catchup sweep (24h+ in low-throughput periods). `process_pending` now emits `pg_notify('enrichment_pending', '')` when any of its claimed lots ended up back at PENDING.
+
+36. **Land Cruiser classic-exception split.** 80-series (1990-1997) is solid front axle; 100-series (1998-2007) has IFS (independent front suspension) — the original entry conflated them. Now two entries.
+
+37. **Test coverage added for `process_pending` end-to-end + fail-fast on empty `OPENAI_API_KEY` + 4xx/5xx classifier partition.** Phase 4/6/8 worker tests will follow the same `_patched_get_session` fixture pattern; `tests/conftest.py` now exposes `session.info["maker"]` for nested-session simulation.
+
+**Plan updates required for downstream phases (deferred but documented):**
+
+- **Phase 4 plan (Tasks 25-30) must consume `description_quality` and `condition_inferred_from_sparse_listing`.** Phase 3 ships these columns specifically to feed Phase 4's sparse-listing pessimism penalty (overlay #15 / #25). The current Phase 4 plan code blocks make zero reference to either column — Phase 4 will need a follow-up overlay.
+
+- **Phase 8 plan (Task 37) must use `client.chat.completions.parse` (GA), not `client.beta.chat.completions.parse`.** The Phase 3 overlay made this binding for Phase 3 but the Phase 8 plan still references the legacy path.
+
+- **`_parse_to` helper signature mismatch with Phase 8 vision.** Phase 3 overlay #8 promised `_parse_to(model_cls, messages, max_tokens)` reusable by Phase 8. Implementation took `system: str, user: str` instead. Phase 8 will need to either refactor `_parse_to` to take `messages` (list-of-content-parts for image inputs) or replicate the usage-logging block.
+
 **Deferred (acknowledged):**
 
 - **`llm_cost_ledger` table + daily-budget aborting guard.** Devops review wanted a cost ledger row per call and an `assert_under_budget` check that raises `BudgetExceeded` near a daily ceiling. For MVP the per-call usage log (decision #11) gives the data; an aggregating dashboard query is enough. Adding a ledger table commits to a schema before we know the actual call patterns. Revisit when first OpenAI bill arrives or Phase 8 (vision, ~10x cost per call) lands.
