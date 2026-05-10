@@ -63,6 +63,12 @@ def test_render_early_warning() -> None:
     text = render_early_warning_text(_early_warning_data())
     assert "RARE FIND" in text
     assert "Land Cruiser" in text
+    assert "u" in text  # url appears in output (d.url from fixture)
+
+
+def test_render_early_warning_url_appended() -> None:
+    text = render_early_warning_text(_early_warning_data(url="https://example.com/lot/42"))
+    assert text.endswith("https://example.com/lot/42")
 
 
 def test_render_early_warning_no_bid_no_comps() -> None:
@@ -82,7 +88,7 @@ def test_render_early_warning_no_bid_no_comps() -> None:
 
 def test_render_going_cheap_includes_margin() -> None:
     d = LotEmbedData(
-        lot_id=2, url="u", title="t",
+        lot_id=2, url="https://example.com/lot/2", title="t",
         year=2018, make="Toyota", model="Tacoma", trim="TRD Off-Road",
         location="Saskatoon, SK",
         current_high_bid_cad=Decimal("14500"),
@@ -97,6 +103,7 @@ def test_render_going_cheap_includes_margin() -> None:
     text = render_going_cheap_text(d)
     assert "Going cheap" in text
     assert "$6,600" in text  # margin
+    assert "https://example.com/lot/2" in text  # url appended
 
 
 def test_render_going_cheap_suspicious_underprice() -> None:

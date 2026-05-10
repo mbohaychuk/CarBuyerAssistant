@@ -14,8 +14,14 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from decimal import Decimal
+
 from carbuyer.apps.notifier import notifier as notifier_mod
-from carbuyer.apps.notifier.notifier import _process_one, process_pending
+from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+    _embed_data,
+    _process_one,
+    process_pending,
+)
 from carbuyer.db.enums import NotificationStatus
 from carbuyer.db.models import Auction, AuctionLot
 
@@ -362,3 +368,127 @@ async def test_process_pending_claims_and_processes(
     for lot in lots:
         await session.refresh(lot)
         assert lot.notification_status == NotificationStatus.DONE
+
+
+# ─── already-notified guard regression ───
+
+
+@pytest.mark.asyncio
+async def test_process_one_already_notified_early_warning_skips(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When early_warning_notified_at is already set, early_warning must not fire again."""
+    session = _patched_get_session
+    far_end = datetime(2026, 6, 10, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        rarity_score=3.0,
+        price_deal_score=0.05,
+        confidence_bucket="high",
+        flag_score=0,
+        user_action=None,
+        scheduled_end_at=far_end,
+        # Pre-stamp: already notified once.
+        early_warning_notified_at=datetime.now(UTC),
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    posted_calls: list[object] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        posted_calls.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"early_warning": 12345},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+
+    # Guard fires → no triggers → SKIPPED, no post.
+    assert outcome == "skipped"
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.SKIPPED
+    assert not posted_calls
+
+
+@pytest.mark.asyncio
+async def test_process_one_already_notified_cheap_skips(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When cheap_notified_at is already set, going_cheap must not fire again."""
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.30,
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        # Pre-stamp: already notified once.
+        cheap_notified_at=datetime.now(UTC),
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    posted_calls: list[object] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        posted_calls.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+
+    assert outcome == "skipped"
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.SKIPPED
+    assert not posted_calls
+
+
+# ─── _embed_data desirability_signals fallback ───
+
+
+@pytest.mark.asyncio
+async def test_embed_data_desirability_signals_used_when_present(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """desirability_signals takes priority over green_flags for top_green_flags."""
+    session = _patched_get_session
+    auction, lot = _seed_lot(session)
+    lot.desirability_signals = ["original-paint"]
+    lot.green_flags = [{"flag": "X"}]
+    await session.flush()
+
+    data = _embed_data(lot, auction)
+    assert data.top_green_flags == ("original-paint",)
+
+
+@pytest.mark.asyncio
+async def test_embed_data_green_flags_fallback_when_desirability_signals_empty(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """When desirability_signals is empty, green_flags provides top_green_flags."""
+    session = _patched_get_session
+    auction, lot = _seed_lot(session)
+    lot.desirability_signals = []
+    lot.green_flags = [{"flag": "sport-tuned suspension"}]
+    await session.flush()
+
+    data = _embed_data(lot, auction)
+    assert data.top_green_flags == ("sport-tuned suspension",)
