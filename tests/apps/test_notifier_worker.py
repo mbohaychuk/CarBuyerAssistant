@@ -256,6 +256,57 @@ async def test_process_one_missing_lot_returns_missing(
     assert outcome == "missing"
 
 
+@pytest.mark.asyncio
+async def test_process_one_fires_early_warning(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lot with high rarity + close far out → early_warning fires → DONE."""
+    session = _patched_get_session
+    # rarity_score above threshold (2.0), scheduled_end_at 72 h out (>= 48 h).
+    far_end = datetime(2026, 6, 10, tzinfo=UTC)  # well beyond 48 h from test run
+    _, lot = _seed_lot(
+        session,
+        rarity_score=3.0,
+        # price_deal_score below notify_threshold (0.15) so going_cheap won't fire.
+        price_deal_score=0.05,
+        confidence_bucket="high",
+        flag_score=0,
+        user_action=None,
+        scheduled_end_at=far_end,
+        early_warning_notified_at=None,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    posted_calls: list[tuple[int, str, int]] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        posted_calls.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"early_warning": 12345},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "done"
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.DONE
+    assert lot.early_warning_notified_at is not None
+    assert lot.last_notified_channel == "early_warning"
+    _early_warning_channel_id = 12345
+    assert len(posted_calls) == 1
+    assert posted_calls[0][0] == _early_warning_channel_id  # correct channel id
+    assert posted_calls[0][2] == lot.id
+
+
 # ─── process_pending ───
 
 

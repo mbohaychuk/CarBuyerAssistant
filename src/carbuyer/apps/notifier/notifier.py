@@ -76,7 +76,8 @@ def _embed_data(lot: AuctionLot, auction: Auction) -> LotEmbedData:
         condition_categorical=lot.condition_categorical,
         top_red_flags=tuple([f.get("flag", "") for f in (lot.red_flags or [])][:3]),
         top_green_flags=tuple(
-            (lot.desirability_signals or [f.get("flag", "") for f in (lot.green_flags or [])])[:3]
+            (lot.desirability_signals or [])[:3]
+            or [f.get("flag", "") for f in (lot.green_flags or [])][:3]
         ),
         suspicious_underprice=lot.suspicious_underprice_flag,
         scheduled_end_at=auction.scheduled_end_at,
@@ -100,7 +101,7 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     }.get(trigger)
 
 
-async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> str:
+async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> str:  # noqa: PLR0912
     """Process one claimed lot end-to-end.
 
     Returns:
@@ -135,6 +136,8 @@ async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> s
             row = await s.get(AuctionLot, lot_id)
             if row is not None:
                 row.notification_status = NotificationStatus.SKIPPED
+            else:
+                log.warning("lot vanished before SKIPPED write", lot_id=lot_id)
         return "skipped"
 
     data = _embed_data(lot, auction)
@@ -181,6 +184,12 @@ async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> s
             if last_channel is not None:
                 row.last_notified_channel = last_channel
             row.notification_status = NotificationStatus.DONE
+        else:
+            log.error(
+                "lot vanished after posts; timestamps lost"
+                " — duplicate notification possible on recovery",
+                lot_id=lot_id,
+            )
     return "done"
 
 
@@ -188,6 +197,9 @@ async def process_pending(*, http_session: aiohttp.ClientSession) -> int:
     """Claim a batch of pending lots, process each in its own transaction.
 
     Returns the count of lots claimed (not successes — skips count too).
+
+    Sequential by design — Discord rate limits apply per-bot globally across all
+    channels; concurrent posts would race the rate limit instantly.
     """
     sm = get_session_maker()
     async with sm() as claim_session, claim_session.begin():
