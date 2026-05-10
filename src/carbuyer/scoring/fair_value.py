@@ -7,7 +7,7 @@ via the channel multiplier, trim mileage outliers (>2 sd), then derive:
 - ``value_low``  = p10 of the normalized population
 - ``value_mid``  = p50 (median)
 - ``value_high`` = p90
-- ``expected_value`` = p10 + condition_position × (p90 − p10)
+- ``expected_value`` = p10 + condition_position * (p90 - p10)
 
 Confidence buckets are coarse on purpose — the consuming dashboard renders
 them as colored badges, not numerical CIs.
@@ -16,24 +16,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from statistics import median, quantiles
 
 from carbuyer.scoring.channels import condition_position, normalize_to_private
 from carbuyer.scoring.comps import ComparableSale
 
 # Below this many trimmed comps, the fair value is too noisy to use; the
-# valuator records the count and signals INSUFFICIENT_COMPS.
+# valuator records the count and signals INSUFFICIENT.
 INSUFFICIENT_COMPS_THRESHOLD = 5
 # At or above this many trimmed comps, confidence is HIGH. Ten is enough to
 # get real deciles out of statistics.quantiles(n=10).
 HIGH_CONFIDENCE_MIN_COMPS = 10
-# z-score threshold for mileage trimming. ≤2 sd keeps the bulk; >2 sd is the
+# z-score threshold for mileage trimming. <=2 sd keeps the bulk; >2 sd is the
 # stale-fleet outlier that pulls the mean down.
 MILEAGE_OUTLIER_SD = 2.0
+# Below this many comps the trim function does nothing (too few points to
+# meaningfully estimate variance).
+MIN_COMPS_FOR_OUTLIER_TRIM = 4
 
 
-class ConfidenceBucket(str, Enum):
+class ConfidenceBucket(StrEnum):
     INSUFFICIENT = "insufficient"
     MEDIUM = "medium"
     HIGH = "high"
@@ -51,10 +54,10 @@ class FairValue:
 
 def _trim_mileage_outliers(comps: list[ComparableSale]) -> list[ComparableSale]:
     """Drop comps whose mileage is more than ``MILEAGE_OUTLIER_SD`` away from
-    the mean. With <4 comps the trimming is meaningless; pass through.
-    Comps with no mileage are kept unconditionally — they aren't outliers in
-    a way we can measure."""
-    if len(comps) < 4:
+    the mean. With fewer than ``MIN_COMPS_FOR_OUTLIER_TRIM`` comps the
+    trimming is meaningless; pass through. Comps with no mileage are kept
+    unconditionally — they aren't outliers in a way we can measure."""
+    if len(comps) < MIN_COMPS_FOR_OUTLIER_TRIM:
         return comps
     miles = [float(c.mileage_km) for c in comps if c.mileage_km is not None]
     if not miles:

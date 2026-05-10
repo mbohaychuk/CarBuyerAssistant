@@ -47,7 +47,7 @@ async def test_build_comp_set_filters_make_model_year_mileage(
         session, make="Toyota", model="Tacoma", trim="TRD Off-Road",
         year=2015, mileage_km=150000, year_window=1, mileage_pct=0.20,
     )
-    assert len(comps) == 2
+    assert len(comps) == 2  # noqa: PLR2004
     assert all(isinstance(c, ComparableSale) for c in comps)
     assert all(c.source == "historical_sales" for c in comps)
 
@@ -69,7 +69,7 @@ async def test_build_comp_set_trim_filter_includes_null_trims(
         session, make="Toyota", model="Tacoma", trim="TRD Off-Road",
         year=2015, mileage_km=150000,
     )
-    assert len(comps) == 2
+    assert len(comps) == 2  # noqa: PLR2004
 
 
 @pytest.mark.asyncio
@@ -86,7 +86,7 @@ async def test_build_comp_set_no_trim_argument_skips_filter(
         session, make="Toyota", model="Tacoma", trim=None,
         year=2015, mileage_km=150000,
     )
-    assert len(comps) == 3
+    assert len(comps) == 3  # noqa: PLR2004
 
 
 @pytest.mark.asyncio

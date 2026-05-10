@@ -21,7 +21,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Final
 
-
 CHANNEL_MULTIPLIERS: Final[dict[str, Decimal]] = {
     "private": Decimal("1.00"),
     "dealer": Decimal("0.92"),

@@ -14,7 +14,6 @@ from carbuyer.scoring.score import (
     recommended_max_bid,
 )
 
-
 # ─── all_in_cost ───
 
 
@@ -43,7 +42,7 @@ def test_price_deal_score_positive_when_underpriced() -> None:
         expected_value=Decimal("18000"),
     )
     # all_in = 12050; (18000 - 12050) / 18000 ≈ 0.3306
-    assert 0.32 < s < 0.34
+    assert 0.32 < s < 0.34  # noqa: PLR2004
 
 
 def test_price_deal_score_negative_when_overpriced() -> None:
@@ -79,7 +78,7 @@ def test_rarity_low_comp_count_with_desirable_yields_three() -> None:
         historical_comp_count=1, recent_appreciation=None,
     ))
     # 2.0 (low+desirable) + 1.0 (desirable_trim) = 3.0
-    assert s == 3.0
+    assert s == 3.0  # noqa: PLR2004
 
 
 def test_rarity_low_comp_count_undesirable_yields_zero() -> None:
@@ -96,7 +95,7 @@ def test_rarity_classic_with_appreciation_caps_at_five() -> None:
         historical_comp_count=1, recent_appreciation=0.20,
     ))
     # 2.0 (low+desirable) + 1.5 (classic) + 1.0 (desirable_trim) + 1.0 (appreciation) = 5.5 → cap 5
-    assert s == 5.0
+    assert s == 5.0  # noqa: PLR2004
 
 
 def test_rarity_high_comp_count_no_low_bonus() -> None:
@@ -122,7 +121,7 @@ def test_recommended_max_bid_backs_out_margin() -> None:
     )
     # target_all_in = 18000; (18000 - 500) / (1.10 * 1.05) = 17500 / 1.155
     assert bid is not None
-    assert 15140 < float(bid) < 15165
+    assert 15140 < float(bid) < 15165  # noqa: PLR2004
 
 
 def test_recommended_max_bid_returns_none_when_margin_exceeds_value() -> None:
@@ -153,12 +152,12 @@ def test_flag_score_clipped_to_minus_five() -> None:
         {"flag": "transmission_slipping", "weight": -3},
         {"flag": "frame_rust", "weight": -3},
     ]
-    assert flag_score(red, []) == -5
+    assert flag_score(red, []) == -5  # noqa: PLR2004
 
 
 def test_flag_score_clipped_to_plus_five() -> None:
     green = [{"flag": "no_accidents_carfax", "weight": 2}] * 4  # +8 → clip 5
-    assert flag_score([], green) == 5
+    assert flag_score([], green) == 5  # noqa: PLR2004
 
 
 def test_flag_score_thin_description_caps_floor_at_minus_two() -> None:
@@ -173,7 +172,7 @@ def test_flag_score_thin_description_caps_floor_at_minus_two() -> None:
 
 def test_flag_score_thin_description_does_not_clip_positive() -> None:
     green = [{"flag": "no_accidents_carfax", "weight": 2}]
-    assert flag_score([], green, description_quality="thin") == 2
+    assert flag_score([], green, description_quality="thin") == 2  # noqa: PLR2004
 
 
 def test_flag_score_dilution_cap_when_many_light_reds() -> None:
@@ -197,7 +196,7 @@ def test_flag_score_dilution_cap_does_not_apply_at_threshold() -> None:
         {"flag": "winter_tires_only", "weight": -1},
         {"flag": "mileage_unknown", "weight": -1},
     ]
-    assert flag_score(red, []) == -3
+    assert flag_score(red, []) == -3  # noqa: PLR2004
 
 
 def test_flag_score_heavy_reds_still_count_with_dilution_cap() -> None:
@@ -211,7 +210,7 @@ def test_flag_score_heavy_reds_still_count_with_dilution_cap() -> None:
         {"flag": "engine_knock", "weight": -3},
     ]
     # light_red_sum capped at -2; heavy = -3; sum = -5; clip -5 floor.
-    assert flag_score(red, []) == -5
+    assert flag_score(red, []) == -5  # noqa: PLR2004
 
 
 def test_flag_score_dilution_cap_with_offsetting_greens() -> None:
@@ -222,6 +221,6 @@ def test_flag_score_dilution_cap_with_offsetting_greens() -> None:
 
 
 def test_flag_score_constants_are_consistent() -> None:
-    assert LIGHT_RED_DILUTION_THRESHOLD == 3
-    assert LIGHT_RED_DILUTION_CAP == -2
-    assert THIN_DESCRIPTION_FLAG_FLOOR == -2
+    assert LIGHT_RED_DILUTION_THRESHOLD == 3  # noqa: PLR2004
+    assert LIGHT_RED_DILUTION_CAP == -2  # noqa: PLR2004
+    assert THIN_DESCRIPTION_FLAG_FLOOR == -2  # noqa: PLR2004
