@@ -26,7 +26,7 @@ from carbuyer.shared.logging import get_logger
 log = get_logger("bot")
 
 
-def make_intents() -> discord.Intents:
+def _intents() -> discord.Intents:
     intents = discord.Intents.none()
     intents.guilds = True
     return intents
@@ -34,7 +34,7 @@ def make_intents() -> discord.Intents:
 
 class CarbuyerBot(commands.Bot):
     def __init__(self) -> None:
-        super().__init__(command_prefix="!", intents=make_intents())
+        super().__init__(command_prefix="!", intents=_intents())
 
     async def setup_hook(self) -> None:
         self.add_dynamic_items(
@@ -60,6 +60,12 @@ async def post_to_channel(
             await channel.send(content=content)
         else:
             await channel.send(content=content, view=view)
+    else:
+        log.warning(
+            "channel is not a TextChannel; message dropped",
+            channel_id=channel_id,
+            channel_type=type(channel).__name__,
+        )
 
 
 async def main() -> None:

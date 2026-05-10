@@ -21,8 +21,12 @@ import discord
 from discord import ButtonStyle, Interaction
 from discord.ui import DynamicItem, View
 
+from carbuyer.db.enums import UserAction
 from carbuyer.db.models import AuctionLot
 from carbuyer.db.session import get_session
+from carbuyer.shared.logging import get_logger
+
+log = get_logger("bot")
 
 
 class LotActionView(View):
@@ -30,11 +34,18 @@ class LotActionView(View):
         super().__init__(timeout=None)
 
 
-async def _set_user_action(lot_id: int, action: str) -> None:
+async def _set_user_action(lot_id: int, action: UserAction) -> bool:
     async with get_session() as session, session.begin():
         lot = await session.get(AuctionLot, lot_id)
-        if lot is not None:
-            lot.user_action = action
+        if lot is None:
+            log.warning(
+                "user_action write skipped — lot not found",
+                lot_id=lot_id,
+                action=action,
+            )
+            return False
+        lot.user_action = action
+        return True
 
 
 class LotInterestedButton(
@@ -63,10 +74,13 @@ class LotInterestedButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        await _set_user_action(self.lot_id, "interested")
-        await interaction.followup.send(
-            f"Marked lot {self.lot_id} as interested.", ephemeral=True,
+        ok = await _set_user_action(self.lot_id, UserAction.INTERESTED)
+        msg = (
+            f"Marked lot {self.lot_id} as interested."
+            if ok
+            else f"Lot {self.lot_id} not found."
         )
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class LotMaybeButton(
@@ -95,10 +109,13 @@ class LotMaybeButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        await _set_user_action(self.lot_id, "maybe")
-        await interaction.followup.send(
-            f"Marked lot {self.lot_id} as maybe.", ephemeral=True,
+        ok = await _set_user_action(self.lot_id, UserAction.MAYBE)
+        msg = (
+            f"Marked lot {self.lot_id} as maybe."
+            if ok
+            else f"Lot {self.lot_id} not found."
         )
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class LotNotInterestedButton(
@@ -127,10 +144,13 @@ class LotNotInterestedButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        await _set_user_action(self.lot_id, "not_interested")
-        await interaction.followup.send(
-            f"Marked lot {self.lot_id} as not interested.", ephemeral=True,
+        ok = await _set_user_action(self.lot_id, UserAction.NOT_INTERESTED)
+        msg = (
+            f"Marked lot {self.lot_id} as not interested."
+            if ok
+            else f"Lot {self.lot_id} not found."
         )
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 def build_view_for_lot(lot_id: int) -> View:
