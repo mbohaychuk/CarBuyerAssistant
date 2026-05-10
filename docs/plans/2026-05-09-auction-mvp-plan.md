@@ -6401,6 +6401,47 @@ git commit -m "apps: valuator worker (comp set + scoring)"
 
 ---
 
+### Phase 4 — Post-implementation overlay (2026-05-09)
+
+Captured during Task 25-30 implementation; folded back here so future readers don't redo the analysis.
+
+**Schema deltas (folded into migration `1d58e4b5021c`):**
+
+1. **`valuation_attempts INTEGER NOT NULL DEFAULT 0`** added per pre-implementation overlay #6. Separate per-stage retry counter so failure modes are diagnosable from the row state alone.
+2. **`last_valuation_error TEXT NULL`** added — mirror of `last_enrichment_error`. Truncated to 500 chars at write time so a stack-trace explosion can't blow the row size.
+
+**Enum deltas (`carbuyer.db.enums.ValuationStatus`):**
+
+3. **`INSUFFICIENT_COMPS` → `INSUFFICIENT`.** The original enum value (18 chars) didn't fit the `String(16)` status column. Renamed to keep the column narrow rather than widening every status column for one new value. Semantically identical.
+4. **`SKIPPED` added.** The valuator needs a "tried, can't proceed" terminal state distinct from `FAILED` (transient retry exhausted) and `INSUFFICIENT` (comp set too thin). Fires when `make`/`model`/`year` is missing, which means the enricher never normalized the row — a valuator failure mode that's not the valuator's fault.
+
+**Settings deltas (`carbuyer.shared.config.Settings`):**
+
+5. **`valuation_batch_size: int = 30`** + **`valuation_max_attempts: int = 3`**. Mirror of the enrichment counterparts; valuator does no LLM I/O so larger batches are fine.
+6. **`excessive_red_flag_weight_threshold: int = -8`** (overlay #12). Heuristic; revisit after first 100 lots. Implementation reads `cumulative_flag_weight(red, green)` (raw pre-clip / pre-dilution-cap sum) and sets `notification_status = SKIPPED` when at or below the threshold.
+7. **`scoring_version: str = "v1"`** as a setting rather than a module-level constant so a backfill can re-pend stale rows via env override without a code deploy.
+
+**Algorithmic decisions:**
+
+8. **`flag_score` overlay #11 dilution cap interpretation.** Picked "cap mag-1 red contribution at `-2` when more than 3 fire" (vs. "drop entirely" or "rebaseline floor at -3"). Heavy reds (`|w| >= 2`) and all greens add normally on top; description-quality `"thin"` floor stacks via `max(floor, …)` after the cap. Final clip to `[-5, 5]`. Choice rationale: the literal "-2 cap" wording in the overlay matches this; it preserves the ability for genuine evidence to score lower while neutering the RB-context-flag pile-up.
+9. **`cumulative_flag_weight()` exposed as a separate helper** (`carbuyer.scoring.score`). The dilution-cap and clipping happen in `flag_score()` for display; the notifier-skip check needs the raw sum so the two responsibilities are split into two functions instead of overloading one.
+10. **`HIGH_CONFIDENCE_MIN_COMPS = 10`** in `compute_fair_value` (vs. plan's 15). Ten is the threshold where `statistics.quantiles(n=10)` yields real deciles; the plan-block's 15 was inconsistent with the plan-block's own test which expected HIGH at 10.
+11. **`ConfidenceBucket` is `StrEnum`**, not `class X(str, Enum)` — UP042 hint and matches `db.enums` style.
+12. **`value_one()` runs comp query + write in a single transaction.** Pre-implementation overlay #2 said "split if duration ever exceeds `idle_in_transaction_session_timeout=60s`." MVP comp counts are small (low thousands per make/model); current measured query time is sub-millisecond. Will split if production load shows otherwise.
+13. **`process_pending()` is sequential, not concurrent.** Valuator workload is DB-bound, not network-bound; SKIP-LOCKED across one pool gives no real win at MVP scale. If throughput becomes a problem we add a Semaphore-bounded `gather` like the enricher.
+
+**Plan code corrections (vs. the literal Task 30 code blocks):**
+
+14. **`claim_pending_lots` → `claim_pending_ids`** (returns `list[int]`, not ORM rows). Matches what actually exists in `db.queue`.
+15. **`async_session_maker` → `get_session_maker()` / `get_session()`.** Same renaming as Phase 3 had.
+16. **StrEnum status writes everywhere** (`ValuationStatus.DONE` etc.) instead of plan's bare strings.
+17. **Sparse + description_quality threading wired** (`compute_fair_value(..., sparse=lot.condition_inferred_from_sparse_listing)` and `flag_score(..., description_quality=lot.description_quality)`). Plan code consumed neither — the overlay flagged this.
+18. **`notification_status` decision in valuator** (showstopper / cumulative <= -8 → `SKIPPED`; insufficient comps → `SKIPPED`; otherwise `PENDING`). Plan code unconditionally set `pending`.
+
+End of post-implementation overlay.
+
+---
+
 End of Phase 4. Lots are now scored with `price_deal_score`, `rarity_score`, `recommended_max_bid`, and `confidence_bucket`. `notification_pending` fires next.
 
 ---
