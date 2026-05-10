@@ -14,8 +14,6 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from decimal import Decimal
-
 from carbuyer.apps.notifier import notifier as notifier_mod
 from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
     _embed_data,
