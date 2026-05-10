@@ -47,6 +47,13 @@ class CarbuyerBot(commands.Bot):
         else:
             await self.tree.sync()
 
+    async def on_ready(self) -> None:
+        log.info(
+            "bot ready",
+            user=str(self.user),
+            guild_count=len(self.guilds),
+        )
+
 
 async def post_to_channel(
     bot: CarbuyerBot,
@@ -60,6 +67,11 @@ async def post_to_channel(
             await channel.send(content=content)
         else:
             await channel.send(content=content, view=view)
+        log.info(
+            "message posted",
+            channel_id=channel_id,
+            content_len=len(content),
+        )
     else:
         log.warning(
             "channel is not a TextChannel; message dropped",
