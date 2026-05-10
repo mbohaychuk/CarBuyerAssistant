@@ -19,7 +19,11 @@ class ValuationStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     DONE = "done"
     FAILED = "failed"
-    INSUFFICIENT_COMPS = "insufficient_comps"
+    SKIPPED = "skipped"
+    # Distinct from FAILED: the comp set was too thin to compute a fair value.
+    # Shortened to fit the String(16) status columns (avoids a column-widen
+    # migration just for a status value name).
+    INSUFFICIENT = "insufficient"
 
 
 class VisionStatus(StrEnum):
