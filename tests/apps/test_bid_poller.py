@@ -66,7 +66,6 @@ def _seed_lot(
         lot_status=lot_status,
         current_high_bid_cad=current_high_bid_cad,
     )
-    session.add(lot)
     return a, lot
 
 
@@ -285,3 +284,40 @@ async def test_poll_one_poll_raises_logs_and_does_not_write(
     await session.refresh(lot)
 
     assert lot.current_high_bid_cad == original_bid  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_poll_one_happy_path_writes_observation(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Success path: poller returns observation → lot bid updated + history row written."""
+    session = _patched_get_session
+    _, lot = _seed_lot(session, current_high_bid_cad=Decimal("400.00"))
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    notified: list[tuple[str, str]] = []
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        notified.append((channel, payload))
+
+    monkeypatch.setattr(poller_mod, "notify", fake_notify)
+
+    obs = _obs(bid=Decimal("500.00"), status="open")
+    pollers: dict[str, BidPoller] = {"hibid": _FakePoller(obs)}
+    ref = _make_ref()
+
+    await _poll_one(lot_id, ref, pollers=pollers)
+    await session.refresh(lot)
+
+    assert lot.current_high_bid_cad == Decimal("500.00")
+
+    stmt = select(AuctionBidHistory).where(AuctionBidHistory.lot_id == lot_id)
+    rows = (await session.execute(stmt)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].current_high_bid_cad == Decimal("500.00")
+    assert rows[0].status_at_observation == "open"
+
+    assert notified == [("valuation_pending", str(lot_id))]

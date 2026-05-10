@@ -155,9 +155,13 @@ async def _write_observation(lot_id: int, obs: BidObservation) -> None:
                 lot.closed_at = datetime.now(UTC)
                 lot.final_bid_cad = lot.current_high_bid_cad
         elif obs.status_at_observation == "closed":
-            lot.lot_status = LotStatus.CLOSED
-            lot.closed_at = datetime.now(UTC)
-            lot.final_bid_cad = obs.current_high_bid_cad
+            # Match the "missing" branch's idempotency — if the filter ever
+            # changes, two consecutive "closed" observations should not bump
+            # closed_at.
+            if lot.lot_status != LotStatus.CLOSED:
+                lot.lot_status = LotStatus.CLOSED
+                lot.closed_at = datetime.now(UTC)
+                lot.final_bid_cad = obs.current_high_bid_cad
 
 
 async def _poll_one(
@@ -181,6 +185,13 @@ async def _poll_one(
 
 
 async def main() -> None:
+    """Entry point for the bid-poller worker process.
+
+    Verifies every plugin in _REGISTERED_PLUGINS self-registered at import,
+    then enters each BidPoller via AsyncExitStack so HTTP clients are
+    initialised. Runs a while-True loop: load open lots into fast/slow buckets,
+    poll each, sleep 30s, repeat.
+    """
     for name in _REGISTERED_PLUGINS:
         if name not in SOURCES:
             raise RuntimeError(f"plugin {name!r} failed to self-register at import")
