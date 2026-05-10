@@ -6,10 +6,10 @@ table is intentionally small and deterministic — Phase 6's notifier worker
 calls this once per trigger; everything else (rate limiting, idempotency,
 embed building) lives elsewhere.
 
-The 0.20 deal-score cutoff for ``going_cheap`` matches the
-``DEAL_SCORE_HOT_THRESHOLD`` semantics used by the valuator: above it the
-margin is meaningful enough to warrant a hot-deals ping; below it we still
-publish to the watchlist for transparency.
+The 0.20 deal-score cutoff (``HOT_DEAL_SCORE_THRESHOLD``) splits
+notify-eligible ``going_cheap`` deals into ``hot_deals`` (>= threshold) and
+``watchlist`` (< threshold). This is independent of ``settings.notify_threshold``,
+which controls whether the ``going_cheap`` notification fires at all.
 """
 from __future__ import annotations
 

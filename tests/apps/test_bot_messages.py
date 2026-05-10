@@ -137,3 +137,5 @@ def test_render_going_cheap_handles_missing_pricing() -> None:
     assert "no bid" in text
     # Margin line should not appear when pricing is missing.
     assert "Margin" not in text
+    # None-valued optional fields must render as "?" rather than the literal "None".
+    assert "None" not in text
