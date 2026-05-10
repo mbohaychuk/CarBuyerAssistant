@@ -224,6 +224,16 @@ class AuctionLot(Base, TimestampMixin):
         Integer, server_default=text("0"), nullable=False,
     )
     last_enrichment_error: Mapped[str | None] = mapped_column(Text)
+    # Phase 4 overlay #6: separate per-stage retry counter so failure modes are
+    # diagnosable. Same idiom as enrichment_attempts — exceptions inside the
+    # valuator increment this; status returns to PENDING for re-claim until
+    # attempts >= settings.valuation_max_attempts; bad-shape lots (no
+    # make/model/year) skip directly via valuation_status='skipped' without
+    # consuming an attempt.
+    valuation_attempts: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), nullable=False,
+    )
+    last_valuation_error: Mapped[str | None] = mapped_column(Text)
     # Inferred-from-sparse-listing flag: when condition_confidence < 0.5 the
     # enricher coerces condition_categorical to "decent" but sets this True so
     # Phase 4 valuation can apply a separate sparse-listing pessimism penalty
