@@ -36,6 +36,7 @@ class VisionStatus(StrEnum):
 
 class NotificationStatus(StrEnum):
     PENDING = "pending"
+    IN_PROGRESS = "in_progress"
     DONE = "done"
     SKIPPED = "skipped"
 
