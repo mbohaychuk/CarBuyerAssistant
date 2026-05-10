@@ -113,6 +113,64 @@ async def _historical_comp_count(session: AsyncSession, *, make: str, model: str
     return (await session.execute(stmt)).scalar_one()
 
 
+def _apply_pricing(
+    lot: AuctionLot, *, auction: Auction, expected_value: Decimal | None,
+) -> None:
+    """Write the BP/tax/landed-cost-derived fields onto ``lot``.
+
+    Splits out of ``value_one`` so the orchestration stays under ruff's
+    statement budget; otherwise this would be inline. Reads ``lot.value_low_cad``
+    set by the caller to derive ``suspicious_underprice_flag``.
+    """
+    bp = auction.buyer_premium_pct or DEFAULT_BUYER_PREMIUM_PCT
+    gst = auction.gst_pct or DEFAULT_GST_PCT
+    pst = auction.pst_pct or DEFAULT_PST_PCT
+    dest_province = auction.pickup_province or settings.home_province
+    distance = distance_km_between(settings.home_province, dest_province)
+    landed = landed_cost_premium(
+        home=settings.home_province, dest=dest_province, distance_km=distance,
+    )
+    lot.landed_cost_premium_cad = landed
+
+    current_bid = lot.current_high_bid_cad
+    if current_bid is not None and expected_value is not None:
+        lot.all_in_at_current_bid_cad = all_in_cost(
+            current_high_bid=current_bid,
+            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
+            landed_cost_premium=landed,
+        )
+        lot.price_deal_score = price_deal_score(
+            current_high_bid=current_bid,
+            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
+            landed_cost_premium=landed,
+            expected_value=expected_value,
+        )
+    else:
+        lot.all_in_at_current_bid_cad = None
+        lot.price_deal_score = None
+
+    if expected_value is not None:
+        margin = max(
+            Decimal(settings.flip_margin_min_cad),
+            expected_value * Decimal(str(settings.flip_margin_pct)),
+        )
+        lot.recommended_max_bid_cad = recommended_max_bid(
+            expected_value=expected_value,
+            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
+            landed_cost_premium=landed, flip_margin=margin,
+        )
+    else:
+        lot.recommended_max_bid_cad = None
+
+    value_low = lot.value_low_cad
+    if value_low is not None and current_bid is not None:
+        lot.suspicious_underprice_flag = (
+            current_bid < (value_low * SUSPICIOUS_UNDERPRICE_FRACTION)
+        )
+    else:
+        lot.suspicious_underprice_flag = False
+
+
 async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
     """Compute and persist the valuation for a single lot.
 
@@ -172,53 +230,7 @@ async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
         description_quality=lot.description_quality,
     )
 
-    bp = auction.buyer_premium_pct or DEFAULT_BUYER_PREMIUM_PCT
-    gst = auction.gst_pct or DEFAULT_GST_PCT
-    pst = auction.pst_pct or DEFAULT_PST_PCT
-    dest_province = auction.pickup_province or settings.home_province
-    distance = distance_km_between(settings.home_province, dest_province)
-    landed = landed_cost_premium(
-        home=settings.home_province, dest=dest_province, distance_km=distance,
-    )
-    lot.landed_cost_premium_cad = landed
-
-    if lot.current_high_bid_cad is not None and fv.expected_value_cad is not None:
-        lot.all_in_at_current_bid_cad = all_in_cost(
-            current_high_bid=lot.current_high_bid_cad,
-            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
-            landed_cost_premium=landed,
-        )
-        lot.price_deal_score = price_deal_score(
-            current_high_bid=lot.current_high_bid_cad,
-            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
-            landed_cost_premium=landed,
-            expected_value=fv.expected_value_cad,
-        )
-    else:
-        lot.all_in_at_current_bid_cad = None
-        lot.price_deal_score = None
-
-    if fv.expected_value_cad is not None:
-        margin = max(
-            Decimal(settings.flip_margin_min_cad),
-            fv.expected_value_cad * Decimal(str(settings.flip_margin_pct)),
-        )
-        lot.recommended_max_bid_cad = recommended_max_bid(
-            expected_value=fv.expected_value_cad,
-            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
-            landed_cost_premium=landed, flip_margin=margin,
-        )
-    else:
-        lot.recommended_max_bid_cad = None
-
-    value_low = lot.value_low_cad
-    current_bid = lot.current_high_bid_cad
-    if value_low is not None and current_bid is not None:
-        lot.suspicious_underprice_flag = (
-            current_bid < (value_low * SUSPICIOUS_UNDERPRICE_FRACTION)
-        )
-    else:
-        lot.suspicious_underprice_flag = False
+    _apply_pricing(lot, auction=auction, expected_value=fv.expected_value_cad)
 
     if fv.confidence == ConfidenceBucket.INSUFFICIENT:
         # Distinguish "we tried, comp set too thin" from "ran the formula".
