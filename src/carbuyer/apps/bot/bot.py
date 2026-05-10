@@ -1,8 +1,10 @@
 """discord.py runtime for the notifier bot.
 
-The bot owns the connection to Discord; the Phase 6 notifier worker enqueues
-messages via ``post_to_channel``. We register ``DynamicItem`` button classes
-in ``setup_hook`` so persisted custom_ids dispatch correctly across restarts.
+The bot owns the persistent gateway connection so button interactions on
+notifications dispatch to ``DynamicItem`` callbacks (registered in
+``setup_hook``). Notifications themselves are posted by the Phase 6 notifier
+worker via direct REST POST (``apps/notifier/discord_post.py``); this bot
+does not send messages itself.
 
 Intents are minimal — guilds only — because the bot does not read message
 content, member lists, or presence. Application commands are synced lazily
@@ -52,31 +54,6 @@ class CarbuyerBot(commands.Bot):
             "bot ready",
             user=str(self.user),
             guild_count=len(self.guilds),
-        )
-
-
-async def post_to_channel(
-    bot: CarbuyerBot,
-    channel_id: int,
-    content: str,
-    view: discord.ui.View | None = None,
-) -> None:
-    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-    if isinstance(channel, discord.TextChannel):
-        if view is None:
-            await channel.send(content=content)
-        else:
-            await channel.send(content=content, view=view)
-        log.info(
-            "message posted",
-            channel_id=channel_id,
-            content_len=len(content),
-        )
-    else:
-        log.warning(
-            "channel is not a TextChannel; message dropped",
-            channel_id=channel_id,
-            channel_type=type(channel).__name__,
         )
 
 
