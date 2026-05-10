@@ -29,6 +29,22 @@ class Settings(BaseSettings):
     )
     openai_api_key: str = Field(default="")
     openai_model: str = Field(default="gpt-4o-mini")
+    # Phase 3 design overlay #9: SDK-managed retries + per-call timeout. Empty
+    # API key triggers fail-fast at worker startup, not on first call.
+    openai_max_retries: int = 5
+    openai_request_timeout_s: float = 60.0
+    # Phase 3 design overlay #12: bounded LLM concurrency per worker. tier-1
+    # gpt-4o-mini handles 500 RPM comfortably; 4-way is conservative.
+    openai_concurrency: int = 4
+    enrichment_batch_size: int = 20
+    # Phase 3 design overlay #4 + #26: enrichment retry counter. Transient
+    # errors (rate limits, 5xx, network) leave status PENDING for re-claim
+    # until attempts >= this; schema/validation errors fail-fast at attempts=1.
+    enrichment_max_attempts: int = 3
+    # Phase 3 design overlay #14: bumped on every prompt/taxonomy change so a
+    # backfill can re-pend stale rows: UPDATE auction_lots SET
+    # enrichment_status='pending' WHERE enrichment_version IS DISTINCT FROM 'vN'.
+    enrichment_version: str = "v1"
     discord_bot_token: str = Field(default="")
     discord_guild_id: int | None = None
     discord_channels: dict[str, int] = Field(default_factory=dict)

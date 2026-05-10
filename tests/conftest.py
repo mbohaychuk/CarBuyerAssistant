@@ -60,6 +60,10 @@ async def session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     sessionmaker to that connection with `join_transaction_mode='create_savepoint'`
     so every commit inside a test becomes a SAVEPOINT release; the outer
     rollback at teardown undoes everything. No drop/create per test.
+
+    The bound maker is exposed via `session.info["maker"]` so tests that need
+    to simulate fresh `get_session()` calls (e.g. enricher tests) can create
+    additional sessions sharing the same outer transaction.
     """
     async with engine.connect() as conn:
         outer = await conn.begin()
@@ -70,5 +74,6 @@ async def session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
             join_transaction_mode="create_savepoint",
         )
         async with maker() as s:
+            s.info["maker"] = maker
             yield s
         await outer.rollback()

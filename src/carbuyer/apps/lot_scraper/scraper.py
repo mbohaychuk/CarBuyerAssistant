@@ -80,13 +80,21 @@ async def _upsert_lot(
     # out of `update_values` means lot-scraper sets the initial 'open' on
     # creation, then never touches the column again. Bid-poller advances it
     # to 'closing_soon' / 'extended' / 'closed' / 'sold' / 'unsold'.
+    #
+    # Per Phase 3 design overlay #5: year/make/model/trim/vin/mileage_km are
+    # written only on INSERT. After enrichment normalizes "F150" → "F-150",
+    # a rescrape's raw "F150" must NOT clobber the normalized value (a
+    # coalesce(EXCLUDED.model, lot.model) here produces enrich → rescrape-
+    # clobber → re-enrich flap that burns OpenAI budget). They remain in
+    # _CONTENT_TRIGGER_FIELDS for cascade detection (snapshots match → cascade
+    # correctly does not fire).
     update_values: dict[str, object] = {
         "url": excluded.url,
         "lot_number": func.coalesce(excluded.lot_number, AuctionLot.lot_number),
         "parser_version": excluded.parser_version,
         "updated_at": func.now(),
     }
-    for field_name in (*_CONTENT_TRIGGER_FIELDS, "trim"):
+    for field_name in ("title", "description", "photos"):
         update_values[field_name] = func.coalesce(
             getattr(excluded, field_name), getattr(AuctionLot, field_name),
         )

@@ -172,6 +172,44 @@ async def test_upsert_lot_preserves_vision_skipped_on_content_change(
 
 
 @pytest.mark.asyncio
+async def test_rescrape_preserves_llm_normalized_fields(
+    session: AsyncSession,
+) -> None:
+    """Phase 3 design overlay #5: enricher normalizes year/make/model/trim/
+    vin/mileage_km from raw heuristic values. A subsequent rescrape must NOT
+    clobber the normalized value with the same raw heuristic value, otherwise
+    the cascade fires forever (enrich → rescrape-clobber → re-enrich → ...).
+    Lot-scraper writes these columns only on INSERT, never on UPDATE.
+    """
+    a = _seed_auction(session)
+    await session.flush()
+    lot = await upsert_lot_with_status_cascade(
+        session, a.id, _lot_raw(model="F150"), parser_version="v1",
+    )
+    await session.flush()
+    assert lot.model == "F150"
+    # Simulate enricher normalization to canonical "F-150".
+    lot.model = "F-150"
+    lot.trim = "XLT"
+    lot.vin = "1FTRX18W2WKA12345"
+    lot.enrichment_status = EnrichmentStatus.DONE
+    await session.flush()
+
+    # Rescrape: raw heuristic still says "F150" (no enricher in real flow).
+    lot2 = await upsert_lot_with_status_cascade(
+        session, a.id, _lot_raw(model="F150"), parser_version="v1",
+    )
+    await session.flush()
+    assert lot2.id == lot.id
+    # Normalized values preserved — not clobbered to raw "F150".
+    assert lot2.model == "F-150"
+    assert lot2.trim == "XLT"
+    assert lot2.vin == "1FTRX18W2WKA12345"
+    # Cascade did not fire because no genuine content change.
+    assert lot2.enrichment_status == EnrichmentStatus.DONE
+
+
+@pytest.mark.asyncio
 async def test_upsert_lot_no_status_reset_on_idempotent_re_scrape(
     session: AsyncSession,
 ) -> None:
