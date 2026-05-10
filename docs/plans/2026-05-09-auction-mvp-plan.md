@@ -33,6 +33,21 @@
 - All commits use imperative mood ("add", "fix", "refactor"), no AI attribution, never name AI tool configs.
 - `git add` before each commit must be explicit (no `git add .`).
 
+**Cumulative API renames (apply to every Phase 4+ task code block):**
+
+The Phase 0/2 design overlays renamed two APIs that pre-Phase-3 task code blocks still reference. Phases 3+ overlays explicitly rebind these — but the inline task code blocks for Phases 5, 6, 7, 8, 9, 10, 11 may still show the old names. When implementing, treat every occurrence as a search-and-replace:
+
+| Plan-text symbol (stale) | Real API (since Phase 0/2) | Notes |
+|---|---|---|
+| `from carbuyer.db.session import async_session_maker` | `from carbuyer.db.session import get_session, get_session_maker` | `get_session()` is the async-CM wrapper most workers want. |
+| `async with async_session_maker() as session:` | `async with get_session() as session:` | |
+| `from carbuyer.db.queue import claim_pending_lots` | `from carbuyer.db.queue import claim_pending_ids, select_pending_ids` | `claim_pending_ids` returns `list[int]` (not ORM objects); commits its own claim tx; caller iterates ids and re-fetches each lot in a fresh per-id `get_session()`. |
+| `lots = await claim_pending_lots(session, status_field=..., limit=...)` | `ids = await claim_pending_ids(session, status_field=..., limit=...)` then loop opens fresh sessions | See `src/carbuyer/apps/enricher/enricher.py::process_pending` for the canonical worker shape. |
+| `await self.client.beta.chat.completions.parse(...)` | `await self.client.chat.completions.parse(...)` | GA path; `.beta.` is legacy. Phase 3 overlay #8. |
+| `lot.foo_status = "done"` (bare string) | `lot.foo_status = EnrichmentStatus.DONE` (StrEnum member) | StrEnum compares equal to strings so the old code worked, but writes via members survive grep and catch typos. |
+
+Every continuous worker (`enricher`, `valuator`, `notifier`, `vision-batcher`, `bid-poller`) must additionally implement the **catchup-sweep idiom** before entering `LISTEN` (Phase 2 overlay #12) and the **transient-leftover self-NOTIFY** after each batch (Phase 3 overlay #35). See `src/carbuyer/apps/enricher/enricher.py::main` and `process_pending` for the reference implementation.
+
 ---
 
 ## Phase 0 — Foundation
@@ -5053,7 +5068,8 @@ class OpenAIProvider(LLMProvider):
             pickup_province=payload.pickup_province,
         )
         try:
-            response = await self.client.beta.chat.completions.parse(
+            # Phase 3 overlay #8: GA path, not .beta. Phase 3 ships max_tokens=3000.
+            response = await self.client.chat.completions.parse(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": sys_prompt},
@@ -5061,7 +5077,7 @@ class OpenAIProvider(LLMProvider):
                 ],
                 response_format=EnrichmentOutput,
                 temperature=0,
-                max_tokens=2048,
+                max_tokens=3000,
             )
         except (APIError, RateLimitError):
             log.exception("openai describe failed")
@@ -5116,7 +5132,7 @@ async def test_describe_returns_parsed_enrichment_output() -> None:
 
     provider = OpenAIProvider(api_key="sk-fake")
     provider.client = MagicMock()
-    provider.client.beta.chat.completions.parse = AsyncMock(return_value=fake_response)
+    provider.client.chat.completions.parse = AsyncMock(return_value=fake_response)  # GA path (Phase 3 overlay #8)
 
     out = await provider.describe(DescribeInput(
         title="t", description="d",
@@ -5197,7 +5213,8 @@ async def extract_carfax_findings(html: str, *, client: AsyncOpenAI | None = Non
     text = re.sub(r"\s+", " ", text)[:8000]
     api = client or AsyncOpenAI(api_key=settings.openai_api_key)
     try:
-        response = await api.beta.chat.completions.parse(
+        # Phase 3 overlay #8: GA path, not .beta.
+        response = await api.chat.completions.parse(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": (
@@ -5443,6 +5460,50 @@ End of Phase 3. New lots arrive `enrichment_status='pending'`; the enricher LLMs
 
 ## Phase 4 — Valuation and scoring
 
+### Phase 4 — Pre-implementation overlay (folded in from Phase 3 review 2026-05-09)
+
+Phase 3's post-implementation review (overlay decisions #28-37) added two columns the valuator must consume, plus revealed several name-drift issues that Phase 4 inherits unchanged from the original plan. Phase 4 also has the same Phase-2 contract violations Phase 0/1/2 fixed. Folding these in here so the next implementer doesn't re-walk the same cliff.
+
+**Must-fix decisions (apply when implementing Phase 4):**
+
+1. **Real queue / session APIs.** Plan code blocks reference `claim_pending_lots` and `async_session_maker` — neither exists. Use `claim_pending_ids` (returns `list[int]`, commits its own claim tx) and `get_session()` / `get_session_maker()`. Same idiom as `lot_scraper.process_auction` and `enricher.process_pending`.
+
+2. **LLM I/O outside DB tx.** The valuator does no LLM I/O directly, but the comp-set query against `historical_sales` + `auction_lots` is non-trivial — keep the per-lot transaction short and do the comp computation in memory after closing the read tx if the query duration ever exceeds `idle_in_transaction_session_timeout=60s`.
+
+3. **Catchup sweep at startup before `LISTEN`.** Phase 2 idiom — drain pending rows on startup so NOTIFYs missed during downtime aren't lost.
+
+4. **StrEnum status writes.** `lot.valuation_status = ValuationStatus.DONE` etc. — not bare strings.
+
+5. **Status writes use `EnrichmentStatus` / `ValuationStatus` StrEnum members.** Plan uses bare strings.
+
+6. **`valuation_attempts` retry counter.** Same pattern as `enrichment_attempts` — transient errors leave PENDING for re-claim; permanent errors fail-fast at attempts=1. Add a column in the same migration as the next-batch additions, or reuse the per-lot generic `enrichment_attempts` if one counter is enough (recommend: separate columns per stage so failure modes are diagnosable).
+
+7. **Self-NOTIFY on transient leftover.** Same idiom as enricher — `pg_notify('valuation_pending', '')` after a batch with any transient failures.
+
+**Sparse-listing signal consumption (Phase 3 overlay #15 / #25 / #31):**
+
+8. **`condition_position` accepts the sparse-listing flag.** Update Task 25 signature to `condition_position(condition: str, *, sparse: bool = False) -> float`. When `sparse=True`, shift the position downward toward p25 (~0.35) instead of midpoint (0.5). Rationale: a confident "decent" rating reflects an honestly-decent vehicle; a sparse-listing-coerced "decent" signals "we don't know" and historically auction-yard sparse listings are below-median condition.
+
+9. **`compute_fair_value` accepts `sparse: bool`.** Threading through Task 27 → Task 30 valuator. Without this the dual write of `condition_inferred_from_sparse_listing` is dead.
+
+10. **`description_quality` factor on `flag_score` or `price_deal_score`.** Domain reviewer's meta-note: terse RB listings → no flags → look decent; verbose estate listings → many honest red flags → look like junk. Phase 4 must dampen scoring of low-evidence listings. Recommended: `if description_quality == "thin": flag_score = max(-2, flag_score)` (clip negative dampening — a thin listing can't surface enough evidence to legitimately score below -2). OR: apply a multiplier to `price_deal_score` based on description_quality. Pick one and document in the Phase 4 implementation overlay.
+
+11. **`flag_score` baseline normalization.** Domain reviewer flagged that the typical RB listing fires `mileage_unknown` + `out_of_province` + `winter_tires_only` for -3 before any actual issue. Either reclassify these as context (drop weight) OR rebaseline Phase 4's "neutral" at -3 instead of 0. Recommended path: in `flag_score`, exclude flags whose `weight` magnitude is 1 from the cumulative when more than 3 of them fire (cap "context flag dilution" at -2). Document in the Phase 4 overlay.
+
+**Showstopper-as-red-flag fallout (Phase 3 overlay #32 / #33):**
+
+12. **Phase 3 demoted `salvage_not_rebuilt`, `outstanding_lien`, `lemon_law_buyback` from showstopper to -4 red flag.** The original plan's exclusion logic (any showstopper → notify_status='skipped') still works for the remaining showstoppers. But Phase 4 should additionally exclude lots with **cumulative `flag_score <= -8`** from notifications regardless of price-deal score — that's where heavy-but-not-dispositive red flags would otherwise leak through. The threshold is heuristic; revisit after first 100 real lots.
+
+13. **`flood_damage` split.** The taxonomy now has `flood_damage_total` (showstopper) and `flood_damage_partial` (-3 red). No code change required in Phase 4 — both flow through the existing showstopper / red-flag paths.
+
+**Forward-compat with Phase 7 (bid polling):**
+
+14. **`is_no_reserve` derivation.** Phase 3 currently passes `False` because `lot.reserve_met is False` was inverted (means "reserve set, not yet met"). Phase 7 bid-poller should write a true `lot.is_no_reserve: bool | None` column when the source HTML/JSON exposes it. Phase 4 valuation should NOT condition on `reserve_met` for that signal; the comp-channel multiplier already handles the "no reserve = treat as private sale price" math.
+
+End of overlay.
+
+---
+
 ### Task 25: Channel normalization + condition mapping
 
 **Files:**
@@ -5478,6 +5539,15 @@ def test_condition_position_returns_canonical_values() -> None:
     assert condition_position("bad") == 0.0
     assert condition_position("decent") == 0.5
     assert condition_position("great") == 1.0
+
+
+def test_condition_position_with_sparse_flag_shifts_toward_p25() -> None:
+    # Phase 4 overlay #8: sparse-listing-coerced "decent" should value below
+    # midpoint, since auction-yard sparse listings historically run worse
+    # than honestly-described "decent" lots.
+    assert condition_position("decent", sparse=True) == 0.35
+    # Confident "decent" stays at midpoint.
+    assert condition_position("decent", sparse=False) == 0.5
 ```
 
 - [ ] **Step 2: Implement `src/carbuyer/scoring/channels.py`**
@@ -5509,8 +5579,20 @@ def normalize_to_private(price_cad: Decimal, channel: str) -> Decimal:
     return price_cad * CHANNEL_MULTIPLIERS.get(channel, Decimal("1.00"))
 
 
-def condition_position(condition: str) -> float:
-    return CONDITION_POSITION.get(condition, 0.5)
+def condition_position(condition: str, *, sparse: bool = False) -> float:
+    """Map a categorical condition to a [0, 1] position between p10 and p90.
+
+    Phase 4 overlay #8: when ``sparse=True`` the enricher coerced
+    ``condition_categorical='decent'`` because ``condition_confidence < 0.5``
+    (see Phase 3 ``_apply_to_lot``). That value reflects "we don't know" not
+    "actually decent" — shift toward p25 so sparse listings price below
+    confidently-decent comps. The sparse flag is only honored on "decent"
+    (other categorical values come with their own confidence).
+    """
+    base = CONDITION_POSITION.get(condition, 0.5)
+    if sparse and condition == "decent":
+        return 0.35
+    return base
 ```
 
 - [ ] **Step 3: Create `__init__.py` and run tests**
@@ -5775,7 +5857,15 @@ def _trim_mileage_outliers(comps: list[ComparableSale]) -> list[ComparableSale]:
     return [c for c in comps if c.mileage_km is None or abs((c.mileage_km - mean) / sd) <= 2]
 
 
-def compute_fair_value(comps: list[ComparableSale], *, condition: str) -> FairValue:
+def compute_fair_value(
+    comps: list[ComparableSale],
+    *,
+    condition: str,
+    sparse: bool = False,
+) -> FairValue:
+    """Phase 4 overlay #9: ``sparse`` threads through from
+    ``lot.condition_inferred_from_sparse_listing`` so the position penalty
+    fires only when the enricher signaled low confidence."""
     trimmed = _trim_mileage_outliers(comps)
     if len(trimmed) < 5:
         return FairValue(
@@ -5792,7 +5882,7 @@ def compute_fair_value(comps: list[ComparableSale], *, condition: str) -> FairVa
     else:
         p10, p90 = min(normalized), max(normalized)
     p50 = median(normalized)
-    pos = condition_position(condition)
+    pos = condition_position(condition, sparse=sparse)
     expected = p10 + pos * (p90 - p10)
     confidence = ConfidenceBucket.HIGH if len(trimmed) >= 15 else ConfidenceBucket.MEDIUM
     return FairValue(
@@ -6044,8 +6134,23 @@ def recommended_max_bid(
     return bid if bid > 0 else None
 
 
-def flag_score(red: list[dict[str, int]], green: list[dict[str, int]]) -> int:
+def flag_score(
+    red: list[dict[str, int]],
+    green: list[dict[str, int]],
+    *,
+    description_quality: str | None = None,
+) -> int:
+    """Cumulative weight clipped to [-5, 5].
+
+    Phase 4 overlay #10: when ``description_quality == "thin"`` clip the
+    floor at -2 — a thin listing literally cannot surface enough evidence to
+    legitimately score lower; the flags that fired likely represent listing-
+    sparsity friction (mileage_unknown, no_service_records) rather than
+    vehicle-quality issues. Confident verbose listings keep the full -5 floor.
+    """
     s = sum(int(f.get("weight", 0)) for f in red) + sum(int(f.get("weight", 0)) for f in green)
+    if description_quality == "thin":
+        return max(-2, min(5, s))
     return max(-5, min(5, s))
 ```
 
@@ -6078,10 +6183,15 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Phase 4 overlay #1: real APIs are claim_pending_ids / get_session{,_maker}.
+# Plan blocks below originally referenced claim_pending_lots / async_session_maker
+# (Phase-0 names that were renamed during Phase 0/1/2 overlays). Phase 3
+# enricher.py is the canonical reference for the worker shape.
+from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 from carbuyer.db.notify import listen, notify
-from carbuyer.db.queue import claim_pending_lots
-from carbuyer.db.session import async_session_maker
+from carbuyer.db.queue import claim_pending_ids, select_pending_ids
+from carbuyer.db.session import get_session, get_session_maker
 from carbuyer.scoring.comps import build_comp_set
 from carbuyer.scoring.fair_value import compute_fair_value, ConfidenceBucket
 from carbuyer.scoring.landed_cost import distance_km_between, landed_cost_premium
@@ -6095,6 +6205,8 @@ from carbuyer.shared.logging import get_logger
 
 log = get_logger("valuator")
 SCORING_VERSION = "v1"
+# When implementing: `compute_fair_value(..., sparse=lot.condition_inferred_from_sparse_listing)`
+# `flag_score(red, green, description_quality=lot.description_quality)`
 
 
 def _weights_hash() -> str:
@@ -7397,7 +7509,10 @@ With:
             img_bytes = open(path, "rb").read()
             data_url = f"data:image/jpeg;base64,{b64encode(img_bytes).decode()}"
             try:
-                resp = await self.client.beta.chat.completions.parse(
+                # Phase 3 overlay #8: GA path. Phase 8 also needs a `_parse_to`
+                # helper that takes `messages` (list-of-content-parts) instead
+                # of `system: str, user: str` so token-usage logging is shared.
+                resp = await self.client.chat.completions.parse(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": VISION_PER_IMAGE_PROMPT},
@@ -7429,7 +7544,7 @@ With:
             f"Description green flags: {payload.description_green_flags}"
         )
         try:
-            resp = await self.client.beta.chat.completions.parse(
+            resp = await self.client.chat.completions.parse(  # GA path (Phase 3 overlay #8)
                 model=self.model,
                 messages=[
                     {"role": "system", "content": VISION_AGGREGATION_PROMPT},
