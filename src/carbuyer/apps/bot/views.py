@@ -29,11 +29,6 @@ from carbuyer.shared.logging import get_logger
 log = get_logger("bot")
 
 
-class LotActionView(View):
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-
-
 async def _set_user_action(lot_id: int, action: UserAction) -> bool:
     async with get_session() as session, session.begin():
         lot = await session.get(AuctionLot, lot_id)
@@ -154,9 +149,3 @@ class LotNotInterestedButton(
         await interaction.followup.send(msg, ephemeral=True)
 
 
-def build_view_for_lot(lot_id: int) -> View:
-    v = LotActionView()
-    v.add_item(LotInterestedButton(lot_id))
-    v.add_item(LotMaybeButton(lot_id))
-    v.add_item(LotNotInterestedButton(lot_id))
-    return v

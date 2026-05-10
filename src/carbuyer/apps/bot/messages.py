@@ -59,7 +59,8 @@ def render_early_warning_text(d: LotEmbedData) -> str:
         f"⭐ RARE FIND — {title} ({d.location})\n"
         f"Closes {end}\n"
         f"Current bid: {bid} · Estimated value: {rng}\n"
-        f"Rarity: {rarity}"
+        f"Rarity: {rarity}\n"
+        f"{d.url}"
     )
 
 
@@ -80,5 +81,6 @@ def render_going_cheap_text(d: LotEmbedData) -> str:
         f"Current bid: {bid}  →  All-in: {all_in}\n"
         f"Estimated value: {ev}{margin}\n"
         f"Confidence: {d.confidence_bucket or '?'} · Condition: {d.condition_categorical or '?'}\n"
-        f"{('✅ ' + flags) if flags else ''}"
+        f"{('✅ ' + flags) if flags else ''}\n"
+        f"{d.url}"
     ).rstrip()
