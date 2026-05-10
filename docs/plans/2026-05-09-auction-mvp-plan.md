@@ -7492,6 +7492,172 @@ git add src/carbuyer/apps/bid_poller/ tests/apps/test_bid_scheduler.py
 git commit -m "apps: bid-poller with tiered cadence + soft-close handling"
 ```
 
+### Phase 7 post-implementation overlay
+
+These items document divergences from the plan-as-written and operational
+decisions made during Phase 7 implementation. They are corrections to the plan,
+not additional work to do.
+
+1. **`async_session_maker` does not exist** — the recurring Phase 4/5/6 plan
+   issue. Replaced with `get_session()` and `get_session_maker()` from
+   `carbuyer.db.session`. (Same fix in every prior phase's overlay.)
+
+2. **`_build_sources()` rebuilt from `SOURCES` registry, not constructor.**
+   The plan's `_build_sources()` instantiated a fresh `HibidSource(provinces=…)`
+   that was never `__aenter__`'d, leaving `_http=None` and crashing on the first
+   `poll_bid()` call. Implementation mirrors the lot-scraper: import
+   `carbuyer.sources.hibid.source` to trigger `register()`, then read
+   `SOURCES` and filter by `isinstance(s, BidPoller)`. Source contexts entered
+   via `AsyncExitStack` in `main()`. Worker fails fast at startup if `hibid`
+   isn't registered (`_REGISTERED_PLUGINS` guard).
+
+3. **HTTP I/O moved outside DB transactions.** The plan held `session.begin()`
+   open across `await source.poll_bid(ref)`. With `statement_timeout=30s` and
+   `idle_in_transaction_session_timeout=60s` (set in `db/session.py`), a slow
+   poll would tear down the connection. Restructured to the enricher pattern:
+   `_poll_one` loads the snapshot in a short read tx → closes → calls
+   `poll_bid` → `_write_observation` opens a fresh write tx, re-fetches the
+   lot by id, applies mutations, commits.
+
+4. **`notify(s, "valuation_pending", str(lot.id))` added on bid-change writes.**
+   The plan set `lot.valuation_status = "pending"` when the bid changed but
+   never NOTIFY'd. The valuator is LISTEN-only on `valuation_pending`
+   (`apps/valuator/valuator.py:341`); without the NOTIFY it would never wake
+   on bid changes until the worker restarted and ran its catchup sweep — i.e.
+   the entire mid-auction re-scoring loop would be silently broken. NOTIFY
+   emitted inside the same write transaction as the status flip.
+
+5. **Real bug fixed: `lot.final_bid_cad = old_bid` was unbound on the "missing"
+   branch.** The plan's `old_bid` was assigned only inside
+   `if obs.current_high_bid_cad is not None:`. On the missing path
+   (`current_high_bid_cad=None` per `HibidSource.poll_bid`'s missing return),
+   `old_bid` was never bound → `NameError` at runtime. Implementation reads
+   `lot.current_high_bid_cad` from the re-fetched ORM object directly on the
+   missing branch (always bound, semantically equivalent: "preserve whatever
+   the DB last recorded").
+
+6. **`fast_poll_concurrency_cap` deleted** — the plan defined it but the main
+   loop iterated sequentially with a hardcoded `FAST_CAP=20`. Per the
+   no-dead-code policy, the helper was removed. Sequential per-batch
+   processing is documented as the intentional MVP choice; revisit if
+   throughput becomes the bottleneck.
+
+7. **`from datetime import UTC`** used throughout (Python 3.11+ idiom),
+   replacing the plan's `from datetime import timezone` / `timezone.utc`.
+
+8. **Magic numbers hoisted to module-level constants:** `_BATCH_LIMIT=200`,
+   `_FAST_BUCKET_CUTOFF_SECONDS=300`, `_FAST_BUCKET_CAP=20`,
+   `_SLOW_BUCKET_CAP=50`, `_CYCLE_SLEEP_SECONDS=30`. Required for ruff
+   `PLR2004` compliance and makes the cadence budget greppable.
+
+9. **`LotStatus` and `ValuationStatus` StrEnum members used everywhere** in
+   place of bare strings (`LotStatus.CLOSED`, `LotStatus.EXTENDED`,
+   `ValuationStatus.PENDING`). The `_load_open_lot_refs` `where(...)` clause
+   uses `LotStatus.OPEN, LotStatus.CLOSING_SOON, LotStatus.EXTENDED`.
+   The two exceptions are bare strings on
+   `obs.status_at_observation == "missing"` and `== "closed"` — those are
+   the canonical protocol values from `BidObservation` (typed `str`, not an
+   enum — `"missing"` has no `LotStatus` member). Promoting them to a
+   `Literal` type alias on `BidObservation.status_at_observation` would
+   touch the Phase 1 plugin contract surface and was deferred to a future
+   cleanup.
+
+10. **Symmetric idempotency guards** on the `"missing"` AND `"closed"`
+    observation branches (`if lot.lot_status != LotStatus.CLOSED:` before
+    overwriting `closed_at`/`final_bid_cad`). The plan only guarded the
+    missing branch. In practice closed lots drop out of `_load_open_lot_refs`
+    so the second observation is unlikely; but if the filter ever changes,
+    the asymmetry would silently bump `closed_at` on every poll. One-line
+    fix worth more than its cost.
+
+11. **`closing_soon` lot status is filter-only.** No code in the codebase
+    currently writes `LotStatus.CLOSING_SOON`; the lot-scraper's comment notes
+    soft-close detection is a future Phase 7+ refinement. The bid-poller's
+    `_load_open_lot_refs` filter accepts it for forward compatibility — when
+    soft-close detection lands, the bid-poller picks up `closing_soon` lots
+    automatically without a code change.
+
+12. **Bid-poller does NOT use IN_PROGRESS** (or any of the `*_status` queue
+    fields). It selects open lots by `lot_status` and processes them on the
+    tiered cadence. Crash recovery is therefore free: a worker that dies
+    mid-poll leaves the lot at `lot_status=open`; the next cycle re-loads
+    and re-polls it. The Phase 2.5 watchdog (which sweeps stuck IN_PROGRESS
+    rows on the four `*_status` columns) is intentionally not relevant to
+    this worker. Documented in the module docstring so a future maintainer
+    isn't tempted to add a `bid_poll_status` column out of consistency with
+    other workers.
+
+13. **Single-instance worker assumption.** No SKIP-LOCKED claim means two
+    bid-poller instances would double-poll the same lots and double-write
+    `AuctionBidHistory` rows. MVP runs one instance per the deployment plan
+    (Phase 12). Horizontal scaling would require either adding a claim
+    column or sharding by `auction_id % N` — note for Phase 12 if scale
+    grows past one host.
+
+14. **Bid-vs-valuator race documented but not fixed.** When a bid arrives
+    mid-valuation: bid-poller writes `bid=new, status=PENDING` and commits;
+    valuator's session continues with its cached lot snapshot (old bid),
+    finishes computing with the old bid value, and commits `status=DONE`.
+    The valuator's commit overwrites the bid-poller's PENDING, and the new
+    bid value coexists with a stale price_deal_score. The NOTIFY emitted by
+    bid-poller wakes the valuator loop, which finds zero PENDING rows and
+    no-ops. Net effect: stale valuation persists until the next bid arrives
+    or the next manual rescore. Acceptable at MVP scale (race window <1s,
+    valuator runs are fast); a real fix would require either pessimistic
+    locking on `current_high_bid_cad` or a "compute-then-CAS" pattern in
+    the valuator. Noted for a future correctness-hardening pass; do NOT
+    add the IN_PROGRESS guard suggested in code review — it doesn't actually
+    solve the race (only changes which side loses) and adds confusing code.
+
+15. **HTTP failure observation loss.** If `source.poll_bid` succeeds but the
+    DB write transaction fails, the `AuctionBidHistory` row is rolled back
+    and the observation is permanently lost (the lot will be re-polled next
+    cycle, but the failed observation's specific timestamp/bid is gone).
+    Acceptable at MVP scale and matches the failure surface of every other
+    worker in the pipeline. Differs from the explicit "transient retry"
+    posture of the enricher (which has `enrichment_attempts` on the lot row);
+    the bid-poller has no per-attempt counter because the cadence loop is
+    the implicit retry. Note for ops monitoring: a sustained PG outage
+    would mean a sustained gap in `auction_bid_history`.
+
+16. **Scaling cliff at ~200 open lots per cycle.** `_BATCH_LIMIT=200` plus
+    fast cap 20 + slow cap 50 = 70 polls per cycle. With ~40 lots in MVP
+    scope this is fine; with ~2000 lots (4 provinces × ~10 active auctions ×
+    ~50 lots each) we'd skip 130+ lots per cycle, degrading effective
+    polling rate proportionally. Symptom would be missed-bid notifications
+    on lots not in the closing-soon window. Address by raising `_BATCH_LIMIT`,
+    adding a "we dropped N lots" warning log, or moving to per-bucket
+    independent loops. Defer until the dashboard's lot count crosses ~500.
+
+17. **`_patched_get_session` fixture pattern now in 4 test files.** Lifting
+    to `conftest.py` continues to be deferred per Phase 5 overlay #16 / Phase
+    6 overlay #19. Tracked, not addressed in this phase.
+
+18. **Tests added beyond the plan's three scheduler tests:**
+    - 4 extra scheduler tests (no-end, unsold/sold, 1-2hr bucket, 2-24hr
+      bucket) for full cadence-table coverage.
+    - 8 poller-level tests (`tests/apps/test_bid_poller.py`):
+      `_write_observation` no-bid-change → no NOTIFY/no rescore;
+      `_write_observation` bid changed → NOTIFY + AuctionBidHistory + PENDING;
+      missing-branch closes lot, preserves final_bid_cad (regression for the
+      unbound-`old_bid` bug);
+      closed-branch closes lot, sets final_bid_cad from observation;
+      end_time > scheduled_end → EXTENDED + last_seen_end_at;
+      `_poll_one` happy path (end-to-end bid write + history + NOTIFY);
+      `_poll_one` unknown source → no-op;
+      `_poll_one` source.poll_bid raises → caught, no DB writes.
+    - Coverage gaps deferred to overlay (not blocking merge): bucketing
+      logic in `_load_open_lot_refs` (delegates to heavily-tested
+      `next_poll_delay`); `_REGISTERED_PLUGINS` startup guard.
+
+19. **Pyright baseline.** Was 41 going in, 45 going out (+4). All four
+    new errors match the existing accepted test-fixture noise pattern:
+    `reportPrivateUsage` on `_poll_one`/`_write_observation` (intentional
+    cross-module access from tests), `reportUnusedFunction` on
+    `_patched_get_session` (pyright doesn't see pytest fixture wiring),
+    `asynccontextmanager` deprecated (the test fixture idiom). Not new
+    categories.
+
 ---
 
 ## Phase 8 — Vision pass
