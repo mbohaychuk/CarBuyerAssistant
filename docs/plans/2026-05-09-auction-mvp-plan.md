@@ -6819,6 +6819,52 @@ git commit -m "bot: discord.py bot scaffold with persistent action buttons"
 
 ---
 
+### Phase 5 — Post-implementation overlay (2026-05-10)
+
+Captured during Task 31-32 implementation; folded back here so future readers don't redo the analysis.
+
+**Plan-code corrections applied during implementation:**
+
+1. **`async_session_maker()` → `get_session()`.** Plan code in Task 32 (views.py button callbacks) referenced `async_session_maker` three times; that name doesn't exist. Same correction Phase 4 had to make. Used `get_session()` from `carbuyer.db.session` with the `async with get_session() as s, s.begin(): ...` pattern.
+
+2. **Function-local DB imports moved to module top in `views.py`.** Plan had `from carbuyer.db.session import ...` and `from carbuyer.db.models import ...` inside each callback. No circular-import reason to defer them.
+
+3. **Fail-fast on empty `settings.discord_bot_token`** in `bot.main()`. Mirrors `enricher.main()`'s `OPENAI_API_KEY` check (`sys.exit("DISCORD_BOT_TOKEN not configured")`). Caught at startup, not on first gateway connect.
+
+4. **Type annotations on all three `from_custom_id` methods.** Plan left `LotMaybeButton` and `LotNotInterestedButton` untyped (`(cls, interaction, item, match)`). Pyright strict mode required typing. discord.py 2.7's actual signature uses `Item[Any]` (matching the base class for override compatibility) and `re.Match[str]`. The plan's `Any` for `match` would have been accepted under non-strict mode but not strict.
+
+5. **Removed unused `from discord.ui import button`** in `views.py`. The decorator pattern isn't used here; we construct buttons explicitly.
+
+**Algorithmic / structural decisions:**
+
+6. **`select_channel` if-chain → dict lookup**. Refactored into a `_FIXED_ROUTES` dict + `HOT_DEAL_SCORE_THRESHOLD = 0.20` constant + an early-return for the score-conditional `going_cheap` branch. Forced by ruff PLR0911 (max-returns=6). Behaviorally identical to the plan; arguably more readable.
+
+7. **`_set_user_action(lot_id: int, action: UserAction) -> bool` helper** in `views.py`. Three button callbacks shared a near-identical body (open session, get lot, set action, commit, send confirmation). Helper deduplicates the I/O. Three distinct `DynamicItem` button classes preserved (discord.py needs class-level `template=` regex per class). Returns `bool` so the callback can distinguish success from "lot not found" (silent drop on missing lot is a UX bug — user clicks button on a notification for a deleted lot, bot says "Marked!").
+
+8. **`UserAction` enum used at the helper boundary** instead of bare `str`. Tightens callsites against typos and matches the existing `carbuyer.db.enums.UserAction` definition. `StrEnum` flows through SQLAlchemy as the underlying string, so the DB write is unchanged.
+
+9. **`LotEmbedData` is `frozen=True` with `tuple[str, ...]` flag fields.** The plan had `slots=True` only and used `list[str]` for the flag fields. The "frozen snapshot" semantics in the docstring match `frozen=True`; tuples avoid the `__hash__` runtime trap (a frozen dataclass with a `list` field crashes on `hash()` despite the frozen contract suggesting it should be safe).
+
+10. **Operational logging.** Added `on_ready` log on `CarbuyerBot` (gateway lifecycle), success-path log in `_set_user_action` and `post_to_channel`, plus the existing failure-path logs (missing lot, non-TextChannel). Operator can diagnose "user clicked but DB didn't change" without DEBUG mode.
+
+11. **`post_to_channel` channel-type-mismatch warning.** Plan silently dropped writes when the resolved channel wasn't a `TextChannel` (e.g., a Forum / Voice / Thread channel). Now logs a warning with `channel_id` and `channel_type=type(channel).__name__` so a misconfigured channel ID surfaces in logs.
+
+12. **Test rigor on `from_custom_id`.** Tests use the class's own `__discord_ui_compiled_template__` (the `ClassVar[re.Pattern[str]]` that discord.py's public `template` *property* returns at instance scope) instead of constructing a parallel regex. This catches a future template/custom_id divergence that an independent regex would silently let pass.
+
+**Documented for Phase 6 implementor (NOT fixed in Phase 5):**
+
+13. **`bot.post_to_channel` is dead code per the Phase 6 plan.** Phase 6 (Task 34, `apps/notifier/discord_post.py`) creates a transient `discord.Client` per notification rather than calling through the bot worker. The bot worker and notifier worker are separate processes; they don't share memory. The transient-client approach is wasteful (new gateway connection per message, rate-limit risk) but matches the plan. Phase 6 should reconsider — alternatives: Discord webhook URLs (lightweight), or a shared queue that the bot worker drains. Decide before implementing Task 34.
+
+14. **`needs_plugin` trigger not yet handled.** Phase 7 / Task 42 calls `select_channel(trigger="needs_plugin", score=None)` and imports `render_needs_plugin_text`. Neither exists in Phase 5. Add the `ChannelKey` value, the `_FIXED_ROUTES` entry, and the renderer when implementing that task.
+
+15. **`LotEmbedData.all_in_cad` field name** is shorter than the ORM column `AuctionLot.all_in_at_current_bid_cad`. Phase 6's `_embed_data` builder must map `lot.all_in_at_current_bid_cad → all_in_cad`. The shortened name hides the "at current bid" qualification — when the bid changes between notification events, the field reflects the bid at notification time only.
+
+16. **`_patched_get_session` fixture relies on `session.info["maker"]`.** This is the same fragile pattern used in `tests/apps/test_valuator.py` and `tests/apps/test_enricher.py`. `info["maker"]` is set by conftest; a future conftest refactor could silently break the fixture. Worth revisiting if conftest is restructured.
+
+End of post-implementation overlay.
+
+---
+
 ## Phase 6 — Notifier worker
 
 ### Task 33: Trigger evaluator (pure logic)
