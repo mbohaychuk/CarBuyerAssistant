@@ -168,6 +168,36 @@ async def test_set_user_action_writes_when_lot_exists(
 
 
 @pytest.mark.asyncio
+async def test_set_user_action_logs_on_success(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _patched_get_session
+    lot = _seed_lot(session)
+    await session.flush()
+    lot_id = lot.id
+
+    infos: list[tuple[str, dict[str, object]]] = []
+
+    def capture_info(event: str, **kw: object) -> None:
+        infos.append((event, kw))
+
+    spy = MagicMock()
+    spy.info = capture_info
+    monkeypatch.setattr(views_mod, "log", spy)
+
+    ok = await _set_user_action(lot_id, UserAction.INTERESTED)
+
+    assert ok is True
+    assert infos == [
+        (
+            "user_action written",
+            {"lot_id": lot_id, "action": UserAction.INTERESTED},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_set_user_action_returns_false_when_lot_missing(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

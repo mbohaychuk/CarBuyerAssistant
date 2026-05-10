@@ -35,8 +35,8 @@ class LotEmbedData:
     rarity_score: float | None
     confidence_bucket: str | None
     condition_categorical: str | None
-    top_red_flags: list[str]
-    top_green_flags: list[str]
+    top_red_flags: tuple[str, ...]
+    top_green_flags: tuple[str, ...]
     suspicious_underprice: bool
     scheduled_end_at: datetime | None
 

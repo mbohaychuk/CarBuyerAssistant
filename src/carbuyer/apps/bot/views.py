@@ -45,6 +45,7 @@ async def _set_user_action(lot_id: int, action: UserAction) -> bool:
             )
             return False
         lot.user_action = action
+        log.info("user_action written", lot_id=lot_id, action=action)
         return True
 
 

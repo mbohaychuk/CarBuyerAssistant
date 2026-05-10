@@ -51,7 +51,7 @@ def _early_warning_data(**overrides: object) -> LotEmbedData:
         value_low_cad=Decimal("18000"), value_high_cad=Decimal("28000"),
         price_deal_score=None, rarity_score=4.0,
         confidence_bucket="high", condition_categorical="good",
-        top_red_flags=[], top_green_flags=["classic Land Cruiser", "Western Canada origin"],
+        top_red_flags=(), top_green_flags=("classic Land Cruiser", "Western Canada origin"),
         suspicious_underprice=False,
         scheduled_end_at=datetime(2026, 6, 1),
     )
@@ -70,7 +70,7 @@ def test_render_early_warning_no_bid_no_comps() -> None:
         current_high_bid_cad=None,
         value_low_cad=None,
         value_high_cad=None,
-        top_green_flags=[],
+        top_green_flags=(),
         scheduled_end_at=None,
     ))
     assert "(no bid yet)" in text
@@ -90,7 +90,7 @@ def test_render_going_cheap_includes_margin() -> None:
         value_low_cad=Decimal("20000"), value_high_cad=Decimal("28000"),
         price_deal_score=0.27, rarity_score=1.0,
         confidence_bucket="high", condition_categorical="good",
-        top_red_flags=[], top_green_flags=["recent timing chain"],
+        top_red_flags=(), top_green_flags=("recent timing chain",),
         suspicious_underprice=False,
         scheduled_end_at=datetime(2026, 6, 1),
     )
@@ -109,7 +109,7 @@ def test_render_going_cheap_suspicious_underprice() -> None:
         value_low_cad=Decimal("20000"), value_high_cad=Decimal("28000"),
         price_deal_score=0.60, rarity_score=1.0,
         confidence_bucket="medium", condition_categorical="good",
-        top_red_flags=[], top_green_flags=[],
+        top_red_flags=(), top_green_flags=(),
         suspicious_underprice=True,
         scheduled_end_at=datetime(2026, 6, 1),
     )
@@ -129,7 +129,7 @@ def test_render_going_cheap_handles_missing_pricing() -> None:
         value_low_cad=None, value_high_cad=None,
         price_deal_score=None, rarity_score=None,
         confidence_bucket=None, condition_categorical=None,
-        top_red_flags=[], top_green_flags=[],
+        top_red_flags=(), top_green_flags=(),
         suspicious_underprice=False,
         scheduled_end_at=None,
     )
