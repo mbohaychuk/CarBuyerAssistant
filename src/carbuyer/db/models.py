@@ -216,6 +216,25 @@ class AuctionLot(Base, TimestampMixin):
         String(16), nullable=False, default="pending", server_default="pending", index=True,
     )
     enrichment_version: Mapped[str | None] = mapped_column(String(32))
+    # Retry counter for the description-enricher. Incremented on every attempt;
+    # transient failures (rate limits, 5xx, network) leave status at PENDING for
+    # re-claim until attempts >= settings.enrichment_max_attempts. Schema /
+    # validation errors fail-fast (FAILED at attempts=1).
+    enrichment_attempts: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), nullable=False,
+    )
+    last_enrichment_error: Mapped[str | None] = mapped_column(Text)
+    # Inferred-from-sparse-listing flag: when condition_confidence < 0.5 the
+    # enricher coerces condition_categorical to "decent" but sets this True so
+    # Phase 4 valuation can apply a separate sparse-listing pessimism penalty
+    # (vs. a genuinely confident "decent" rating).
+    condition_inferred_from_sparse_listing: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    # LLM's self-assessment of how thin/detailed the listing description was.
+    # Values: "thin" | "adequate" | "detailed". Phase 4 uses to dampen scoring
+    # of low-evidence listings.
+    description_quality: Mapped[str | None] = mapped_column(String(16))
 
     # ── Owned by: notifier (one timestamp per trigger type) ─────────────────
     early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
