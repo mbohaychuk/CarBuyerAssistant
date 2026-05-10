@@ -65,6 +65,26 @@ class GotchaEntry(TypedDict):
 
 
 RED_FLAG_TAXONOMY: list[FlagDef] = [
+    # ── -4: lot is dispositive for retail buyers but not flippers ──
+    {"flag": "salvage_not_rebuilt", "weight": -4,
+     "description": (
+         "Salvage title that has not been rebuilt. Wholesale-rebuild buyers "
+         "and parts buyers may still want this; do not flag as showstopper."
+     )},
+    {"flag": "outstanding_lien", "weight": -4,
+     "description": (
+         "Lien holder still on title at sale. Auction houses typically pay "
+         "out the lien from sale proceeds, but verify before bidding."
+     )},
+    {"flag": "lemon_law_buyback", "weight": -4,
+     "description": "Manufacturer buyback (lemon-law brand)."},
+    {"flag": "flood_damage_partial", "weight": -3,
+     "description": (
+         "Flood damage that did NOT submerge the interior — waterline below "
+         "seats, wet carpet, damp under-rear-floor. Mechanically may be fine. "
+         "Trigger phrasing: 'rear floor wet', 'damp carpet', 'water in trunk'. "
+         "Total flood (above seats / titled flood) is showstopper, not red."
+     )},
     {"flag": "engine_knock", "weight": -3,
      "description": (
          "Engine knock or overheating mentioned "
@@ -171,34 +191,66 @@ GREEN_FLAG_TAXONOMY: list[FlagDef] = [
 ]
 
 SHOWSTOPPER_TAXONOMY: list[ShowstopperDef] = [
-    {"flag": "salvage_not_rebuilt",
-     "description": "Salvage title that has not been rebuilt and registered."},
+    # Phase 3 review: showstoppers are reserved for cases where literally no
+    # buyer profile (flipper, parts, retail) wants the lot. Salvage /
+    # outstanding-lien / lemon-buyback are NOT here — flippers and rebuild
+    # buyers want salvage; auction houses pay out liens at sale; lemon-buybacks
+    # post-fix are common deals. Those live as heavy red flags (-4) below.
     {"flag": "frame_damage_unrepaired",
-     "description": "Frame damage or structural compromise, no repair documented."},
+     "description": (
+         "Frame damage or structural compromise, no repair documented. "
+         "Trigger phrasing: 'bent frame', 'frame is bent', 'structural damage'."
+     )},
     {"flag": "engine_seized",
-     "description": "Engine confirmed seized / will not turn over by hand."},
+     "description": (
+         "Engine confirmed seized / will not turn over by hand. "
+         "Trigger phrasing: 'engine seized', 'engine locked up', 'won't turn over'."
+     )},
     {"flag": "for_parts_only",
-     "description": "Sold as parts donor / engine in bed / catalogued for dismantling."},
+     "description": (
+         "Sold as parts donor / engine in truck bed / catalogued for dismantling. "
+         "Trigger phrasing: 'engine in bed', 'parts donor', 'parts truck'."
+     )},
     {"flag": "fire_damage",
-     "description": "Fire-damaged."},
-    {"flag": "flood_damage",
-     "description": "Flood-damaged."},
+     "description": (
+         "Fire-damaged. Trigger phrasing: 'fire damage', 'burned', "
+         "'engine bay fire', 'interior burned'."
+     )},
+    {"flag": "flood_damage_total",
+     "description": (
+         "Flood-damaged with waterline above seats / interior submerged / "
+         "title brand 'flood'. Trigger phrasing must include 'flood title', "
+         "'submerged', 'water above floorboards', or 'interior soaked'. "
+         "Mere 'wet floor mat' or 'damp carpet' is NOT a trigger."
+     )},
     {"flag": "vin_mismatch",
-     "description": "VIN inconsistency, re-VIN, or VIN-etched parts (theft recovery)."},
+     "description": (
+         "VIN inconsistency, re-VIN, or VIN-etched-from-other-vehicle "
+         "(theft recovery indicator)."
+     )},
     {"flag": "stolen_recovered",
-     "description": "Branded as stolen-recovered on Carfax / title."},
+     "description": (
+         "Branded as stolen-recovered on Carfax / title. Trigger phrasing: "
+         "'theft recovery', 'stolen recovered title brand'."
+     )},
     {"flag": "no_title",
-     "description": "No title document exists — cannot legally register."},
-    {"flag": "outstanding_lien",
-     "description": "Lien holder still on title at sale."},
+     "description": (
+         "No title document exists — cannot legally register. Trigger phrasing: "
+         "'no title', 'lost title', 'no paperwork'. NOT to fire on "
+         "'bill of sale only' (that's a separate red flag)."
+     )},
     {"flag": "non_repairable_brand",
-     "description": "Title brand 'non-repairable' or 'junk' — cannot be re-registered."},
-    {"flag": "lemon_law_buyback",
-     "description": "Manufacturer buyback (lemon-law brand)."},
+     "description": (
+         "Title brand 'non-repairable' or 'junk' — cannot be re-registered. "
+         "Trigger phrasing: 'non-repairable title', 'junk title', "
+         "'certificate of destruction'."
+     )},
     {"flag": "seller_says_for_parts_only",
      "description": (
-         "Seller explicitly says 'sold for parts only' / 'no questions answered' / "
-         "'sold where-is no further information'."
+         "Seller explicitly says 'sold for parts only' / 'no questions answered'. "
+         "NOT to fire on RB-style 'as-is, where-is, no further information' "
+         "(that phrasing is universal RB consignment language and does not "
+         "indicate the seller is excluding running buyers)."
      )},
 ]
 
@@ -370,8 +422,10 @@ CLASSIC_EXCEPTIONS: list[ClassicException] = [
     {"make": "Volkswagen", "model": "Golf", "year_min": 1983, "year_max": 1999,
      "note": "MK1 / MK2 / MK3 GTI / Corrado VR6."},
     # Trucks / 4x4
-    {"make": "Toyota", "model": "Land Cruiser", "year_min": 1990, "year_max": 2007,
-     "note": "80 / 100 series solid-axle."},
+    {"make": "Toyota", "model": "Land Cruiser", "year_min": 1990, "year_max": 1997,
+     "note": "80 series — solid front axle, 4.5L 1FZ-FE I6, sought-after."},
+    {"make": "Toyota", "model": "Land Cruiser", "year_min": 1998, "year_max": 2007,
+     "note": "100 series — IFS front (not solid axle), V8 4.7L 2UZ-FE."},
     {"make": "Jeep", "model": "Wrangler", "year_min": 1987, "year_max": 2006,
      "note": "YJ / TJ Wrangler."},
     {"make": "Ford", "model": "Bronco", "year_min": 1966, "year_max": 1996,

@@ -31,9 +31,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from openai import APIError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+    LengthFinishReasonError,
+    RateLimitError,
+)
 from pydantic import ValidationError
-from sqlalchemy import func
 
 from carbuyer.apps._runner import run_worker
 from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
@@ -60,6 +66,11 @@ log = get_logger("enricher")
 # condition_inferred_from_sparse_listing=True so Phase 4 can apply a
 # sparse-listing pessimism penalty separately.
 SPARSE_LISTING_CONFIDENCE_THRESHOLD = 0.5
+
+# Below this many bytes of description, we override the LLM's
+# description_quality to "thin" regardless of what the model said. Matches the
+# prompt's "<100 chars" boundary from the system prompt.
+THIN_DESCRIPTION_BYTES = 100
 
 
 @dataclass(slots=True, frozen=True)
@@ -113,7 +124,12 @@ async def _load_snapshot(lot_id: int) -> _LotSnapshot | None:
             pickup_province=auction.pickup_province,
             current_high_bid_cad=lot.current_high_bid_cad,
             auction_close_at=auction.scheduled_end_at,
-            is_no_reserve=lot.reserve_met is False,
+            # No-reserve detection: per Phase 3 review, `reserve_met=False`
+            # means "reserve exists but not yet met"; `None` means "unknown".
+            # Neither maps to "no reserve". Until a true `is_no_reserve` signal
+            # lands (Phase 7 bid-poller territory), tell the LLM `False`
+            # honestly — better than the inverted "is False" derivation.
+            is_no_reserve=False,
         )
 
 
@@ -138,36 +154,44 @@ def _build_describe_input(snap: _LotSnapshot) -> DescribeInput:
     )
 
 
-async def _maybe_carfax(
-    description: str, *, provider: OpenAIProvider,
-) -> tuple[str | None, CarfaxFindings | None]:
-    """Best-effort: extract URL, fetch HTML, LLM-extract findings.
+async def _maybe_carfax_findings(
+    url: str | None, *, provider: OpenAIProvider,
+) -> CarfaxFindings | None:
+    """Best-effort: fetch HTML at the supplied URL and LLM-extract findings.
 
-    Returns (canonical_url_for_storage, findings). Either / both may be
-    None — Carfax is paywalled / bot-detected and most lots will skip the
-    LLM extraction. Failures are not propagated; Carfax is supplementary.
+    Returns None when no URL provided, the fetch fails (paywall / bot-block
+    / 4xx / 5xx / short body), or the LLM extraction fails. Carfax is
+    supplementary signal — failures are never propagated.
     """
-    url = find_carfax_url(description)
     if url is None:
-        return None, None
+        return None
     log.info("carfax url found", url=redact_carfax_url(url))
     html = await fetch_carfax_text(url)
     if html is None:
-        return url, None
-    findings = await extract_carfax_findings(
+        return None
+    return await extract_carfax_findings(
         html, client=provider.client, model=provider.model,
     )
-    return url, findings
 
 
 async def _compute_enrichment(
-    snap: _LotSnapshot, *, provider: OpenAIProvider,
+    snap: _LotSnapshot,
+    *,
+    provider: OpenAIProvider,
+    carfax_url: str | None,
 ) -> _EnrichmentResult:
     """All network I/O happens here, OUTSIDE any DB transaction."""
     payload = _build_describe_input(snap)
     output = await provider.describe(payload)
-    _, carfax_findings = await _maybe_carfax(snap.description, provider=provider)
+    carfax_findings = await _maybe_carfax_findings(carfax_url, provider=provider)
     return _EnrichmentResult(output=output, carfax_findings=carfax_findings)
+
+
+def _is_unknown_str(s: str | None) -> bool:
+    """Free-text fields like ``engine`` have no Literal — treat the strings
+    'unknown' / 'n/a' (any case) as not-real-information and preserve any
+    pre-existing scraped or prior-enrichment value."""
+    return s is not None and s.strip().lower() in ("unknown", "n/a", "")
 
 
 def _apply_to_lot(
@@ -182,7 +206,9 @@ def _apply_to_lot(
     Phase 3 design overlay #14/#15: code-side condition clamp + sparse-listing
     flag. Phase 3 design overlay #5: year/make/model/etc. preserve existing
     values when LLM normalization returns None ("or" fallback) and preserve
-    existing non-"unknown" values for transmission/drivetrain.
+    existing non-"unknown" values for transmission/drivetrain. Phase 3 review
+    follow-ups: gate ``title_status`` and ``engine`` so a low-confidence
+    re-enrichment can't regress a previously-good value to "UNKNOWN".
     """
     out = result.output
     nv = out.normalized_vehicle
@@ -190,14 +216,16 @@ def _apply_to_lot(
     lot.make = nv.make or lot.make
     lot.model = nv.model or lot.model
     lot.trim = nv.trim or lot.trim
-    lot.engine = nv.engine or lot.engine
+    if not _is_unknown_str(nv.engine):
+        lot.engine = nv.engine or lot.engine
     if nv.transmission != "unknown":
         lot.transmission = nv.transmission
     if nv.drivetrain != "unknown":
         lot.drivetrain = nv.drivetrain
     lot.mileage_km = nv.mileage_km or lot.mileage_km
     lot.vin = nv.vin or lot.vin
-    lot.title_status = out.title_status
+    if out.title_status != "UNKNOWN":
+        lot.title_status = out.title_status
 
     if out.condition_confidence < SPARSE_LISTING_CONFIDENCE_THRESHOLD:
         lot.condition_categorical = "decent"
@@ -206,7 +234,13 @@ def _apply_to_lot(
         lot.condition_categorical = out.condition_categorical
         lot.condition_inferred_from_sparse_listing = False
     lot.condition_confidence = out.condition_confidence
-    lot.description_quality = out.description_quality
+    # Post-validate description_quality against the actual description length.
+    # The model self-reports this; a 50-char listing rated "detailed" is a
+    # red flag for the model, not the listing. Override to "thin" in that case.
+    if len(lot.description or "") < THIN_DESCRIPTION_BYTES:
+        lot.description_quality = "thin"
+    else:
+        lot.description_quality = out.description_quality
 
     lot.red_flags = [f.model_dump() for f in out.red_flags]
     lot.green_flags = [f.model_dump() for f in out.green_flags]
@@ -230,33 +264,61 @@ def _classify_failure(exc: BaseException) -> str:
     """Return ``transient`` (leave PENDING for retry) or ``permanent`` (mark
     FAILED at attempts=1).
 
-    SDK already retries 5xx and connection errors. By the time RateLimitError
-    or APIError bubbles up we've exhausted SDK retries — but it's still worth
-    one more attempt cycle (the SDK's retries don't span worker invocations).
-    Schema-validation / parse errors are permanent because retrying won't
-    change the model's output.
+    Permanent (re-running won't change the answer):
+      - ``ValidationError`` — Pydantic schema rejected the LLM output.
+      - ``LengthFinishReasonError`` — model hit ``max_tokens`` mid-JSON;
+        re-running with same prompt + temperature=0 produces the same truncation.
+      - 4xx other than 429: ``AuthenticationError``, ``PermissionDeniedError``,
+        ``BadRequestError``, ``NotFoundError``, ``UnprocessableEntityError``.
+        These all subclass ``openai.APIStatusError``; the SDK does not retry
+        them. Treat as permanent so a revoked-key incident doesn't burn 3
+        attempt cycles per lot.
+
+    Transient (worth re-claiming next batch):
+      - ``RateLimitError`` (post-SDK-retries — the SDK's retries don't span
+        worker invocations, so one more attempt later is reasonable).
+      - ``APIConnectionError``, ``APITimeoutError`` — network blips.
+      - ``InternalServerError`` (5xx) — past SDK retries.
+      - Default for unrecognized exceptions: transient. We'd rather retry
+        an unknown failure than poison-pill the lot. Permanent failures
+        leave a ``last_enrichment_error`` for postmortem.
     """
-    if isinstance(exc, RateLimitError | APIError | TimeoutError | ConnectionError):
+    if isinstance(exc, ValidationError | LengthFinishReasonError):
+        return "permanent"
+    transient_types = (
+        RateLimitError, APIConnectionError, APITimeoutError, InternalServerError,
+    )
+    if isinstance(exc, transient_types):
         return "transient"
-    if isinstance(exc, ValidationError):
+    # Other openai.APIStatusError subclasses (Authentication, BadRequest,
+    # PermissionDenied, NotFound, UnprocessableEntity) are permanent. The
+    # parent-class isinstance check covers all of them at once.
+    if isinstance(exc, APIStatusError):
         return "permanent"
     return "transient"
 
 
-async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> bool:
-    """Process one claimed lot id end-to-end. Returns True if enriched DONE.
+async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
+    """Process one claimed lot id end-to-end.
 
-    Failure path increments ``enrichment_attempts`` and either keeps status
-    PENDING (transient, attempts < max) or sets FAILED (permanent, or
-    attempts >= max).
+    Returns:
+      - ``"done"`` — lot enriched, status DONE, valuator NOTIFY emitted.
+      - ``"failed"`` — permanent failure, status FAILED.
+      - ``"transient"`` — transient failure, status PENDING (re-claimable).
+        Caller must re-NOTIFY ``enrichment_pending`` so the worker drains
+        on the same NOTIFY-driven loop instead of waiting for the next
+        worker restart's catchup sweep.
+      - ``"missing"`` — lot row vanished between claim and load.
     """
     snap = await _load_snapshot(lot_id)
     if snap is None:
         log.warning("lot disappeared between claim and load", lot_id=lot_id)
-        return False
+        return "missing"
     raw_carfax_url = find_carfax_url(snap.description)
     try:
-        result = await _compute_enrichment(snap, provider=provider)
+        result = await _compute_enrichment(
+            snap, provider=provider, carfax_url=raw_carfax_url,
+        )
     except Exception as exc:
         classification = _classify_failure(exc)
         log.exception(
@@ -267,7 +329,7 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> bool:
         async with get_session() as s, s.begin():
             lot = await s.get(AuctionLot, lot_id)
             if lot is None:
-                return False
+                return "missing"
             lot.enrichment_attempts = (lot.enrichment_attempts or 0) + 1
             lot.last_enrichment_error = f"{type(exc).__name__}: {exc}"[:500]
             should_fail = (
@@ -276,18 +338,18 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> bool:
             )
             if should_fail:
                 lot.enrichment_status = EnrichmentStatus.FAILED
-            else:
-                lot.enrichment_status = EnrichmentStatus.PENDING  # re-claim
-        return False
+                return "failed"
+            lot.enrichment_status = EnrichmentStatus.PENDING  # re-claim
+        return "transient"
 
     async with get_session() as s, s.begin():
         lot = await s.get(AuctionLot, lot_id)
         if lot is None:
-            return False
+            return "missing"
         lot.enrichment_attempts = (lot.enrichment_attempts or 0) + 1
         _apply_to_lot(lot, result, raw_carfax_url=raw_carfax_url)
         await notify(s, "valuation_pending", str(lot.id))
-    return True
+    return "done"
 
 
 async def process_pending(provider: OpenAIProvider) -> int:
@@ -306,17 +368,28 @@ async def process_pending(provider: OpenAIProvider) -> int:
         return 0
 
     sem = asyncio.Semaphore(settings.openai_concurrency)
+    results: list[str] = []
 
     async def _bounded(lot_id: int) -> None:
         async with sem:
             try:
-                await _process_one(lot_id, provider=provider)
+                outcome = await _process_one(lot_id, provider=provider)
             except Exception:
                 # Belt-and-suspenders: _process_one handles its own errors
                 # but a bug above would otherwise sink the whole gather.
                 log.exception("process_one unhandled", lot_id=lot_id)
+                outcome = "transient"
+            results.append(outcome)
 
     await asyncio.gather(*(_bounded(i) for i in ids))
+
+    # Self-NOTIFY for transient leftovers so the listener loop drains them
+    # without waiting for the next worker restart's catchup sweep. Otherwise
+    # rate-limit / network blips create a 24h+ delay in low-throughput
+    # periods. One bulk NOTIFY (empty payload) is enough to wake the loop.
+    if any(r == "transient" for r in results):
+        async with get_session() as s, s.begin():
+            await notify(s, "enrichment_pending", "")
     return len(ids)
 
 
@@ -356,11 +429,6 @@ async def main() -> None:
             except Exception:
                 log.exception("batch failed; sleeping before next NOTIFY")
                 await asyncio.sleep(5)
-
-
-# ``func`` is imported for SQLAlchemy DDL helpers used by callers / tests of
-# this module. Keep it referenced so the import isn't pruned.
-_ = func
 
 
 if __name__ == "__main__":
