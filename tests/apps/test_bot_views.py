@@ -4,7 +4,6 @@ Pure-Python; no Discord gateway. The discord.py runtime (gateway, websocket,
 interaction dispatch) is integration territory and lives in manual smoke
 testing. These tests cover the offline-verifiable bits:
 
-  * ``build_view_for_lot`` returns a 3-button view
   * ``DynamicItem.from_custom_id`` parses the regex match into a button
     with the correct ``lot_id`` and the right action's ``custom_id``
   * ``CarbuyerBot`` instantiates with ``guilds``-only intents
@@ -30,31 +29,9 @@ from carbuyer.apps.bot.views import (
     LotMaybeButton,
     LotNotInterestedButton,
     _set_user_action,  # pyright: ignore[reportPrivateUsage]
-    build_view_for_lot,
 )
 from carbuyer.db.enums import UserAction
 from carbuyer.db.models import Auction, AuctionLot
-
-
-def test_build_view_for_lot_has_three_buttons() -> None:
-    v = build_view_for_lot(1)
-    assert len(v.children) == 3  # noqa: PLR2004
-
-
-def test_build_view_for_lot_distinct_custom_ids() -> None:
-    v = build_view_for_lot(42)
-    custom_ids = {c.custom_id for c in v.children}  # type: ignore[attr-defined]
-    assert custom_ids == {
-        "deal:interested:42",
-        "deal:maybe:42",
-        "deal:not_interested:42",
-    }
-
-
-def test_lot_action_view_persistent() -> None:
-    # Persistent views require timeout=None and all-children-have-custom_id;
-    # is_persistent() returns False if either condition fails.
-    assert build_view_for_lot(7).is_persistent() is True
 
 
 @pytest.mark.asyncio
