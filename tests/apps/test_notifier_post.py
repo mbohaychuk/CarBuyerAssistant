@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
 from carbuyer.apps.notifier.discord_post import post_message
@@ -33,6 +34,24 @@ def _make_session(*responses: MagicMock) -> MagicMock:
         idx = call_count[0]
         call_count[0] += 1
         yield responses[idx]
+
+    session.post = _post
+    return session
+
+
+def _make_session_with_errors(*side_effects: MagicMock | Exception) -> MagicMock:
+    """Build a session where each .post() call either yields a response or raises."""
+    session = MagicMock()
+    call_count = [0]
+
+    @asynccontextmanager  # type: ignore[arg-type]
+    async def _post(*args: Any, **kwargs: Any) -> Any:
+        idx = call_count[0]
+        call_count[0] += 1
+        effect = side_effects[idx]
+        if isinstance(effect, BaseException):
+            raise effect
+        yield effect
 
     session.post = _post
     return session
@@ -161,3 +180,43 @@ async def test_post_message_400_returns_false_no_retry(
     assert result is False
     # 400 is not retried
     assert call_count[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_post_message_network_error_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First POST raises ClientError; second succeeds. Returns True after 2 attempts."""
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.asyncio.sleep", AsyncMock(),
+    )
+
+    r2 = _mock_response(200)
+    session = _make_session_with_errors(aiohttp.ClientError("conn reset"), r2)
+
+    result = await post_message(1, "msg", 5, session=session)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_post_message_network_error_twice_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both POSTs raise ClientError. Returns False after exactly 2 attempts."""
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.asyncio.sleep", AsyncMock(),
+    )
+
+    session = _make_session_with_errors(
+        aiohttp.ClientError("conn reset"),
+        aiohttp.ClientError("conn reset again"),
+    )
+
+    result = await post_message(1, "msg", 5, session=session)
+    assert result is False

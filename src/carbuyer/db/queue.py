@@ -33,6 +33,22 @@ _IN_PROGRESS_BY_FIELD: dict[ClaimableStatusField, str] = {
 }
 
 
+async def _mark_in_progress(
+    session: AsyncSession,
+    *,
+    ids: list[int],
+    status_field: ClaimableStatusField,
+) -> None:
+    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
+    update_stmt = (
+        update(AuctionLot)
+        .where(AuctionLot.id.in_(ids))
+        .values({status_field: in_progress_value})
+    )
+    await session.execute(update_stmt)
+    await session.flush()
+
+
 async def claim_pending_ids(
     session: AsyncSession,
     *,
@@ -59,14 +75,7 @@ async def claim_pending_ids(
     rows = list((await session.execute(select_stmt)).scalars().all())
     if not rows:
         return []
-    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
-    update_stmt = (
-        update(AuctionLot)
-        .where(AuctionLot.id.in_(rows))
-        .values({status_field: in_progress_value})
-    )
-    await session.execute(update_stmt)
-    await session.flush()
+    await _mark_in_progress(session, ids=rows, status_field=status_field)
     return rows
 
 
@@ -92,14 +101,7 @@ async def claim_pending_lots(
     lots = list((await session.execute(stmt)).scalars().all())
     if not lots:
         return []
-    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
-    update_stmt = (
-        update(AuctionLot)
-        .where(AuctionLot.id.in_([lot.id for lot in lots]))
-        .values({status_field: in_progress_value})
-    )
-    await session.execute(update_stmt)
-    await session.flush()
+    await _mark_in_progress(session, ids=[lot.id for lot in lots], status_field=status_field)
     return lots
 
 

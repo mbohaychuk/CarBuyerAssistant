@@ -26,6 +26,9 @@ _STYLE_SECONDARY = 2
 _STYLE_DANGER = 4
 # Discord rate-limit fallback when the Retry-After header is absent.
 _DEFAULT_RETRY_AFTER_S = 1.0
+# attempts: 1 = first try, 2 = retry-after-rate-limit; we don't retry beyond.
+_FIRST_ATTEMPT = 1
+_LAST_ATTEMPT = 2
 
 
 def _components_for_lot(lot_id: int) -> list[dict[str, Any]]:
@@ -69,6 +72,8 @@ async def post_message(
 
     Pass ``session`` to reuse a long-lived aiohttp.ClientSession (preferred for
     batches). When omitted, a fresh session is opened per call.
+    Omitting ``session`` creates a new ``ClientSession`` per call; only do this
+    for one-off use — the notifier worker passes a long-lived session for batches.
     """
     if not settings.discord_bot_token:
         log.error("DISCORD_BOT_TOKEN not configured")
@@ -79,7 +84,7 @@ async def post_message(
     payload = {"content": content, "components": _components_for_lot(lot_id)}
 
     async def _do(s: aiohttp.ClientSession) -> bool:
-        for attempt in (1, 2):
+        for attempt in (_FIRST_ATTEMPT, _LAST_ATTEMPT):
             try:
                 async with s.post(url, headers=headers, json=payload) as resp:
                     if resp.status == 429:  # noqa: PLR2004
@@ -90,7 +95,7 @@ async def post_message(
                             "discord rate-limited",
                             channel_id=channel_id, retry_after=retry, attempt=attempt,
                         )
-                        if attempt == 1:
+                        if attempt == _FIRST_ATTEMPT:
                             await asyncio.sleep(retry)
                             continue
                         return False
@@ -113,7 +118,7 @@ async def post_message(
                     channel_id=channel_id, lot_id=lot_id,
                     error=str(exc), attempt=attempt,
                 )
-                if attempt == 2:  # noqa: PLR2004
+                if attempt == _LAST_ATTEMPT:
                     return False
                 await asyncio.sleep(_DEFAULT_RETRY_AFTER_S)
         return False
