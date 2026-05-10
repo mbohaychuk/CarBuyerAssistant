@@ -4345,6 +4345,175 @@ End of Phase 2. Discoverer + lot-scraper plumbing wired. Next phase plugs LLM en
 
 ## Phase 3 — LLM enrichment
 
+### Phase 3 — Design-decision overlay (post-deliberation 2026-05-09)
+
+Four role-specialized reviews (senior dev / LLM eng, devops / SRE, auction-buyer-domain consultant, software architect) raised convergent issues. The original Phase 3 plan still referenced Phase-0/2 names that were renamed during their respective overlays (`async_session_maker`, `claim_pending_lots`), held DB transactions across 30s-of-LLM I/O (violating `idle_in_transaction_session_timeout=60s`), forgot the catchup-sweep idiom from Phase 2, and shipped a flag taxonomy that domain review showed was both miscalibrated and missing the highest-leverage Western-Canada gotchas (the diesel-powertrain failure set). One cross-phase footgun also surfaced: Phase 2's `_upsert_lot` `coalesce(EXCLUDED, AuctionLot)` on year/make/model/trim/vin/mileage_km will silently overwrite enricher-normalized values on the next rescrape, producing an enrich → rescrape-clobber → re-enrich flap that burns OpenAI budget.
+
+**Net effect:** Phase 3 grows by one Phase-0 cleanup task (19.5: enrichment_attempts column + lot-scraper coalesce drop) and Tasks 20–24 are all rewritten. Phase 12 .env.example port bug (5432 → 5433) is also fixed inline.
+
+**Must-fix decisions:**
+
+1. **Real queue API is `claim_pending_ids` (returns `list[int]`), not `claim_pending_lots`.** The function commits its own short claim transaction; the worker then re-fetches each lot in a fresh per-id session. The plan's old code held one outer session across the whole batch, ran LLM I/O inside `session.begin()`, and triggered `idle_in_transaction_session_timeout`. Rewritten to mirror `lot_scraper.process_auction`: claim ids in a 1-statement txn, close it, then iterate ids opening a fresh `get_session()` per id with all LLM/HTTP I/O *outside* `session.begin()`.
+
+2. **`get_session()` / `get_session_maker()`, not `async_session_maker`.** Phase-0 rename. Same drift the Phase 2 overlay had to chase down.
+
+3. **Catchup sweep at startup before `LISTEN`.** Phase 2 design overlay #12 made this mandatory for every continuous worker. Enricher missed it. Added: `_catchup_sweep()` that calls `process_pending(provider)` once before entering `async for _ in listen(...)`. Recovers NOTIFYs missed during worker downtime.
+
+4. **`enrichment_attempts INT NOT NULL DEFAULT 0` column.** Without an attempt counter, a single transient OpenAI 5xx flips the lot to `failed` permanently — no retry path, no watchdog reaches `failed`. Migration adds the column; `enrich_one` increments on every attempt; only marks `FAILED` when `attempts >= settings.enrichment_max_attempts` (default 3). Transient errors leave status at `PENDING` for re-claim. Schema/validation errors fail-fast at attempts=1 (not transient).
+
+5. **Lot-scraper `_upsert_lot` no longer coalesces year/make/model/trim/vin/mileage_km.** These are heuristic-extracted on insert, then enricher owns them. Coalescing on UPDATE means rescrape's raw "F150" overwrites enricher's normalized "F-150", cascade fires, re-enrich, flap. Fix: the for-loop iterates only `("title", "description", "photos")` — the genuine listing-level content fields — and year/make/model/trim/vin/mileage_km drop out of the `ON CONFLICT DO UPDATE` set entirely. They remain in `_CONTENT_TRIGGER_FIELDS` (cascade detection still works correctly because they no longer change on UPDATE).
+
+6. **Status writes use `EnrichmentStatus.FAILED` etc., not bare strings.** StrEnum compare-equals to strings so the old code worked, but writes via enum members (a) survive grep, (b) catch typos at type-check time, (c) match the lot-scraper's idiom.
+
+7. **All LLM and HTTP I/O happens outside `session.begin()`.** `enrich_one` splits into two halves: `compute_enrichment(lot_snapshot, provider)` returns an `EnrichmentResult` (no DB, no transaction — does describe + Carfax fetch + Carfax extract); `apply_enrichment(session, lot_id, result)` re-fetches the lot in a short txn and writes columns. This isolates network latency from connection-pool / lock pressure.
+
+8. **OpenAI SDK GA path: `client.chat.completions.parse`, not `client.beta.chat.completions.parse`.** Both work today on `openai>=1.40`, but `.beta.` is the legacy path. Single helper `_parse_to(model_cls, messages, max_tokens)` inside `OpenAIProvider` so the SDK call shape lives in one place — Phase 8 vision will reuse it.
+
+9. **`AsyncOpenAI(max_retries=5, timeout=60.0)`.** Lets the SDK handle 429/5xx with built-in exponential backoff + jitter. OpenAI does not bill for retried failed calls so this is free reliability.
+
+10. **`max_tokens=3000` for description (was 2048).** Worst-case `EnrichmentOutput` with 5+ red flags carrying verbatim evidence quotes plus `summary` plus `desirability_evidence` lists tokenizes around 1.5–2k completion tokens; `2048` had no margin and truncation produces invalid JSON which the schema rejects, marking the lot `failed`.
+
+11. **Token-usage logging on every LLM call.** `log.info("openai describe", lot_id=..., model=..., prompt_tokens=..., completion_tokens=..., total_tokens=..., duration_ms=...)`. This is the data a future budget-ledger feature consumes; for MVP it's the only spending signal we have. (Cost ledger TABLE deferred — see "Deferred" below.)
+
+12. **Bounded LLM concurrency via `asyncio.Semaphore(settings.openai_concurrency)`.** Default 4. Sequential-only batch processing leaves OpenAI parallelism on the floor (gpt-4o-mini handles 500 RPM tier-1) — 100-lot batch goes from 50 minutes wall to ~12 minutes.
+
+13. **System prompt cached at `OpenAIProvider` construction** (not regenerated per call). The taxonomy expansion in this overlay pushes the system prompt to ~2–4k tokens; OpenAI's prompt-caching kicks in at ≥1024 tokens of identical prefix and gives 50% off cached input. Same content per call → cache routing hits.
+
+14. **Pydantic `Condition` literal stays `Literal["bad","poor","decent","good","great"]` — no `"unknown"`.** Prompt rule "output unknown when uncertain" applies only to fields whose schema actually has `unknown` (`transmission`, `drivetrain`, `title_status`). For `condition_categorical`, the prompt says: "when uncertain, output `decent` and set `condition_confidence < 0.5`." A code-side post-validation clamp in `apply_enrichment` enforces this if the model violates it.
+
+15. **`condition_confidence < 0.5 → "decent"` clamp moves to code, not prompt.** Domain review pointed out this prompt rule pollutes Phase 4: "actually decent" and "we don't know" both render as `decent` and Phase 4 valuation can't tell sparse-listing-pessimism from genuine-decency. Solution: prompt drops the rule; `apply_enrichment` writes `condition_categorical = "decent"` only when `condition_confidence < 0.5`, and **also sets `condition_inferred_from_sparse_listing = True`** so Phase 4 can apply a separate pessimism penalty. (New field in `EnrichmentOutput` — see Task 20.)
+
+16. **Empty `OPENAI_API_KEY` fail-fast at worker startup.** `enricher.main()` checks `settings.openai_api_key` and raises `SystemExit("OPENAI_API_KEY not configured")` before entering the loop. Workers that crash on first lot waste a deploy cycle.
+
+17. **`LLMProvider` ABC splits into `DescribeProvider` and `VisionProvider` role mixins** — symmetric with `AuctionDiscoverer`/`AuctionFetcher`/`BidPoller`. `OpenAIProvider` implements both. Phase 8 vision swaps in a different provider class trivially. Both ABCs get `__aenter__`/`__aexit__` defaults so workers can `async with` the provider for clean client shutdown.
+
+18. **`extract_carfax_findings` accepts caller's `AsyncOpenAI` client + model**, doesn't construct its own. Avoids per-lot TLS handshake + duplicate budget config.
+
+19. **Phase 12 `.env.example` port 5432 → 5433.** Direct contradiction with `infra/docker-compose.yml` host-port binding. Fixed inline at line 9854.
+
+**Should-fix decisions:**
+
+20. **Carfax extraction split into 23a (regex URL find — safe) and 23b (best-effort fetch + extract).** Domain + senior-dev review converged: Carfax CA is paywalled and bot-detected; plain `httpx.get` returns a login wall or 403 in the majority of cases (same Cloudflare risk Phase 1 already documented for HiBid). Task 23a (regex-only `find_carfax_url`) ships and is reliable. Task 23b (fetch + LLM extract) ships behind an explicit "best-effort" docstring, gracefully no-ops on 4xx/5xx/empty/under-500-byte responses, and is documented as expected to succeed on <30% of real Carfax URLs. Phase 8 vision-batcher (Playwright) is the longer-term home for full-Carfax extraction.
+
+21. **Carfax HTTP response gate.** Before calling the LLM extractor, check `response.status_code < 400` and `len(response.text) > 500`. A 404 page passed to the LLM costs money and produces garbage `CarfaxFindings`.
+
+22. **Carfax URL redaction in logs.** `https://www.carfax.ca/vhr/<token>` is a per-vehicle access key, not a public URL. Log the SHA-256 prefix + host, never the full URL. Same for VIN — log VIN existence (`has_vin=True`) but not the VIN value.
+
+23. **Massive taxonomy expansion** based on domain review. Calibrations:
+    - `needs_work` weight drops to **-1** (was -2) — fires on ~80% of lots so dilutes signal. -2 reserved for genuine red events.
+    - `rust_mentioned` -1 (kept) joined by `frame_rust` -3 and `frame_rust_perforated` showstopper, plus `rocker_rust` / `cab_corner_rust` -2.
+    - `wont_start` moves from showstopper → red-flag -3. RB / industrial auction "won't start" frequently means dead battery, not seized engine. Showstopper status reserved for explicit `engine_seized` / `for_parts_only` / `needs_engine`.
+    - `as_is_no_warranty` showstopper REMOVED — it fires on every online auction and dilutes the signal. Replaced with `seller_says_for_parts_only` showstopper that requires explicit "sold for parts" / "no questions" / "for parts only" phrasing.
+    - New red flags added: `no_keys` (-2), `bill_of_sale_only` (-3), `transmission_slipping` (-3), `head_gasket_suspected` (-3), `electrical_issues` (-2), `leaks_coolant` (-2), `leaks_oil_minor` (-1), `bald_tires` (-1), `check_engine_light_on` (-1), `out_of_province` (-1), `winter_tires_only` (-1), `diesel_emissions_deleted` (-2), `salvage_history_carfax` (-2), `abandoned_vehicle` (-2), `seller_dealer_only` (-1).
+    - New green flags added: `non_smoker` (+1), `regular_oil_changes` (+1), `from_southern_climate` (+2), `warranty_remaining` (+2), `cpo_certified` (+2), `two_sets_of_tires` (+1), `block_heater_installed` (+1), `highway_mileage` (+1), `recent_inspection_passed` (+1), `recall_completed` (+1).
+    - New showstoppers added: `engine_seized`, `for_parts_only`, `vin_mismatch`, `stolen_recovered`, `no_title`, `outstanding_lien`, `non_repairable_brand`, `lemon_law_buyback`.
+    - `Z71` removed from `DESIRABLE_TRIMS` (it's a package on every Silverado, not a desirable trim by itself). Replaced with `Silverado 1500 Trail Boss` and expanded with ~25 entries: Tundra TRD Pro, FJ Cruiser, Land Cruiser any, Lexus GX/LX, Bronco 2021+, F-250/F-350 PowerStroke high-trim, F-150 Tremor, Ram 2500/3500 Cummins / Power Wagon, Wrangler 392, Gladiator Rubicon/Mojave, WRX STI, BRZ tS, Golf R/GTI manual, BMW M2/M3/M4/M5, Porsche 911/Cayman/Boxster, GT-R/370Z Nismo, Civic Type R / Si manual, S2000, NSX, Miata/RX-8, Mazdaspeed3/6, G-Wagen, Lancer Evo, Audi RS/S, Defender, Hummer H1.
+    - `CLASSIC_EXCEPTIONS` default flips: pre-2000 is **not** automatically classic — only matches in `CLASSIC_EXCEPTIONS` are classic. Expanded to ~25 entries covering the actual collector set (Supra MK4, NSX, RX-7 FD3S, Miata NA/NB, MR2, S2000, Civic SiR/Type R, Skyline R32–34, 240SX, 300ZX TT, BMW E30/E36 M3, E39 M5, UR Quattro, air-cooled 911, 944/968/928, 190E 2.3-16/2.5-16, Land Cruiser 80/100, YJ/TJ Wrangler, vintage Bronco, K5 Blazer/GMT400, Power Wagon, Defender 90/110, GTI MK1/MK2/MK3, AE86, SVX).
+    - `GOTCHAS` expanded from 8 → ~30 entries adding the diesel powertrain failure set Western Canada auction yards are full of: 6.0L PowerStroke EGR/heads, 6.4L PowerStroke twin-turbo, 6.7L PowerStroke / Duramax LML CP4 fuel pump, Cummins 6.7L EGR + 68RFE, Hemi MDS lifters, GM AFM lifter failure, Coyote 5.0L oil consumption, 5.4L 3V cam phasers/spark plugs, J35 VCM, BMW N54/N55/N20/M5 V10, Mercedes M272/M273 + 7G-Tronic, Audi/VW EA113/EA888, VW TDI emissions, Subaru EJ255/EJ257, CX-7 turbo, Titan rear diff, Pathfinder strawberry-milkshake, Range Rover air suspension, Evo shift-fork, modern-diesel emissions, Tesla MCU1.
+
+24. **`DescribeInput` carries the full enrichment-relevant context** — adds `current_high_bid_cad`, `bid_increment`, `auction_close_at`, `is_no_reserve`, `image_count`, `current_year` (2026). Without these the model can't reason about urgency, priced-below-scrap, or sparse-listing-quality signals.
+
+25. **`description_quality: Literal["thin","adequate","detailed"]` field on `EnrichmentOutput`.** Domain meta-note flagged the listing-density bias: terse listings → no flags → looks decent; verbose honest listings → many red flags → looks like junk; Phase 4 then prefers the dishonest ones. `description_quality` lets Phase 4 apply a sparse-listing penalty.
+
+26. **`enrichment_max_attempts` setting (default 3) and per-error-class classification.** `RateLimitError`, network errors, 5xx → leave PENDING (transient, count attempts, fail at 3). 4xx other than 429, schema/validation errors → FAILED at attempts=1 (not retriable). The classifier lives in `enrich_one`.
+
+27. **`OpenAIProvider` is an async context manager.** `__aenter__` returns `self`; `__aexit__` calls `await self.client.close()`. Worker uses `async with OpenAIProvider() as provider:`. Symmetric with how `Source` plugins are managed.
+
+**Deferred (acknowledged):**
+
+- **`llm_cost_ledger` table + daily-budget aborting guard.** Devops review wanted a cost ledger row per call and an `assert_under_budget` check that raises `BudgetExceeded` near a daily ceiling. For MVP the per-call usage log (decision #11) gives the data; an aggregating dashboard query is enough. Adding a ledger table commits to a schema before we know the actual call patterns. Revisit when first OpenAI bill arrives or Phase 8 (vision, ~10x cost per call) lands.
+- **Run-id / trace-id structlog contextvars.** `log.bind(run_id=...)` would let a single LLM call's logs be retrieved post-hoc as a trace. Useful but not blocking. Defer until first postmortem demands it.
+- **`LLM_PROVIDERS` registry** mirroring `SOURCES`. Single concrete provider for MVP; `enricher.main()` instantiates `OpenAIProvider` directly. Add registry when a second provider lands (Anthropic, local model).
+- **Description-density signal computed in scraper** rather than asked from the LLM. The current design has the LLM self-report `description_quality` from the listing text — cheaper and consistent. A future word-count + field-coverage heuristic in the scraper can supersede it.
+- **Auto-staleness re-claim by `enrichment_version`.** When the prompt/taxonomy bumps to v2, operator runs `UPDATE auction_lots SET enrichment_status='pending' WHERE enrichment_version IS DISTINCT FROM 'v2' AND enrichment_status='done'` plus catchup-sweep at next worker restart picks them up. Documented; auto-claim deferred.
+- **Per-plugin Carfax via Playwright** (real fetch). Phase 8 vision-batcher will own this once Playwright infrastructure lands.
+
+End of overlay.
+
+---
+
+### Task 19.5: Pre-Phase-3 migration + lot-scraper coalesce fix
+
+**Why this task is here:** Phase 3 needs a new `enrichment_attempts` column on `auction_lots` for retry counting, and Phase 2's `_upsert_lot` clobbers enricher-normalized fields on rescrape (decision #5 in this overlay). Both land before Task 20 so the rest of Phase 3 builds on the corrected schema and worker contract.
+
+**Files:**
+- Create: Alembic migration `alembic/versions/<hash>_enrichment_attempts.py`
+- Modify: `src/carbuyer/db/models.py` (add `enrichment_attempts` column on `AuctionLot`)
+- Modify: `src/carbuyer/apps/lot_scraper/scraper.py` (drop year/make/model/trim/vin/mileage_km from `_upsert_lot` ON CONFLICT update set)
+- Modify: `tests/apps/lot_scraper/test_scraper.py` (add regression test: rescrape preserves LLM-normalized values)
+
+- [ ] **Step 1: Add `enrichment_attempts` column to `AuctionLot`**
+
+```python
+# in src/carbuyer/db/models.py, near other enrichment fields
+enrichment_attempts: Mapped[int] = mapped_column(
+    Integer, server_default=text("0"), nullable=False,
+)
+```
+
+- [ ] **Step 2: Generate the migration**
+
+```bash
+uv run alembic revision --autogenerate -m "enrichment_attempts column"
+```
+
+Review the generated migration; ensure it adds only the `enrichment_attempts` column (with `server_default="0"`, `nullable=False`) and nothing else.
+
+- [ ] **Step 3: Update lot-scraper `_upsert_lot` to not coalesce normalized fields**
+
+```python
+# src/carbuyer/apps/lot_scraper/scraper.py — change the for-loop in _upsert_lot:
+# Before: for field_name in (*_CONTENT_TRIGGER_FIELDS, "trim"):
+# After:  for field_name in ("title", "description", "photos"):
+#     update_values[field_name] = func.coalesce(
+#         getattr(excluded, field_name), getattr(AuctionLot, field_name),
+#     )
+```
+
+The fields `year`, `make`, `model`, `trim`, `vin`, `mileage_km` drop out of the `ON CONFLICT DO UPDATE` set entirely — they're written only on `INSERT`. They remain in `_CONTENT_TRIGGER_FIELDS` so the cascade detection still works (they just never change on UPDATE so they never falsely fire).
+
+- [ ] **Step 4: Add a regression test that rescrape doesn't clobber LLM-normalized values**
+
+```python
+# tests/apps/lot_scraper/test_scraper.py — add this test
+@pytest.mark.asyncio
+async def test_rescrape_preserves_llm_normalized_fields(session) -> None:
+    auction = await _make_auction(session, "hibid", "A1")
+    raw = _make_raw_lot(auction, source_lot_id="L1", year=2010, make="Ford", model="F150")
+
+    async with session.begin():
+        lot = await upsert_lot_with_status_cascade(
+            session, auction.id, raw, parser_version="t-1"
+        )
+    # Simulate enricher normalization.
+    async with session.begin():
+        lot.model = "F-150"
+        lot.enrichment_status = EnrichmentStatus.DONE
+
+    # Rescrape returns the same raw heuristic value.
+    async with session.begin():
+        lot2 = await upsert_lot_with_status_cascade(
+            session, auction.id, raw, parser_version="t-1"
+        )
+
+    assert lot2.id == lot.id
+    assert lot2.model == "F-150"  # preserved, not clobbered to "F150"
+    assert lot2.enrichment_status == EnrichmentStatus.DONE  # cascade did not fire
+```
+
+- [ ] **Step 5: Run the migration + tests + commit**
+
+```bash
+sg docker -c "docker compose -f infra/docker-compose.yml exec -T postgres dropdb -U carbuyer carbuyer_test || true"
+sg docker -c "docker compose -f infra/docker-compose.yml exec -T postgres createdb -U carbuyer carbuyer_test"
+uv run alembic upgrade head
+uv run pytest tests/apps/lot_scraper/ -v
+git add alembic/versions/ src/carbuyer/db/models.py src/carbuyer/apps/lot_scraper/scraper.py tests/apps/lot_scraper/
+git commit -m "lot-scraper: drop LLM-owned columns from coalesce update + add enrichment_attempts column"
+```
+
+---
+
 ### Task 20: Pydantic schemas for enrichment output
 
 **Files:**
@@ -9851,7 +10020,7 @@ git commit -m "infra: postgres backup script with 30-day retention"
 - [ ] **Step 1: Write `.env.example`**
 
 ```
-DATABASE_URL=postgresql+psycopg://carbuyer:local@localhost:5432/carbuyer
+DATABASE_URL=postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer  # Phase 0 docker-compose binds host port 5433 (not 5432) to avoid collision with host-native Postgres.
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 DISCORD_BOT_TOKEN=
