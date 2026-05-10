@@ -16,7 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class LotEmbedData:
     lot_id: int
     url: str
@@ -79,6 +79,6 @@ def render_going_cheap_text(d: LotEmbedData) -> str:
         f"{d.location}\n"
         f"Current bid: {bid}  →  All-in: {all_in}\n"
         f"Estimated value: {ev}{margin}\n"
-        f"Confidence: {d.confidence_bucket} · Condition: {d.condition_categorical}\n"
+        f"Confidence: {d.confidence_bucket or '?'} · Condition: {d.condition_categorical or '?'}\n"
         f"{('✅ ' + flags) if flags else ''}"
     ).rstrip()
