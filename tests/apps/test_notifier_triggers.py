@@ -82,3 +82,36 @@ def test_not_interested_suppresses() -> None:
     s = _state(rarity_score=3.0, price_deal_score=0.30, user_action="not_interested")
     out = _run(s)
     assert out == []
+
+
+def test_showstopper_suppresses_going_cheap_but_allows_early_warning() -> None:
+    s = _state(
+        rarity_score=2.5,
+        price_deal_score=0.20,
+        has_showstopper=True,
+        user_action="interested",
+    )
+    out = _run(s)
+    triggers = {t.trigger for t in out}
+    assert "early_warning" in triggers
+    assert "going_cheap" not in triggers
+
+
+def test_bad_flag_score_suppresses_going_cheap() -> None:
+    s = _state(
+        price_deal_score=0.20,
+        flag_score=-2,
+        user_action="interested",
+    )
+    out = _run(s)
+    assert not any(t.trigger == "going_cheap" for t in out)
+
+
+def test_low_confidence_suppresses_going_cheap() -> None:
+    s = _state(
+        price_deal_score=0.20,
+        confidence_bucket="low",
+        user_action="interested",
+    )
+    out = _run(s)
+    assert not any(t.trigger == "going_cheap" for t in out)
