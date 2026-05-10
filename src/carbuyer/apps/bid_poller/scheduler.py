@@ -4,16 +4,19 @@ Computes how long to wait before re-polling a given lot based on its distance
 from closing. The closer to end time, the shorter the delay — down to 30-second
 granularity in the final 10 minutes.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from carbuyer.db.enums import LotStatus
 
-def next_poll_delay(*, scheduled_end: datetime | None, now: datetime, status: str) -> timedelta:
+
+def next_poll_delay(*, scheduled_end: datetime | None, now: datetime, status: str) -> timedelta:  # noqa: PLR0911
     """How long until we should next poll this lot."""
     if scheduled_end is None:
         return timedelta(minutes=60)
-    if status in {"closed", "unsold", "sold"}:
+    if status in {LotStatus.CLOSED, LotStatus.UNSOLD, LotStatus.SOLD}:
         return timedelta(hours=24)  # very rare re-check
     delta = scheduled_end - now
     if delta <= timedelta(minutes=10):

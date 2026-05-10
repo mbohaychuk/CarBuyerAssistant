@@ -128,6 +128,7 @@ def _patched_get_session(
 @pytest.mark.asyncio
 async def test_write_observation_no_bid_change_does_not_flip_valuation_status(
     _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _patched_get_session
     _, lot = _seed_lot(session, current_high_bid_cad=Decimal("1000.00"))
@@ -135,23 +136,39 @@ async def test_write_observation_no_bid_change_does_not_flip_valuation_status(
     await session.flush()
     original_status = lot.valuation_status
 
+    notified: list[tuple[str, str]] = []
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        notified.append((channel, payload))
+
+    monkeypatch.setattr(poller_mod, "notify", fake_notify)
+
     obs = _obs(bid=Decimal("1000.00"), status="open")
     await _write_observation(lot.id, obs)
     await session.refresh(lot)
 
     assert lot.valuation_status == original_status
     assert lot.current_high_bid_cad == Decimal("1000.00")
+    assert ("valuation_pending", str(lot.id)) not in notified
 
 
 @pytest.mark.asyncio
 async def test_write_observation_bid_change_sets_pending_and_records_history(
     _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _patched_get_session
     _, lot = _seed_lot(session, current_high_bid_cad=Decimal("500.00"))
     session.add(lot)
     await session.flush()
     lot_id = lot.id
+
+    notified: list[tuple[str, str]] = []
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        notified.append((channel, payload))
+
+    monkeypatch.setattr(poller_mod, "notify", fake_notify)
 
     obs = _obs(bid=Decimal("750.00"), status="open")
     await _write_observation(lot_id, obs)
@@ -165,6 +182,8 @@ async def test_write_observation_bid_change_sets_pending_and_records_history(
     result = (await session.execute(stmt)).scalars().all()
     assert len(result) == 1
     assert result[0].current_high_bid_cad == Decimal("750.00")
+
+    assert notified == [("valuation_pending", str(lot_id))]
 
 
 @pytest.mark.asyncio
