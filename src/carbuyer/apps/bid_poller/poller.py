@@ -1,0 +1,203 @@
+"""Bid-poller worker — Phase 7.
+
+Continuously polls open lots at a tiered cadence determined by time-to-close:
+every 30s in the final 10 minutes, 1 min within an hour, 5 min within 2 hours,
+15 min within 24 hours, 60 min otherwise.
+
+Design decisions:
+- HTTP poll_bid() calls happen OUTSIDE any DB transaction — same principle as
+  the enricher (load in short tx → close → I/O → reopen short tx → write).
+  Holding a transaction open across network I/O risks idle_in_transaction_session
+  timeout (60s).
+- Lots are re-fetched by id in the write transaction because the original
+  ORM-loaded objects belong to the closed read session.
+- Sequential per-lot processing mirrors the valuator choice — at MVP scale the
+  workload is I/O-bound per lot, not parallelism-bound across the batch.
+- The source registry (SOURCES) is used directly; HibidSource self-registers at
+  import time via register(). We enter each BidPoller via AsyncExitStack so
+  _http is initialised before any poll_bid() call.
+- No claims or queue mechanism — bid-poller selects open lots on every cycle and
+  processes whichever ones fall into the fast/slow bucket for this pass.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+
+from carbuyer.apps.bid_poller.scheduler import next_poll_delay
+from carbuyer.db.enums import LotStatus, ValuationStatus
+from carbuyer.db.models import Auction, AuctionBidHistory, AuctionLot
+from carbuyer.db.notify import notify
+from carbuyer.db.session import get_session
+from carbuyer.shared.logging import get_logger
+from carbuyer.sources.base import SOURCES, BidObservation, BidPoller, LotRef
+from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # registers plugin
+
+_REGISTERED_PLUGINS = (_HibidSource.name,)
+
+log = get_logger("bid_poller")
+
+_BATCH_LIMIT = 200
+_FAST_BUCKET_CUTOFF_SECONDS = 300
+_FAST_BUCKET_CAP = 20
+_SLOW_BUCKET_CAP = 50
+_CYCLE_SLEEP_SECONDS = 30
+
+
+def _build_pollers() -> dict[str, BidPoller]:
+    """Collect all registered BidPoller sources by name.
+
+    HibidSource self-registers at import via register(); importing this module
+    is enough to populate SOURCES["hibid"]. Filter to BidPoller instances only
+    so a future listing-only source doesn't accidentally land here.
+    """
+    return {name: s for name, s in SOURCES.items() if isinstance(s, BidPoller)}
+
+
+async def _load_open_lot_refs(
+    now: datetime,
+) -> tuple[list[tuple[int, LotRef]], list[tuple[int, LotRef]]]:
+    """Return (fast_bucket, slow_bucket) of (lot_id, LotRef) pairs.
+
+    A single short read transaction loads all open lots and the auction data
+    needed to build each LotRef and compute the scheduling bucket. The
+    transaction closes before any HTTP I/O.
+    """
+    async with get_session() as s, s.begin():
+        stmt = (
+            select(AuctionLot, Auction)
+            .join(Auction, Auction.id == AuctionLot.auction_id)
+            .where(
+                AuctionLot.lot_status.in_(
+                    [
+                        LotStatus.OPEN,
+                        LotStatus.CLOSING_SOON,
+                        LotStatus.EXTENDED,
+                    ]
+                )
+            )
+            .order_by(Auction.scheduled_end_at.asc().nulls_last())
+            .limit(_BATCH_LIMIT)
+        )
+        rows = (await s.execute(stmt)).all()
+
+        fast: list[tuple[int, LotRef]] = []
+        slow: list[tuple[int, LotRef]] = []
+
+        for lot, auction in rows:
+            delay = next_poll_delay(
+                scheduled_end=auction.scheduled_end_at,
+                now=now,
+                status=lot.lot_status,
+            )
+            ref = LotRef(
+                source=auction.source,
+                source_auction_id=auction.source_auction_id,
+                source_lot_id=lot.source_lot_id,
+                url=lot.url,
+            )
+            if delay.total_seconds() <= _FAST_BUCKET_CUTOFF_SECONDS:
+                fast.append((lot.id, ref))
+            else:
+                slow.append((lot.id, ref))
+
+    return fast, slow
+
+
+async def _write_observation(lot_id: int, obs: BidObservation) -> None:
+    """Apply a BidObservation to the lot row in a fresh write transaction.
+
+    Re-fetches lot and auction by id — the original ORM objects belong to the
+    closed read session.
+    """
+    async with get_session() as s, s.begin():
+        lot = await s.get(AuctionLot, lot_id)
+        if lot is None:
+            return
+        auction = await s.get(Auction, lot.auction_id)
+        if auction is None:
+            return
+
+        history = AuctionBidHistory(
+            lot_id=lot.id,
+            observed_at=obs.observed_at,
+            current_high_bid_cad=obs.current_high_bid_cad,
+            end_time_at_observation=obs.end_time_at_observation,
+            status_at_observation=obs.status_at_observation,
+        )
+        s.add(history)
+
+        if obs.current_high_bid_cad is not None:
+            bid_changed = lot.current_high_bid_cad != obs.current_high_bid_cad
+            lot.current_high_bid_cad = obs.current_high_bid_cad
+            lot.last_bid_observed_at = obs.observed_at
+            if bid_changed:
+                lot.valuation_status = ValuationStatus.PENDING
+                await notify(s, "valuation_pending", str(lot.id))
+
+        if obs.end_time_at_observation is not None:
+            if (
+                auction.scheduled_end_at is not None
+                and obs.end_time_at_observation > auction.scheduled_end_at
+            ):
+                lot.lot_status = LotStatus.EXTENDED
+            auction.last_seen_end_at = obs.end_time_at_observation
+
+        if obs.status_at_observation == "missing":
+            # Lot disappeared from source — treat as closed. Preserve whatever
+            # bid was last recorded; we can't know the true final price.
+            if lot.lot_status != LotStatus.CLOSED:
+                lot.lot_status = LotStatus.CLOSED
+                lot.closed_at = datetime.now(UTC)
+                lot.final_bid_cad = lot.current_high_bid_cad
+        elif obs.status_at_observation == "closed":
+            lot.lot_status = LotStatus.CLOSED
+            lot.closed_at = datetime.now(UTC)
+            lot.final_bid_cad = obs.current_high_bid_cad
+
+
+async def _poll_one(
+    lot_id: int,
+    ref: LotRef,
+    *,
+    pollers: dict[str, BidPoller],
+) -> None:
+    """Poll one lot: HTTP call outside any transaction, then write in a fresh tx."""
+    poller = pollers.get(ref.source)
+    if poller is None:
+        return
+
+    try:
+        obs = await poller.poll_bid(ref)
+    except Exception:
+        log.exception("poll_bid failed", lot_id=lot_id)
+        return
+
+    await _write_observation(lot_id, obs)
+
+
+async def main() -> None:
+    for name in _REGISTERED_PLUGINS:
+        if name not in SOURCES:
+            raise RuntimeError(f"plugin {name!r} failed to self-register at import")
+
+    pollers = _build_pollers()
+    async with AsyncExitStack() as stack:
+        for p in pollers.values():
+            await stack.enter_async_context(p)
+
+        while True:
+            now = datetime.now(UTC)
+            fast, slow = await _load_open_lot_refs(now)
+
+            for lot_id, ref in fast[:_FAST_BUCKET_CAP]:
+                await _poll_one(lot_id, ref, pollers=pollers)
+
+            for lot_id, ref in slow[:_SLOW_BUCKET_CAP]:
+                await _poll_one(lot_id, ref, pollers=pollers)
+
+            await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
