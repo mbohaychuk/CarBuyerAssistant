@@ -55,7 +55,7 @@ def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
 
 
 def _embed_data(lot: AuctionLot, auction: Auction) -> LotEmbedData:
-    location = auction.pickup_province or auction.pickup_city or "?"
+    location = ", ".join(filter(None, [auction.pickup_city, auction.pickup_province])) or "?"
     return LotEmbedData(
         lot_id=lot.id,
         url=lot.url,
