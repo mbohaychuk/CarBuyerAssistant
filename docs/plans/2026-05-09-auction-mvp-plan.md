@@ -7226,6 +7226,66 @@ End of Phase 6. The pipeline can now post real Discord messages on early-warning
 
 ---
 
+### Phase 6 — Post-implementation overlay (2026-05-10)
+
+Captured during Tasks 33-34 implementation; folded back so future readers don't redo the analysis.
+
+**Architectural change vs. the plan:**
+
+1. **Notifier posts via direct REST POST (`aiohttp`), not transient `discord.Client`.** Plan code at lines 7053-7090 spun up a fresh `discord.Client` per notification — a full gateway IDENTIFY (Discord caps at 1000/day per bot), TLS handshake, and READY round-trip per message. Replaced with raw `POST https://discord.com/api/v10/channels/{id}/messages` carrying `Authorization: Bot {token}` and a manually built `components` action-row. The persistent bot worker (Phase 5) still owns button-interaction routing via the gateway connection it already maintains, so this split costs nothing on the interaction side. One long-lived `aiohttp.ClientSession` opened in `main()`, passed through `_process_one` / `process_pending` / `_catchup_sweep`. Decision was approved by the user up front (see also Phase 5 overlay #13 which flagged this for Phase 6 to reconsider).
+
+**Plan-code corrections applied during implementation:**
+
+2. **`async_session_maker()` → `get_session()` / `get_session_maker()`.** Plan code at line 7105 references a name that doesn't exist (third phase to hit this). Used the same accessors the enricher uses.
+
+3. **`claim_pending_lots(...)` did not exist.** Added a new function in `src/carbuyer/db/queue.py` that mirrors `claim_pending_ids` but returns full ORM rows. Both functions now share a private `_mark_in_progress(session, *, ids, status_field)` helper to prevent UPDATE-shape drift.
+
+4. **`NotificationStatus.IN_PROGRESS = "in_progress"` was added** (`src/carbuyer/db/enums.py`) with `notification_status` added to `ClaimableStatusField` and `_IN_PROGRESS_BY_FIELD` (`src/carbuyer/db/queue.py`). Reversed the previous "no IN_PROGRESS for notifications" comment. Without this, two concurrent notifier workers could double-fire — and Phase 6 needs it for the watchdog hand-off (see #11 below).
+
+5. **`scheduled_end_at` set in constructor, not via post-construction mutation.** Plan code at line 7163 had `state.scheduled_end_at = auction.scheduled_end_at` after building the `LotState` — now a runtime crash because Task 33 made `LotState` `frozen=True`. Implementation passes both `lot` and `auction` to `_state_from_lot` and constructs once.
+
+6. **`LotEmbedData.top_red_flags` and `top_green_flags` are `tuple[str, ...]`.** Plan code passed lists; frozen dataclass + list field crashes on hash. Wrapped both with `tuple(...)`. Also fixed slicing — plan's `lot.desirability_signals or [...][:3]` only sliced the second branch (signals could be longer than 3 and skip the cap). Now slices both branches.
+
+7. **HTTP I/O outside DB transactions.** Plan code at line 7182 had `async with session.begin_nested(): posted = await post_message(...)` — would hold the row lock during the Discord REST call. Replaced with the enricher idiom: load in short tx → close → post → reopen short tx → write status + timestamps.
+
+**Algorithmic / structural decisions:**
+
+8. **Sequential processing inside `process_pending`.** Discord rate limits are per-bot global; concurrent posts would race the limit instantly. Diverges from the enricher's `asyncio.Semaphore + gather` pattern intentionally — documented in the `process_pending` docstring.
+
+9. **`post_message` failure → `notification_status = DONE`, no retry.** Notification posts are not retried beyond the in-call 429 / network-error one-shot (waiting `Retry-After`). Failed posts are logged and the lot moves out of the queue. Re-trying risks duplicate Discord messages because we have no idempotency key on the Discord side. Watchdog's recovery path is for stuck IN_PROGRESS lots, not for re-firing failed posts.
+
+10. **`LotState` and `TriggerResult` are `frozen=True` + `slots=True`** (Task 33). Plan had `slots=True` only. Frozen tightens the snapshot contract; both classes only contain hashable scalars, so no `tuple[...]` substitution needed.
+
+11. **Trigger evaluator `evaluate_triggers(...)` is fully pure.** No DB access, no datetime.now(), no settings reads — all five thresholds and `now` are explicit kwargs. This made Task 33 trivially testable (7 unit tests, no fixture needed) and decouples worker timing from logic correctness.
+
+**Operational / observability:**
+
+12. **Lot-vanished logging on both write paths.** If the row is deleted between claim and the SKIPPED-write or between posts and the timestamp-write, the worker now logs (warning + error respectively) rather than silently dropping. The post-then-vanish case is the more dangerous one: the message went to Discord but no `*_notified_at` was recorded — risking re-notification on watchdog recovery. Logged loudly so the operator notices.
+
+13. **Catchup sweep handles PENDING only, by design.** Worker startup drains `notification_status='pending'` rows that NOTIFY-fired during downtime. IN_PROGRESS recovery is delegated to the **Phase 2.5 watchdog**, which **does not yet exist**. First production crash will reveal this — flag for the next operational pass. Manual recovery: `UPDATE auction_lots SET notification_status='pending' WHERE notification_status='in_progress' AND updated_at < now() - interval '5 minutes'`.
+
+14. **Lot URL appended to both message renderers.** Phase 5's `render_early_warning_text` / `render_going_cheap_text` populated `LotEmbedData.url` but never rendered it — users got buttons but no link to the listing. Phase 6 fix: append `\n{url}` to the end of each rendered string (Discord auto-unfurls).
+
+15. **`location` field uses `", ".join(filter(None, [city, province])) or "?"`.** Plan example was "Calgary, AB" but the original implementation picked the first truthy of `(province, city, "?")`, returning just "AB" when both were set. Fixed to match the plan's intent.
+
+**Cleanup of Phase 5 dead code (consequence of decision #1):**
+
+16. **Removed `apps/bot/bot.py:post_to_channel`, `apps/bot/views.py:LotActionView`, `apps/bot/views.py:build_view_for_lot`** (and their tests). All three were provisional Phase 5 code that the original plan expected the notifier to call. Phase 6's REST architecture builds the components JSON directly in `discord_post.py`, so these are dead. Bot module docstring updated to clarify the bot now only owns interaction handling, not message posting.
+
+**Documented for future phases (NOT fixed in Phase 6):**
+
+17. **`last_cheap_score` re-fire branch is dead code pending a DB column.** Task 33's `LotState` declares `last_cheap_score: float | None`; Task 34's `_state_from_lot` hardcodes it to `None` because there's no `auction_lots.last_cheap_score` column. The `evaluate_triggers` re-fire branch (`elif state.last_cheap_score is not None and ...`) therefore never executes. Adding the column + populating it from the previous notification's `price_deal_score` is a future migration. Code comment in `notifier.py:52` documents the deferral; the trigger-evaluator branch itself does not (intentional — when the column lands the comment in `notifier.py` is removed and the branch wakes up automatically).
+
+18. **`# noqa: PLR0912` on `_process_one` is a complexity smell** (14 branches > the 12 limit). The function reads top-to-bottom in a single thread of control: load → evaluate → render-and-post-each-trigger → status write. Splitting would force passing 4-5 mutable accumulators between helpers. Accept the noqa; revisit if more trigger types land in Phase 7+.
+
+19. **`_patched_get_session` fixture duplicated in `test_notifier_worker.py`.** Same fragility as Phase 5 overlay #16 — depends on `session.info["maker"]` set by conftest. Now copied across `test_enricher.py`, `test_valuator.py`, and `test_notifier_worker.py`. Lifting to `conftest.py` is the right cleanup; deferred until conftest is otherwise restructured.
+
+20. **+4 pyright errors in `test_notifier_worker.py`** (private-use of `_process_one` + `_embed_data`, "unused" `_patched_get_session` fixture, deprecated `asynccontextmanager`). All four match the existing accepted pattern in `test_enricher.py` and `test_valuator.py`. Total pyright error count: 37 (Phase 5 baseline) → 41 (Phase 6 final). All four are pytest-fixture / private-test-import false positives.
+
+End of post-implementation overlay.
+
+---
+
 ## Phase 7 — Bid polling
 
 ### Task 35: Tiered cadence + bid-poller worker
