@@ -24,8 +24,9 @@ def test_cross_country_includes_inspection_and_contingency() -> None:
 
 def test_min_floor_applies_to_short_haul() -> None:
     # 100 km would yield 400 + 65 = 465 — below the 600 floor.
+    # BC inspection 125, default contingency 150.
     cost = landed_cost_premium(home="AB", dest="BC", distance_km=100)
-    expected = Decimal(600) + Decimal(125) + Decimal(150)  # BC inspection 125, default contingency 150
+    expected = Decimal(600) + Decimal(125) + Decimal(150)
     assert cost == expected
 
 
@@ -37,12 +38,12 @@ def test_unknown_destination_uses_defaults() -> None:
 
 
 def test_distance_known_pair() -> None:
-    assert distance_km_between("AB", "BC") == 1000
+    assert distance_km_between("AB", "BC") == 1000  # noqa: PLR2004
 
 
 def test_distance_unmapped_pair_uses_fallback() -> None:
     # Unmapped pair (AB↔QC outside our table) returns the cross-country default.
-    assert distance_km_between("AB", "QC") == 3000
+    assert distance_km_between("AB", "QC") == 3000  # noqa: PLR2004
 
 
 def test_distance_same_province_is_zero() -> None:

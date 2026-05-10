@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-
 PROV_INSPECTION: dict[str, int] = {
     "AB": 200, "ON": 120, "BC": 125, "QC": 125,
     "MB": 100, "SK": 75, "NS": 50, "NB": 50,

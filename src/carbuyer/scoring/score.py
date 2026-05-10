@@ -22,6 +22,15 @@ from typing import Any
 LIGHT_RED_DILUTION_THRESHOLD = 3
 LIGHT_RED_DILUTION_CAP = -2
 
+# Below this many same-make/model historical sales, "low comp count + something
+# desirable" earns the rarity bonus (signal is weakest where comps are thin).
+RARITY_LOW_COMP_THRESHOLD = 3
+# Year-over-year appreciation above this counts as "recent appreciation" in
+# rarity scoring (5%+ — below noise floor below).
+RARITY_APPRECIATION_THRESHOLD = 0.05
+# Hard ceiling on rarity_score to keep it bounded for downstream consumers.
+RARITY_SCORE_MAX = 5.0
+
 # Phase 4 overlay #10: a thin description literally cannot surface enough
 # evidence to legitimately score below -2 — the weights that fired likely
 # reflect listing-sparsity friction (mileage_unknown, no_service_records)
@@ -48,7 +57,7 @@ def all_in_cost(
     pst_pct: Decimal,
     landed_cost_premium: Decimal,
 ) -> Decimal:
-    """bid × (1+BP) × (1+GST+PST) + landed cost. Caller controls all rates."""
+    """bid * (1+BP) * (1+GST+PST) + landed cost. Caller controls all rates."""
     bp_factor = Decimal("1") + buyer_premium_pct
     tax_factor = Decimal("1") + gst_pct + pst_pct
     bid_with_premium = current_high_bid * bp_factor * tax_factor
@@ -85,7 +94,7 @@ def rarity_score(inputs: RarityInputs) -> float:
     that's the situation where the comp-set signal is weakest."""
     score = 0.0
     low_comp_with_desirability = (
-        inputs.historical_comp_count < 3
+        inputs.historical_comp_count < RARITY_LOW_COMP_THRESHOLD
         and (inputs.desirable_trim_or_spec or inputs.classic_or_collector)
     )
     if low_comp_with_desirability:
@@ -94,9 +103,12 @@ def rarity_score(inputs: RarityInputs) -> float:
         score += 1.5
     if inputs.desirable_trim_or_spec:
         score += 1.0
-    if inputs.recent_appreciation is not None and inputs.recent_appreciation > 0.05:
+    if (
+        inputs.recent_appreciation is not None
+        and inputs.recent_appreciation > RARITY_APPRECIATION_THRESHOLD
+    ):
         score += 1.0
-    return min(score, 5.0)
+    return min(score, RARITY_SCORE_MAX)
 
 
 def recommended_max_bid(
