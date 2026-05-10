@@ -4,6 +4,16 @@ Continuously polls open lots at a tiered cadence determined by time-to-close:
 every 30s in the final 10 minutes, 1 min within an hour, 5 min within 2 hours,
 15 min within 24 hours, 60 min otherwise.
 
+Pipeline integration:
+A bid change is the only signal that re-valuation is needed mid-auction. When
+this worker observes a new ``current_high_bid_cad`` it sets the lot's
+``valuation_status`` back to ``PENDING`` and emits ``NOTIFY valuation_pending``
+so the valuator (LISTEN-only on that channel) recomputes price_deal_score with
+the latest bid. The valuator in turn emits ``notification_pending`` if the new
+score crosses the threshold, waking the notifier. The bid-poller is therefore
+the head of a NOTIFY chain that closes the loop between live-auction signal
+and Discord delivery.
+
 Design decisions:
 - HTTP poll_bid() calls happen OUTSIDE any DB transaction — same principle as
   the enricher (load in short tx → close → I/O → reopen short tx → write).
@@ -18,6 +28,10 @@ Design decisions:
   _http is initialised before any poll_bid() call.
 - No claims or queue mechanism — bid-poller selects open lots on every cycle and
   processes whichever ones fall into the fast/slow bucket for this pass.
+- Crash recovery is free: there is no IN_PROGRESS state. A worker that dies
+  mid-poll leaves the lot at lot_status=open; the next cycle re-loads and
+  re-polls it. The Phase 2.5 watchdog (which sweeps stuck IN_PROGRESS rows
+  on the *_status columns) is not relevant to this worker.
 """
 
 from __future__ import annotations
