@@ -8184,17 +8184,17 @@ Phase 8 implementation. These are corrections, not additional work.
 22. **Tests added beyond the plan's single `test_download_and_resize_caps_count_and_size`:**
     - photos.py (4 tests): happy path + 3 failure paths (HTTP 404 skip,
       corrupt image bytes skip, empty URL list).
-    - vision provider (7 tests): happy path, multimodal message structure,
+    - vision provider (8 tests): happy path, multimodal message structure,
       per-image partial failure, per-image None-parsed skip, aggregation
       failure propagates, aggregation None-parsed raises RuntimeError,
-      None year/make/model formatting.
-    - vision batcher (19 tests): bucket-diff helper edge cases, shortlist
+      None year/make/model formatting, empty photo_paths runs aggregation only.
+    - vision batcher (20 tests): bucket-diff helper edge cases, shortlist
       filtering + ordering + threshold, `_process_one` happy + pessimistic
       override + no-photos + empty downloads + LLM-failed + no-NOTIFY-when-
-      no-override + missing-lot.
+      no-override + missing-lot, `main()` fail-fast on missing API key.
     - Removed: `test_vision_raises_not_implemented_until_phase8` (no longer
       true after Task 37).
-    - Net delta: +29 across the phase (289 → 318).
+    - Net delta: +31 across the phase (289 → 320).
 
 23. **Coverage gaps deferred (overlay-only, not blocking merge):**
     - No exact-threshold test (vision_confidence == 0.7 boundary, since
@@ -8202,6 +8202,62 @@ Phase 8 implementation. These are corrections, not additional work.
     - No `_process_one` test for the case where vision sees BETTER condition
       than description claimed (bucket diff might be ≥ 2, but the
       `vision_rank < desc_rank` guard correctly skips the override).
+    - No `main()` test for the for-loop's defensive try/except around
+      `_process_one` (sibling workers also lack one — same intentional gap).
+
+24. **Multi-reviewer pre-merge findings applied** (commit `6669e91`).
+    Three parallel reviewers (bugs/security, architecture/convention, test
+    coverage/observability) ran against the branch. Items applied:
+    - **Pillow decompression-bomb cap.** Default ~178MP threshold only raises
+      on 2× the limit; a ~178MP malicious upload from any auction site would
+      decompress to 1-2GB RAM before failing. Set `Image.MAX_IMAGE_PIXELS =
+      50_000_000` at module import in `photos.py`. The
+      `DecompressionBombError` raised on overlimit is caught by the existing
+      per-URL `except Exception`.
+    - **`_SHORTLIST_SCORE_THRESHOLD` and `_SHORTLIST_LIMIT` lifted to
+      Settings** (`vision_shortlist_score_threshold`, `vision_shortlist_limit`).
+      Ops can now tune nightly cost via env without a code deploy. Pessimism
+      gate constants (`_PESSIMISM_*`) stay module-level — algorithmic, not
+      ops-tunable. Reverses overlay #12's "module-constant only" stance for
+      the budget knobs only.
+    - **Per-image vision failure log** in `openai_provider.py` now includes
+      `payload.lot_id`. `photo_path` alone is a tempfile path that's gone
+      by the time anyone reads the log.
+    - **Distinct logs for the two SKIPPED paths** in batcher.py: `"vision
+      skipped — no photos"` (likely scraper-health issue: lot cleared score
+      threshold but has zero photos) vs `"vision skipped — all downloads
+      failed"` (CDN outage / all formats rejected). Both look identical in
+      the DB without these.
+    - **Override-fired log** when pessimistic override fires, including
+      vision condition + prior condition + confidence. Lets ops grep for
+      "how often is vision overriding descriptions?" without DB queries.
+    - **Lot-disappeared-before-write warning log** so the `counts["missing"]`
+      bucket has a corresponding log line. The read-tx case already had a
+      log; the write-tx case was silent.
+    - **`download_and_resize` accepts optional `lot_id`** forwarded into the
+      per-URL warning logs. A "this lot's photos fail every night" pattern
+      is now greppable without joining URL against `auction_lots.photos`.
+    - **Missing-lot test added** for `_process_one` read-tx path (overlay #22
+      previously claimed this test existed; it did not).
+    - **Empty photo_paths test added** for `provider.vision()`. Batcher
+      guards upstream, but `vision()` is a public ABC method and could be
+      called directly by scripts or future callers.
+
+25. **Bid-vs-vision race window observed** (not fixed). The vision-batcher
+    snapshots `condition_categorical` and `red_flags` outside any tx, runs
+    ~30s of LLM I/O, then re-fetches the lot in a write tx and overwrites
+    those fields based on `out` (computed against the snapshot view). If
+    `upsert_lot_with_status_cascade` rescrape/enrich runs between snapshot
+    and write, the new red_flags array gets clobbered by `_apply_vision`'s
+    `flags = list(lot.red_flags or []); flags.append(...); lot.red_flags =
+    flags` — but the override decision itself was made against stale
+    `lot.condition_categorical` data. In practice the rescrape cascade
+    resets `vision_status=PENDING`, so the next nightly run will rescore.
+    Worst-case is one over-pessimistic valuation cycle that auto-corrects
+    on next night's vision pass. The race window here (~30s LLM) is wider
+    than enricher's (~5s LLM); same family as Phase 7 overlay #14 (bid-vs-
+    valuator). Acceptable at MVP scale; a real fix would need pessimistic
+    locking or a CAS-style "compute-then-recheck-condition" pattern.
 
 ---
 
