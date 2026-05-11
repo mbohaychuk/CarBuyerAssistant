@@ -6401,6 +6401,47 @@ git commit -m "apps: valuator worker (comp set + scoring)"
 
 ---
 
+### Phase 4 — Post-implementation overlay (2026-05-09)
+
+Captured during Task 25-30 implementation; folded back here so future readers don't redo the analysis.
+
+**Schema deltas (folded into migration `1d58e4b5021c`):**
+
+1. **`valuation_attempts INTEGER NOT NULL DEFAULT 0`** added per pre-implementation overlay #6. Separate per-stage retry counter so failure modes are diagnosable from the row state alone.
+2. **`last_valuation_error TEXT NULL`** added — mirror of `last_enrichment_error`. Truncated to 500 chars at write time so a stack-trace explosion can't blow the row size.
+
+**Enum deltas (`carbuyer.db.enums.ValuationStatus`):**
+
+3. **`INSUFFICIENT_COMPS` → `INSUFFICIENT`.** The original enum value (18 chars) didn't fit the `String(16)` status column. Renamed to keep the column narrow rather than widening every status column for one new value. Semantically identical.
+4. **`SKIPPED` added.** The valuator needs a "tried, can't proceed" terminal state distinct from `FAILED` (transient retry exhausted) and `INSUFFICIENT` (comp set too thin). Fires when `make`/`model`/`year` is missing, which means the enricher never normalized the row — a valuator failure mode that's not the valuator's fault.
+
+**Settings deltas (`carbuyer.shared.config.Settings`):**
+
+5. **`valuation_batch_size: int = 30`** + **`valuation_max_attempts: int = 3`**. Mirror of the enrichment counterparts; valuator does no LLM I/O so larger batches are fine.
+6. **`excessive_red_flag_weight_threshold: int = -8`** (overlay #12). Heuristic; revisit after first 100 lots. Implementation reads `cumulative_flag_weight(red, green)` (raw pre-clip / pre-dilution-cap sum) and sets `notification_status = SKIPPED` when at or below the threshold.
+7. **`scoring_version: str = "v1"`** as a setting rather than a module-level constant so a backfill can re-pend stale rows via env override without a code deploy.
+
+**Algorithmic decisions:**
+
+8. **`flag_score` overlay #11 dilution cap interpretation.** Picked "cap mag-1 red contribution at `-2` when more than 3 fire" (vs. "drop entirely" or "rebaseline floor at -3"). Heavy reds (`|w| >= 2`) and all greens add normally on top; description-quality `"thin"` floor stacks via `max(floor, …)` after the cap. Final clip to `[-5, 5]`. Choice rationale: the literal "-2 cap" wording in the overlay matches this; it preserves the ability for genuine evidence to score lower while neutering the RB-context-flag pile-up.
+9. **`cumulative_flag_weight()` exposed as a separate helper** (`carbuyer.scoring.score`). The dilution-cap and clipping happen in `flag_score()` for display; the notifier-skip check needs the raw sum so the two responsibilities are split into two functions instead of overloading one.
+10. **`HIGH_CONFIDENCE_MIN_COMPS = 10`** in `compute_fair_value` (vs. plan's 15). Ten is the threshold where `statistics.quantiles(n=10)` yields real deciles; the plan-block's 15 was inconsistent with the plan-block's own test which expected HIGH at 10.
+11. **`ConfidenceBucket` is `StrEnum`**, not `class X(str, Enum)` — UP042 hint and matches `db.enums` style.
+12. **`value_one()` runs comp query + write in a single transaction.** Pre-implementation overlay #2 said "split if duration ever exceeds `idle_in_transaction_session_timeout=60s`." MVP comp counts are small (low thousands per make/model); current measured query time is sub-millisecond. Will split if production load shows otherwise.
+13. **`process_pending()` is sequential, not concurrent.** Valuator workload is DB-bound, not network-bound; SKIP-LOCKED across one pool gives no real win at MVP scale. If throughput becomes a problem we add a Semaphore-bounded `gather` like the enricher.
+
+**Plan code corrections (vs. the literal Task 30 code blocks):**
+
+14. **`claim_pending_lots` → `claim_pending_ids`** (returns `list[int]`, not ORM rows). Matches what actually exists in `db.queue`.
+15. **`async_session_maker` → `get_session_maker()` / `get_session()`.** Same renaming as Phase 3 had.
+16. **StrEnum status writes everywhere** (`ValuationStatus.DONE` etc.) instead of plan's bare strings.
+17. **Sparse + description_quality threading wired** (`compute_fair_value(..., sparse=lot.condition_inferred_from_sparse_listing)` and `flag_score(..., description_quality=lot.description_quality)`). Plan code consumed neither — the overlay flagged this.
+18. **`notification_status` decision in valuator** (showstopper / cumulative <= -8 → `SKIPPED`; insufficient comps → `SKIPPED`; otherwise `PENDING`). Plan code unconditionally set `pending`.
+
+End of post-implementation overlay.
+
+---
+
 End of Phase 4. Lots are now scored with `price_deal_score`, `rarity_score`, `recommended_max_bid`, and `confidence_bucket`. `notification_pending` fires next.
 
 ---
@@ -6778,6 +6819,52 @@ git commit -m "bot: discord.py bot scaffold with persistent action buttons"
 
 ---
 
+### Phase 5 — Post-implementation overlay (2026-05-10)
+
+Captured during Task 31-32 implementation; folded back here so future readers don't redo the analysis.
+
+**Plan-code corrections applied during implementation:**
+
+1. **`async_session_maker()` → `get_session()`.** Plan code in Task 32 (views.py button callbacks) referenced `async_session_maker` three times; that name doesn't exist. Same correction Phase 4 had to make. Used `get_session()` from `carbuyer.db.session` with the `async with get_session() as s, s.begin(): ...` pattern.
+
+2. **Function-local DB imports moved to module top in `views.py`.** Plan had `from carbuyer.db.session import ...` and `from carbuyer.db.models import ...` inside each callback. No circular-import reason to defer them.
+
+3. **Fail-fast on empty `settings.discord_bot_token`** in `bot.main()`. Mirrors `enricher.main()`'s `OPENAI_API_KEY` check (`sys.exit("DISCORD_BOT_TOKEN not configured")`). Caught at startup, not on first gateway connect.
+
+4. **Type annotations on all three `from_custom_id` methods.** Plan left `LotMaybeButton` and `LotNotInterestedButton` untyped (`(cls, interaction, item, match)`). Pyright strict mode required typing. discord.py 2.7's actual signature uses `Item[Any]` (matching the base class for override compatibility) and `re.Match[str]`. The plan's `Any` for `match` would have been accepted under non-strict mode but not strict.
+
+5. **Removed unused `from discord.ui import button`** in `views.py`. The decorator pattern isn't used here; we construct buttons explicitly.
+
+**Algorithmic / structural decisions:**
+
+6. **`select_channel` if-chain → dict lookup**. Refactored into a `_FIXED_ROUTES` dict + `HOT_DEAL_SCORE_THRESHOLD = 0.20` constant + an early-return for the score-conditional `going_cheap` branch. Forced by ruff PLR0911 (max-returns=6). Behaviorally identical to the plan; arguably more readable.
+
+7. **`_set_user_action(lot_id: int, action: UserAction) -> bool` helper** in `views.py`. Three button callbacks shared a near-identical body (open session, get lot, set action, commit, send confirmation). Helper deduplicates the I/O. Three distinct `DynamicItem` button classes preserved (discord.py needs class-level `template=` regex per class). Returns `bool` so the callback can distinguish success from "lot not found" (silent drop on missing lot is a UX bug — user clicks button on a notification for a deleted lot, bot says "Marked!").
+
+8. **`UserAction` enum used at the helper boundary** instead of bare `str`. Tightens callsites against typos and matches the existing `carbuyer.db.enums.UserAction` definition. `StrEnum` flows through SQLAlchemy as the underlying string, so the DB write is unchanged.
+
+9. **`LotEmbedData` is `frozen=True` with `tuple[str, ...]` flag fields.** The plan had `slots=True` only and used `list[str]` for the flag fields. The "frozen snapshot" semantics in the docstring match `frozen=True`; tuples avoid the `__hash__` runtime trap (a frozen dataclass with a `list` field crashes on `hash()` despite the frozen contract suggesting it should be safe).
+
+10. **Operational logging.** Added `on_ready` log on `CarbuyerBot` (gateway lifecycle), success-path log in `_set_user_action` and `post_to_channel`, plus the existing failure-path logs (missing lot, non-TextChannel). Operator can diagnose "user clicked but DB didn't change" without DEBUG mode.
+
+11. **`post_to_channel` channel-type-mismatch warning.** Plan silently dropped writes when the resolved channel wasn't a `TextChannel` (e.g., a Forum / Voice / Thread channel). Now logs a warning with `channel_id` and `channel_type=type(channel).__name__` so a misconfigured channel ID surfaces in logs.
+
+12. **Test rigor on `from_custom_id`.** Tests use the class's own `__discord_ui_compiled_template__` (the `ClassVar[re.Pattern[str]]` that discord.py's public `template` *property* returns at instance scope) instead of constructing a parallel regex. This catches a future template/custom_id divergence that an independent regex would silently let pass.
+
+**Documented for Phase 6 implementor (NOT fixed in Phase 5):**
+
+13. **`bot.post_to_channel` is dead code per the Phase 6 plan.** Phase 6 (Task 34, `apps/notifier/discord_post.py`) creates a transient `discord.Client` per notification rather than calling through the bot worker. The bot worker and notifier worker are separate processes; they don't share memory. The transient-client approach is wasteful (new gateway connection per message, rate-limit risk) but matches the plan. Phase 6 should reconsider — alternatives: Discord webhook URLs (lightweight), or a shared queue that the bot worker drains. Decide before implementing Task 34.
+
+14. **`needs_plugin` trigger not yet handled.** Phase 7 / Task 42 calls `select_channel(trigger="needs_plugin", score=None)` and imports `render_needs_plugin_text`. Neither exists in Phase 5. Add the `ChannelKey` value, the `_FIXED_ROUTES` entry, and the renderer when implementing that task.
+
+15. **`LotEmbedData.all_in_cad` field name** is shorter than the ORM column `AuctionLot.all_in_at_current_bid_cad`. Phase 6's `_embed_data` builder must map `lot.all_in_at_current_bid_cad → all_in_cad`. The shortened name hides the "at current bid" qualification — when the bid changes between notification events, the field reflects the bid at notification time only.
+
+16. **`_patched_get_session` fixture relies on `session.info["maker"]`.** This is the same fragile pattern used in `tests/apps/test_valuator.py` and `tests/apps/test_enricher.py`. `info["maker"]` is set by conftest; a future conftest refactor could silently break the fixture. Worth revisiting if conftest is restructured.
+
+End of post-implementation overlay.
+
+---
+
 ## Phase 6 — Notifier worker
 
 ### Task 33: Trigger evaluator (pure logic)
@@ -7139,6 +7226,66 @@ End of Phase 6. The pipeline can now post real Discord messages on early-warning
 
 ---
 
+### Phase 6 — Post-implementation overlay (2026-05-10)
+
+Captured during Tasks 33-34 implementation; folded back so future readers don't redo the analysis.
+
+**Architectural change vs. the plan:**
+
+1. **Notifier posts via direct REST POST (`aiohttp`), not transient `discord.Client`.** Plan code at lines 7053-7090 spun up a fresh `discord.Client` per notification — a full gateway IDENTIFY (Discord caps at 1000/day per bot), TLS handshake, and READY round-trip per message. Replaced with raw `POST https://discord.com/api/v10/channels/{id}/messages` carrying `Authorization: Bot {token}` and a manually built `components` action-row. The persistent bot worker (Phase 5) still owns button-interaction routing via the gateway connection it already maintains, so this split costs nothing on the interaction side. One long-lived `aiohttp.ClientSession` opened in `main()`, passed through `_process_one` / `process_pending` / `_catchup_sweep`. Decision was approved by the user up front (see also Phase 5 overlay #13 which flagged this for Phase 6 to reconsider).
+
+**Plan-code corrections applied during implementation:**
+
+2. **`async_session_maker()` → `get_session()` / `get_session_maker()`.** Plan code at line 7105 references a name that doesn't exist (third phase to hit this). Used the same accessors the enricher uses.
+
+3. **`claim_pending_lots(...)` did not exist.** Added a new function in `src/carbuyer/db/queue.py` that mirrors `claim_pending_ids` but returns full ORM rows. Both functions now share a private `_mark_in_progress(session, *, ids, status_field)` helper to prevent UPDATE-shape drift.
+
+4. **`NotificationStatus.IN_PROGRESS = "in_progress"` was added** (`src/carbuyer/db/enums.py`) with `notification_status` added to `ClaimableStatusField` and `_IN_PROGRESS_BY_FIELD` (`src/carbuyer/db/queue.py`). Reversed the previous "no IN_PROGRESS for notifications" comment. Without this, two concurrent notifier workers could double-fire — and Phase 6 needs it for the watchdog hand-off (see #11 below).
+
+5. **`scheduled_end_at` set in constructor, not via post-construction mutation.** Plan code at line 7163 had `state.scheduled_end_at = auction.scheduled_end_at` after building the `LotState` — now a runtime crash because Task 33 made `LotState` `frozen=True`. Implementation passes both `lot` and `auction` to `_state_from_lot` and constructs once.
+
+6. **`LotEmbedData.top_red_flags` and `top_green_flags` are `tuple[str, ...]`.** Plan code passed lists; frozen dataclass + list field crashes on hash. Wrapped both with `tuple(...)`. Also fixed slicing — plan's `lot.desirability_signals or [...][:3]` only sliced the second branch (signals could be longer than 3 and skip the cap). Now slices both branches.
+
+7. **HTTP I/O outside DB transactions.** Plan code at line 7182 had `async with session.begin_nested(): posted = await post_message(...)` — would hold the row lock during the Discord REST call. Replaced with the enricher idiom: load in short tx → close → post → reopen short tx → write status + timestamps.
+
+**Algorithmic / structural decisions:**
+
+8. **Sequential processing inside `process_pending`.** Discord rate limits are per-bot global; concurrent posts would race the limit instantly. Diverges from the enricher's `asyncio.Semaphore + gather` pattern intentionally — documented in the `process_pending` docstring.
+
+9. **`post_message` failure → `notification_status = DONE`, no retry.** Notification posts are not retried beyond the in-call 429 / network-error one-shot (waiting `Retry-After`). Failed posts are logged and the lot moves out of the queue. Re-trying risks duplicate Discord messages because we have no idempotency key on the Discord side. Watchdog's recovery path is for stuck IN_PROGRESS lots, not for re-firing failed posts.
+
+10. **`LotState` and `TriggerResult` are `frozen=True` + `slots=True`** (Task 33). Plan had `slots=True` only. Frozen tightens the snapshot contract; both classes only contain hashable scalars, so no `tuple[...]` substitution needed.
+
+11. **Trigger evaluator `evaluate_triggers(...)` is fully pure.** No DB access, no datetime.now(), no settings reads — all five thresholds and `now` are explicit kwargs. This made Task 33 trivially testable (7 unit tests, no fixture needed) and decouples worker timing from logic correctness.
+
+**Operational / observability:**
+
+12. **Lot-vanished logging on both write paths.** If the row is deleted between claim and the SKIPPED-write or between posts and the timestamp-write, the worker now logs (warning + error respectively) rather than silently dropping. The post-then-vanish case is the more dangerous one: the message went to Discord but no `*_notified_at` was recorded — risking re-notification on watchdog recovery. Logged loudly so the operator notices.
+
+13. **Catchup sweep handles PENDING only, by design.** Worker startup drains `notification_status='pending'` rows that NOTIFY-fired during downtime. IN_PROGRESS recovery is delegated to the **Phase 2.5 watchdog**, which **does not yet exist**. First production crash will reveal this — flag for the next operational pass. Manual recovery: `UPDATE auction_lots SET notification_status='pending' WHERE notification_status='in_progress' AND updated_at < now() - interval '5 minutes'`.
+
+14. **Lot URL appended to both message renderers.** Phase 5's `render_early_warning_text` / `render_going_cheap_text` populated `LotEmbedData.url` but never rendered it — users got buttons but no link to the listing. Phase 6 fix: append `\n{url}` to the end of each rendered string (Discord auto-unfurls).
+
+15. **`location` field uses `", ".join(filter(None, [city, province])) or "?"`.** Plan example was "Calgary, AB" but the original implementation picked the first truthy of `(province, city, "?")`, returning just "AB" when both were set. Fixed to match the plan's intent.
+
+**Cleanup of Phase 5 dead code (consequence of decision #1):**
+
+16. **Removed `apps/bot/bot.py:post_to_channel`, `apps/bot/views.py:LotActionView`, `apps/bot/views.py:build_view_for_lot`** (and their tests). All three were provisional Phase 5 code that the original plan expected the notifier to call. Phase 6's REST architecture builds the components JSON directly in `discord_post.py`, so these are dead. Bot module docstring updated to clarify the bot now only owns interaction handling, not message posting.
+
+**Documented for future phases (NOT fixed in Phase 6):**
+
+17. **`last_cheap_score` re-fire branch is dead code pending a DB column.** Task 33's `LotState` declares `last_cheap_score: float | None`; Task 34's `_state_from_lot` hardcodes it to `None` because there's no `auction_lots.last_cheap_score` column. The `evaluate_triggers` re-fire branch (`elif state.last_cheap_score is not None and ...`) therefore never executes. Adding the column + populating it from the previous notification's `price_deal_score` is a future migration. Code comment in `notifier.py:52` documents the deferral; the trigger-evaluator branch itself does not (intentional — when the column lands the comment in `notifier.py` is removed and the branch wakes up automatically).
+
+18. **`# noqa: PLR0912` on `_process_one` is a complexity smell** (14 branches > the 12 limit). The function reads top-to-bottom in a single thread of control: load → evaluate → render-and-post-each-trigger → status write. Splitting would force passing 4-5 mutable accumulators between helpers. Accept the noqa; revisit if more trigger types land in Phase 7+.
+
+19. **`_patched_get_session` fixture duplicated in `test_notifier_worker.py`.** Same fragility as Phase 5 overlay #16 — depends on `session.info["maker"]` set by conftest. Now copied across `test_enricher.py`, `test_valuator.py`, and `test_notifier_worker.py`. Lifting to `conftest.py` is the right cleanup; deferred until conftest is otherwise restructured.
+
+20. **+4 pyright errors in `test_notifier_worker.py`** (private-use of `_process_one` + `_embed_data`, "unused" `_patched_get_session` fixture, deprecated `asynccontextmanager`). All four match the existing accepted pattern in `test_enricher.py` and `test_valuator.py`. Total pyright error count: 37 (Phase 5 baseline) → 41 (Phase 6 final). All four are pytest-fixture / private-test-import false positives.
+
+End of post-implementation overlay.
+
+---
+
 ## Phase 7 — Bid polling
 
 ### Task 35: Tiered cadence + bid-poller worker
@@ -7344,6 +7491,185 @@ uv run pytest tests/apps/test_bid_scheduler.py -v
 git add src/carbuyer/apps/bid_poller/ tests/apps/test_bid_scheduler.py
 git commit -m "apps: bid-poller with tiered cadence + soft-close handling"
 ```
+
+### Phase 7 post-implementation overlay
+
+These items document divergences from the plan-as-written and operational
+decisions made during Phase 7 implementation. They are corrections to the plan,
+not additional work to do.
+
+1. **`async_session_maker` does not exist** — the recurring Phase 4/5/6 plan
+   issue. Replaced with `get_session()` and `get_session_maker()` from
+   `carbuyer.db.session`. (Same fix in every prior phase's overlay.)
+
+2. **`_build_sources()` rebuilt from `SOURCES` registry, not constructor.**
+   The plan's `_build_sources()` instantiated a fresh `HibidSource(provinces=…)`
+   that was never `__aenter__`'d, leaving `_http=None` and crashing on the first
+   `poll_bid()` call. Implementation mirrors the lot-scraper: import
+   `carbuyer.sources.hibid.source` to trigger `register()`, then read
+   `SOURCES` and filter by `isinstance(s, BidPoller)`. Source contexts entered
+   via `AsyncExitStack` in `main()`. Worker fails fast at startup if `hibid`
+   isn't registered (`_REGISTERED_PLUGINS` guard).
+
+3. **HTTP I/O moved outside DB transactions.** The plan held `session.begin()`
+   open across `await source.poll_bid(ref)`. With `statement_timeout=30s` and
+   `idle_in_transaction_session_timeout=60s` (set in `db/session.py`), a slow
+   poll would tear down the connection. Restructured to the enricher pattern:
+   `_poll_one` loads the snapshot in a short read tx → closes → calls
+   `poll_bid` → `_write_observation` opens a fresh write tx, re-fetches the
+   lot by id, applies mutations, commits.
+
+4. **`notify(s, "valuation_pending", str(lot.id))` added on bid-change writes.**
+   The plan set `lot.valuation_status = "pending"` when the bid changed but
+   never NOTIFY'd. The valuator is LISTEN-only on `valuation_pending`
+   (`apps/valuator/valuator.py:341`); without the NOTIFY it would never wake
+   on bid changes until the worker restarted and ran its catchup sweep — i.e.
+   the entire mid-auction re-scoring loop would be silently broken. NOTIFY
+   emitted inside the same write transaction as the status flip.
+
+5. **Real bug fixed: `lot.final_bid_cad = old_bid` was unbound on the "missing"
+   branch.** The plan's `old_bid` was assigned only inside
+   `if obs.current_high_bid_cad is not None:`. On the missing path
+   (`current_high_bid_cad=None` per `HibidSource.poll_bid`'s missing return),
+   `old_bid` was never bound → `NameError` at runtime. Implementation reads
+   `lot.current_high_bid_cad` from the re-fetched ORM object directly on the
+   missing branch (always bound, semantically equivalent: "preserve whatever
+   the DB last recorded").
+
+6. **`fast_poll_concurrency_cap` deleted** — the plan defined it but the main
+   loop iterated sequentially with a hardcoded `FAST_CAP=20`. Per the
+   no-dead-code policy, the helper was removed. Sequential per-batch
+   processing is documented as the intentional MVP choice; revisit if
+   throughput becomes the bottleneck.
+
+7. **`from datetime import UTC`** used throughout (Python 3.11+ idiom),
+   replacing the plan's `from datetime import timezone` / `timezone.utc`.
+
+8. **Magic numbers hoisted to module-level constants:** `_BATCH_LIMIT=200`,
+   `_FAST_BUCKET_CUTOFF_SECONDS=300`, `_FAST_BUCKET_CAP=20`,
+   `_SLOW_BUCKET_CAP=50`, `_CYCLE_SLEEP_SECONDS=30`. Required for ruff
+   `PLR2004` compliance and makes the cadence budget greppable.
+
+9. **`LotStatus` and `ValuationStatus` StrEnum members used everywhere** in
+   place of bare strings (`LotStatus.CLOSED`, `LotStatus.EXTENDED`,
+   `ValuationStatus.PENDING`). The `_load_open_lot_refs` `where(...)` clause
+   uses `LotStatus.OPEN, LotStatus.CLOSING_SOON, LotStatus.EXTENDED`.
+   The two exceptions are bare strings on
+   `obs.status_at_observation == "missing"` and `== "closed"` — those are
+   the canonical protocol values from `BidObservation` (typed `str`, not an
+   enum — `"missing"` has no `LotStatus` member). Promoting them to a
+   `Literal` type alias on `BidObservation.status_at_observation` would
+   touch the Phase 1 plugin contract surface and was deferred to a future
+   cleanup.
+
+10. **Symmetric idempotency guards** on the `"missing"` AND `"closed"`
+    observation branches (`if lot.lot_status != LotStatus.CLOSED:` before
+    overwriting `closed_at`/`final_bid_cad`). The plan only guarded the
+    missing branch. In practice closed lots drop out of `_load_open_lot_refs`
+    so the second observation is unlikely; but if the filter ever changes,
+    the asymmetry would silently bump `closed_at` on every poll. One-line
+    fix worth more than its cost.
+
+11. **`closing_soon` lot status is filter-only.** No code in the codebase
+    currently writes `LotStatus.CLOSING_SOON`; the lot-scraper's comment notes
+    soft-close detection is a future Phase 7+ refinement. The bid-poller's
+    `_load_open_lot_refs` filter accepts it for forward compatibility — when
+    soft-close detection lands, the bid-poller picks up `closing_soon` lots
+    automatically without a code change.
+
+12. **Bid-poller does NOT use IN_PROGRESS** (or any of the `*_status` queue
+    fields). It selects open lots by `lot_status` and processes them on the
+    tiered cadence. Crash recovery is therefore free: a worker that dies
+    mid-poll leaves the lot at `lot_status=open`; the next cycle re-loads
+    and re-polls it. The Phase 2.5 watchdog (which sweeps stuck IN_PROGRESS
+    rows on the four `*_status` columns) is intentionally not relevant to
+    this worker. Documented in the module docstring so a future maintainer
+    isn't tempted to add a `bid_poll_status` column out of consistency with
+    other workers.
+
+13. **Single-instance worker assumption.** No SKIP-LOCKED claim means two
+    bid-poller instances would double-poll the same lots and double-write
+    `AuctionBidHistory` rows. MVP runs one instance per the deployment plan
+    (Phase 12). Horizontal scaling would require either adding a claim
+    column or sharding by `auction_id % N` — note for Phase 12 if scale
+    grows past one host.
+
+14. **Bid-vs-valuator race documented but not fixed.** When a bid arrives
+    mid-valuation: bid-poller writes `bid=new, status=PENDING` and commits;
+    valuator's session continues with its cached lot snapshot (old bid),
+    finishes computing with the old bid value, and commits `status=DONE`.
+    The valuator's commit overwrites the bid-poller's PENDING, and the new
+    bid value coexists with a stale price_deal_score. The NOTIFY emitted by
+    bid-poller wakes the valuator loop, which finds zero PENDING rows and
+    no-ops. Net effect: stale valuation persists until the next bid arrives
+    or the next manual rescore. Acceptable at MVP scale (race window <1s,
+    valuator runs are fast); a real fix would require either pessimistic
+    locking on `current_high_bid_cad` or a "compute-then-CAS" pattern in
+    the valuator. Noted for a future correctness-hardening pass; do NOT
+    add the IN_PROGRESS guard suggested in code review — it doesn't actually
+    solve the race (only changes which side loses) and adds confusing code.
+
+15. **HTTP failure observation loss.** If `source.poll_bid` succeeds but the
+    DB write transaction fails, the `AuctionBidHistory` row is rolled back
+    and the observation is permanently lost (the lot will be re-polled next
+    cycle, but the failed observation's specific timestamp/bid is gone).
+    Acceptable at MVP scale and matches the failure surface of every other
+    worker in the pipeline. Differs from the explicit "transient retry"
+    posture of the enricher (which has `enrichment_attempts` on the lot row);
+    the bid-poller has no per-attempt counter because the cadence loop is
+    the implicit retry. Note for ops monitoring: a sustained PG outage
+    would mean a sustained gap in `auction_bid_history`.
+
+16. **Scaling cliff at ~200 open lots per cycle.** `_BATCH_LIMIT=200` plus
+    fast cap 20 + slow cap 50 = 70 polls per cycle. With ~40 lots in MVP
+    scope this is fine; with ~2000 lots (4 provinces × ~10 active auctions ×
+    ~50 lots each) we'd skip 130+ lots per cycle, degrading effective
+    polling rate proportionally. Symptom would be missed-bid notifications
+    on lots not in the closing-soon window. Address by raising `_BATCH_LIMIT`,
+    adding a "we dropped N lots" warning log, or moving to per-bucket
+    independent loops. Defer until the dashboard's lot count crosses ~500.
+
+17. **`_patched_get_session` fixture pattern now in 4 test files.** Lifting
+    to `conftest.py` continues to be deferred per Phase 5 overlay #16 / Phase
+    6 overlay #19. Tracked, not addressed in this phase.
+
+18. **Tests added beyond the plan's three scheduler tests:**
+    - 4 extra scheduler tests (no-end, unsold/sold, 1-2hr bucket, 2-24hr
+      bucket) for full cadence-table coverage.
+    - 8 poller-level tests (`tests/apps/test_bid_poller.py`):
+      `_write_observation` no-bid-change → no NOTIFY/no rescore;
+      `_write_observation` bid changed → NOTIFY + AuctionBidHistory + PENDING;
+      missing-branch closes lot, preserves final_bid_cad (regression for the
+      unbound-`old_bid` bug);
+      closed-branch closes lot, sets final_bid_cad from observation;
+      end_time > scheduled_end → EXTENDED + last_seen_end_at;
+      `_poll_one` happy path (end-to-end bid write + history + NOTIFY);
+      `_poll_one` unknown source → no-op;
+      `_poll_one` source.poll_bid raises → caught, no DB writes.
+    - Coverage gaps deferred to overlay (not blocking merge): bucketing
+      logic in `_load_open_lot_refs` (delegates to heavily-tested
+      `next_poll_delay`); `_REGISTERED_PLUGINS` startup guard.
+
+19. **Pyright baseline.** Was 41 going in, 45 going out (+4). All four
+    new errors match the existing accepted test-fixture noise pattern:
+    `reportPrivateUsage` on `_poll_one`/`_write_observation` (intentional
+    cross-module access from tests), `reportUnusedFunction` on
+    `_patched_get_session` (pyright doesn't see pytest fixture wiring),
+    `asynccontextmanager` deprecated (the test fixture idiom). Not new
+    categories.
+
+20. **Defensive `try/except` around per-lot dispatch in `main()`** + bucket-cap
+    warning logs + per-cycle info log. Final-pass review caught that
+    `_poll_one` does not catch exceptions from `_write_observation` (only
+    from `poll_bid`); without a defensive wrapper at the dispatch site, a
+    single DB transient (idle_in_transaction_session_timeout, deadlock,
+    NOTIFY commit failure) would propagate out of the `while True` loop and
+    exit the worker process. Sibling workers (enricher `_bounded`, valuator
+    and notifier `process_pending` for-loops) all wrap the per-lot dispatch.
+    Bid-poller now does the same in both fast- and slow-bucket loops.
+    Added in the same pass: a `cycle complete` info log per pass (heartbeat
+    visibility for ops) and `fast/slow bucket capped` warning logs that
+    surface the overlay #16 scaling cliff in real time before it bites.
 
 ---
 

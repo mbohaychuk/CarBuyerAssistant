@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     flip_margin_min_cad: int = 1500
     flip_margin_pct: float = 0.10
 
+    # Phase 4 valuator. batch_size mirrors enrichment_batch_size but the
+    # valuator does no LLM I/O, so it can drain larger batches.
+    valuation_batch_size: int = 30
+    valuation_max_attempts: int = 3
+    # Phase 4 overlay #12: lots whose RAW cumulative red-flag weight (pre-clip,
+    # pre-dilution-cap) is at or below this are excluded from notifications
+    # regardless of price-deal score. Heuristic; revisit after first 100 lots.
+    excessive_red_flag_weight_threshold: int = -8
+    # Phase 4 scoring version — bump on any change to scoring formula or
+    # weight tables so a backfill can re-pend stale rows.
+    scoring_version: str = "v1"
+
     log_level: str = "INFO"
     http_user_agent: str = DEFAULT_USER_AGENT
 
