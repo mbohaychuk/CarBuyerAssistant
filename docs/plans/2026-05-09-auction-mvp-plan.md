@@ -9506,9 +9506,136 @@ git add src/carbuyer/apps/dashboard/routers/needs_plugin.py src/carbuyer/apps/da
 git commit -m "needs-plugin: dashboard view + retry-routing admin endpoint"
 ```
 
+### Phase 10 post-implementation overlay
+
+Tasks 40, 41, and 42 land in this phase. **Task 43 (`/needs-plugin` dashboard
+view + retry-routing admin endpoint) is deferred to Phase 11** — it depends
+on the dashboard infrastructure (`apps/dashboard/app.py`, `deps.py`,
+`routers/`, templates, FastAPI app scaffolding) that Phase 11 Task 44
+creates. The needs-plugin view will slot naturally into Task 47's "remaining
+views" list once the dashboard skeleton exists.
+
+#### Plan-vs-code corrections (recurring + new)
+
+1. **`async_session_maker` → `get_session()` / `get_session_maker()`**
+   (recurring fix every prior phase has applied). The plan still uses it in
+   Tasks 41 & 42.
+
+2. **`from datetime import UTC`** instead of `from datetime import timezone`
+   / `timezone.utc` (Python 3.11+ idiom). Recurring.
+
+3. **Plan's "rewrite `discover_once(discoverers, registry)`" is stale.**
+   `auction_discoverer/discoverer.py:140-203` already implements the
+   platform-router dispatch pattern (`_sweep_one_discoverer` routes by
+   `ref.source` via `fetchers.get(ref.source)`, falls back to
+   `_minimal_raw_auction` for unknown). The dispatch infrastructure was
+   built into earlier-phase work; the plan describes code that no longer
+   exists in that shape. Phase 10 just needs the new plugins to
+   self-register at module import via `register(...)` — the existing
+   `_REGISTERED_PLUGINS` startup check + `SOURCES`-iterating dispatch
+   picks them up automatically.
+
+4. **Plan's `_build_sources()` updates to lot_scraper / bid_poller are
+   stale.** Those workers already iterate `SOURCES` filtered by ABC type
+   (see `lot_scraper/scraper.py:25-28`, `bid_poller/poller.py:51-72`).
+   Importing the new source modules at the top of each worker triggers
+   their `register()` side effects; the worker then picks them up via the
+   iteration. Just extend `_REGISTERED_PLUGINS` in each worker for the
+   startup-time "did this plugin actually register?" sanity check.
+
+5. **Unknown-platform source naming: `unknown:<host>`, not
+   `farmauctionguide_unknown`.** The plan uses a single bucket name;
+   `auction_discoverer/discoverer.py:153` already checks
+   `ref.source.startswith("unknown:")`. The `unknown:<host>` convention
+   preserves per-host diagnostic info and works with the existing dispatch
+   without code changes. Functionally strictly better than the plan's
+   single bucket.
+
+6. **`post_simple_message` uses direct REST POST via aiohttp**, not a
+   transient `discord.Client` per call. Phase 6 overlay #1 explicitly
+   rejected the per-call `discord.Client` pattern in favor of REST POST;
+   the button-less variant must follow the same architecture. Implemented
+   as a button-less mirror of `post_message`, sharing a new
+   `_post_with_retry(s, url, headers, payload, *, log_kwargs)` private
+   helper. `post_message` was refactored to use the helper too — DRY both
+   sides at once.
+
+7. **HTTP I/O moved outside DB transactions** in `_process_needs_plugin`.
+   Plan held the session open across the Discord HTTP call. Restructured
+   to the established Phase 3+ pattern: load snapshot in short read tx →
+   close → post → reopen short write tx to stamp `needs_plugin_notified_at
+   = now`. Mirrors `notifier._process_one` and `vision_batcher._process_one`.
+
+8. **`auction.last_notified_channel = channel_key` removed from
+   `_process_needs_plugin`.** The plan's code writes that field on
+   `Auction`, but `last_notified_channel` only exists on `AuctionLot`
+   (column ownership is per-lot, not per-auction). The write would have
+   crashed with `AttributeError` on first hit. Real bug avoided.
+
+9. **Two-listener notifier `main()` via `asyncio.TaskGroup`.** Single
+   `aiohttp.ClientSession` opened once and shared by both the existing
+   `notification_pending` listener loop AND the new `needs_plugin`
+   listener loop. TaskGroup propagates fatal errors to siblings (right
+   behavior for a worker process).
+
+10. **No explicit catchup sweep for `needs_plugin`** (intentional). The
+    auction-discoverer re-fires the NOTIFY on every sweep while
+    `needs_plugin_notified_at` is NULL (the check in `_sweep_one_discoverer`
+    gates on the column). So a notifier-side missed NOTIFY recovers on the
+    next discovery pass. Documented with a comment in `_process_needs_plugin`.
+
+11. **`ChannelKey` Literal + `_FIXED_ROUTES` dict** extended to include
+    `"needs_plugin"`. The plan added a switch-style `if trigger ==
+    "needs_plugin":` clause; the codebase uses a `_FIXED_ROUTES` dict
+    (post-Phase-5 refactor). Matched existing structure.
+
+12. **McDougall plugin is structural-only.** Plan acknowledges "selectors
+    verified during implementation against captured fixture" — no live
+    fixture is available in this session (and we don't fetch external
+    data from this conversation). The plugin registers correctly, has the
+    full `AuctionSource` interface (`version`, `parse_auction_url`,
+    `__aenter__/__aexit__`, `discover_auctions`, `fetch_auction`,
+    `fetch_lots`, `fetch_lot`, `poll_bid`), and is tested via injected
+    `MockTransport` responses. Real CSS selectors against the live site
+    are deferred — when ops captures a fixture, they update the selectors
+    in place; no other system changes needed.
+
+13. **`fetch_lots`/`fetch_lot`/`poll_bid` on `FarmAuctionGuideSource` are
+    deliberate no-ops** (router-only role). Documented in their docstrings.
+    The `return; yield` idiom is used for the empty `AsyncIterator` to
+    satisfy both pyright and the type system (the unreachable `yield`
+    makes the function a generator; the `return` exits before reaching it).
+
+14. **Tests added**:
+    - **mcdougall (11 tests):** `parse_auction_url` happy/canon/non-mcdougall/no-slug; self-register on import; version set; context-manager guard; `fetch_auction`/`fetch_lot` via MockTransport; `poll_bid` 404→missing and 200→open.
+    - **farmauctionguide (18 tests):** `resolve_platform` for hibid/mcdougall/unknown/strip-www/no-path-segment edge cases; constructible-with-provinces; self-registers; version set; discover_auctions routes known platforms; skips internal-nav links; `fetch_lots`/`fetch_lot`/`poll_bid` no-op behaviors; context-manager guard.
+    - **needs_plugin (11 tests):** `_process_needs_plugin` happy path stamps timestamp; auction not found; already-notified (dedup); non-unknown source skipped; no channel configured; `post_simple_message` returns False (no stamp); render-text happy/all-None fields; `select_channel(trigger="needs_plugin")` returns `"needs_plugin"`.
+    - **post_simple_message (7 tests):** success, 429 then success, 429 twice returns False, 400 returns False, no token returns False, network error then success, network error twice returns False. Plus a regression test asserting the payload does NOT include `components`.
+    - Net delta across Phase 10: +47 tests (341 → 388).
+
+15. **Pyright baseline.** Was 52 going in, 55 going out (+3). All three new
+    errors are in `tests/apps/test_needs_plugin.py` and match the existing
+    accepted noise pattern (`reportPrivateUsage` on `_process_needs_plugin`,
+    `reportUnusedFunction` on `_patched_get_session`, `asynccontextmanager`
+    deprecated). Zero new errors in production code.
+
+16. **Known gaps deferred (not blocking merge):**
+    - McDougall selectors are placeholders. First real McDougall auction
+      discovered will surface as `unknown:mcdougallauction.com` (correct
+      fallback behavior; the McDougall plugin's discover_auctions returns
+      0 refs against unfamiliar HTML, so farmauctionguide's router is the
+      authoritative path for now). When ops captures a fixture and updates
+      the selectors, in-flight unknown auctions can be re-routed via Task
+      43's retry button (Phase 11).
+    - Task 43 deferred to Phase 11 (dashboard infrastructure dependency).
+    - No NOTIFY-during-test pattern for the two-listener `main()`. The
+      `_process_needs_plugin` function is unit-tested directly; the
+      `_listen_needs_plugin` infinite-loop wrapper isn't. Same intentional
+      gap as every other listener loop in this codebase.
+
 ---
 
-End of Phase 10. All three MVP sources are integrated and unknown-platform auctions are flagged for manual plugin addition.
+End of Phase 10. All three MVP sources are integrated and unknown-platform auctions are flagged for manual plugin addition. Task 43 (dashboard view + retry-routing) is picked up in Phase 11 alongside the dashboard skeleton.
 
 ---
 
