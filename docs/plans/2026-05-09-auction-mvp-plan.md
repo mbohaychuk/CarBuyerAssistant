@@ -8417,6 +8417,114 @@ git add src/carbuyer/apps/auction_distiller/ tests/apps/test_distiller.py
 git commit -m "apps: auction-distiller (closed lots → historical_sales)"
 ```
 
+### Phase 9 post-implementation overlay
+
+1. **`async_session_maker` → `get_session()`/`get_session_maker()`** (recurring fix
+   every prior phase has applied).
+
+2. **`from datetime import UTC`** instead of `from datetime import timezone` /
+   `timezone.utc` (Python 3.11+ idiom; matches every other module).
+
+3. **StrEnum members for status literals.** `LotStatus.{CLOSED, SOLD, UNSOLD}`
+   in the SQL `WHERE` and `UserAction.{INTERESTED, MAYBE}` in the watched-lot
+   filter, instead of bare strings.
+
+4. **Per-lot transaction + defensive try/except** instead of one mega-tx for
+   the whole batch. Mirrors `vision_batcher`'s pattern: short read tx selects
+   eligible `(lot_id, auction_id)` pairs → close → per-id fresh write tx
+   wraps re-fetch + `distill_lot` + commit. One bad lot logs `failed` and
+   the next lot proceeds. Counts dict logged at end of run with
+   `distilled`/`kept`/`failed`/`missing`.
+
+5. **Real bug found: SQL three-valued logic dropped unreviewed lots.** The
+   plan's watched-lot filter `lot.user_action in {"interested", "maybe"} and
+   ...: continue` (in-loop) translates naturally to a SQL `WHERE` filter
+   `~user_action.in_([INTERESTED, MAYBE])`. With `user_action IS NULL` (the
+   default for unreviewed lots), `NULL IN (...)` evaluates to NULL → `NOT
+   NULL` evaluates to NULL → row filtered out. Result: every unreviewed
+   closed lot would be silently kept forever and never distilled. Fix uses
+   explicit `or_(user_action.is_(None), user_action.not_in([INTERESTED,
+   MAYBE]), closed_at <= keep_notified_cutoff)`. Caught by test failure
+   during implementation, not by inspection.
+
+6. **Critical bug caught by review: `session.delete(lot)` would raise
+   `InvalidRequestError` in production.** The `AuctionLot.bid_history`
+   relationship had `lazy="raise"` AND `cascade="all, delete-orphan"`. When
+   `session.delete()` runs the unit-of-work, `delete-orphan` semantics
+   require iterating the cascaded collection — which forces a lazy load —
+   which raises with `'AuctionLot.bid_history' is not available due to
+   lazy='raise'`. Existing distiller tests passed only because they added
+   the lot in the same session (collection in-memory empty); production
+   loads via `session.get(AuctionLot, lot_id)` (collection unloaded). Bid-
+   poller writes history on every poll, so essentially every closed lot
+   would have history and fail distillation. Fix: added `passive_deletes=True`
+   to the `bid_history` relationship in `models.py` — delegates the cascade
+   to the existing `ondelete="CASCADE"` FK. Regression test
+   (`test_distill_lot_cascade_deletes_bid_history_via_fresh_session`) seeds
+   bid history, commits, opens a NEW session via `get_session()`, calls the
+   production code path, and asserts both lot and history rows are gone.
+   Test fails (`InvalidRequestError`) without the model fix; passes with it.
+
+7. **`was_notified` checks all five `*_notified_at` columns** (cheap,
+   early_warning, closing, trajectory, extended), not just the two the plan
+   mentioned. The Phase 9 purpose ("did we ever push this lot to a Discord
+   channel?") needs all of them — otherwise lots that triggered only
+   closing/trajectory/extended notifications would be misrecorded.
+
+8. **`main(now: datetime | None = None)` parameter added** for testability +
+   backfill support. Defaults to `datetime.now(UTC)` for production cron;
+   tests pass a fixed `now` to make the cutoff arithmetic deterministic.
+
+9. **Tests added beyond the plan's single `test_distill_lot_creates_historical_sale`:**
+   - `test_distill_lot_unsold_disposition`, `test_distill_lot_was_notified_*`
+     (3 variants for cheap, early_warning, none).
+   - `test_main_skips_recently_closed`, `test_main_skips_open_lot`,
+     `test_main_skips_purchased_by_us`.
+   - `test_main_keeps_watched_lots_within_keep_window`,
+     `test_main_keeps_maybe_lots_within_keep_window`,
+     `test_main_distills_old_watched_lots`.
+   - `test_main_distills_eligible_lot_end_to_end`.
+   - `test_main_distills_sold_and_unsold_status`.
+   - `test_main_bad_lot_does_not_block_others` (defensive try/except behavior).
+   - `test_main_distills_not_interested_lot` (locks in the SQL three-valued
+     fix — would have silently dropped this lot in the original plan code).
+   - `test_distill_lot_cascade_deletes_bid_history_via_fresh_session` (locks
+     in the `passive_deletes=True` fix — would raise without it).
+   - Plan's bug `Decimal("8800.000")` assertion fixed to `Decimal("8800.00")`
+     so it round-trips through the `Numeric(12, 2)` column correctly.
+   - Net delta: 17 new tests (320 → 337, then +2 from review fixes → 339).
+
+10. **Drop `delete` from imports** — plan imported `from sqlalchemy import
+    delete, select` but only used ORM `session.delete(lot)`. Unused.
+
+11. **Drop `@pytest.mark.asyncio` decorators** — `asyncio_mode = "auto"` in
+    `pyproject.toml` makes them redundant.
+
+12. **Module docstring** covers cron-driven model, watched-lot exception,
+    per-lot tx + try/except rationale, and crash recovery via "next nightly
+    run picks up still-eligible lots."
+
+13. **Minor known gaps deferred (not blocking merge):**
+    - `disposition_reason="sold" if final_bid is not None else "unsold"`
+      mis-classifies a `LotStatus.SOLD` lot with null `final_bid_cad` as
+      "unsold". Vanishingly rare combination; the column default "unknown"
+      would be more honest. Bare strings — there's no `Disposition` enum
+      yet. Future cleanup could add one.
+    - Orphaned `Auction` rows after all their lots are distilled: the FK
+      cascade is auction → lots (not the reverse), so distilled lots leave
+      empty auctions in the `auctions` table. Phase 12 territory.
+    - `observed_first_at = auction.first_seen_at` is an auction-level proxy
+      for a per-lot first-scrape time (no per-lot column exists). Comment
+      added so the next reader doesn't assume per-lot precision.
+    - The implementer's commit auto-reformatted `db/models.py` (~190 lines
+      of one-arg-per-line wrapping). Unrelated to the bug fix but consistent
+      with project ruff format. Left as-is.
+
+14. **Pyright baseline.** Was 50 going in, 52 going out (+2). Both new
+    errors are in `tests/apps/test_distiller.py` and match the existing
+    accepted noise pattern (`reportUnusedFunction` on `_patched_get_session`,
+    `asynccontextmanager` deprecated). Zero new errors in production code.
+
 ---
 
 End of Phase 9. The pipeline is complete from discovery through bid polling, vision, and distillation. Phase 10 adds two more sources; Phase 11 builds the dashboard; Phase 12 wires production deployment.
