@@ -84,3 +84,26 @@ def render_going_cheap_text(d: LotEmbedData) -> str:
         f"{('✅ ' + flags) if flags else ''}\n"
         f"{d.url}"
     ).rstrip()
+
+
+def render_needs_plugin_text(
+    *,
+    auction_id: int,
+    url: str,
+    auctioneer_name: str | None,
+    pickup_city: str | None,
+    pickup_province: str | None,
+    scheduled_start_at: datetime | None,
+) -> str:
+    location = ", ".join(filter(None, [pickup_city, pickup_province])) or "?"
+    when = scheduled_start_at.strftime("%b %d") if scheduled_start_at else "(start date unknown)"
+    return (
+        f"🔌 NEW PLATFORM — needs a scraper plugin\n"
+        f"Auctioneer: {auctioneer_name or '(unknown)'}\n"
+        f"Location: {location}\n"
+        f"Auction starts: {when}\n"
+        f"URL: {url}\n\n"
+        f"Add a plugin under src/carbuyer/sources/<name>/ before the auction closes "
+        f"to capture lot data. After deploying the plugin, click 'Retry routing' "
+        f"on /needs-plugin (auction id {auction_id}) to reprocess this auction."
+    )

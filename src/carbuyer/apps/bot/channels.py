@@ -23,6 +23,7 @@ ChannelKey = Literal[
     "auction_watch",
     "vision_updates",
     "system_health",
+    "needs_plugin",
 ]
 
 HOT_DEAL_SCORE_THRESHOLD: Final[float] = 0.20
@@ -36,6 +37,7 @@ _FIXED_ROUTES: Final[dict[str, ChannelKey]] = {
     "lot_extended": "auction_closing",
     "vision_update": "vision_updates",
     "system": "system_health",
+    "needs_plugin": "needs_plugin",
 }
 
 
