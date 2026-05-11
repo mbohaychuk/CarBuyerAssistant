@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 
-from carbuyer.apps.notifier.discord_post import post_message
+from carbuyer.apps.notifier.discord_post import post_message, post_simple_message
 
 
 def _mock_response(status: int, headers: dict[str, str] | None = None) -> MagicMock:
@@ -219,4 +219,153 @@ async def test_post_message_network_error_twice_returns_false(
     )
 
     result = await post_message(1, "msg", 5, session=session)
+    assert result is False
+
+
+# ─── post_simple_message ───
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_no_token_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "",
+    )
+    session = MagicMock()
+    result = await post_simple_message(12345, "hello", session=session)
+    assert result is False
+    assert not session.post.called
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok123",
+    )
+    captured: list[dict[str, Any]] = []
+
+    session = MagicMock()
+
+    @asynccontextmanager  # type: ignore[arg-type]
+    async def _post(url: str, *, headers: dict[str, str], json: Any) -> Any:
+        captured.append({"url": url, "headers": headers, "json": json})
+        resp = MagicMock()
+        resp.status = 200
+        resp.headers = {}
+        yield resp
+
+    session.post = _post
+
+    result = await post_simple_message(99, "system alert", session=session)
+    assert result is True
+    assert len(captured) == 1
+    call = captured[0]
+    assert "channels/99/messages" in call["url"]
+    assert call["headers"]["Authorization"] == "Bot tok123"
+    # No components in a simple message.
+    assert "components" not in call["json"]
+    assert call["json"]["content"] == "system alert"
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_429_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.asyncio.sleep", AsyncMock(),
+    )
+
+    r1 = _mock_response(429, {"Retry-After": "0.01"})
+    r2 = _mock_response(200)
+    session = _make_session(r1, r2)
+
+    result = await post_simple_message(1, "msg", session=session)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_429_twice_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.asyncio.sleep", AsyncMock(),
+    )
+
+    r1 = _mock_response(429, {"Retry-After": "0.01"})
+    r2 = _mock_response(429, {"Retry-After": "0.01"})
+    session = _make_session(r1, r2)
+
+    result = await post_simple_message(1, "msg", session=session)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_400_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+
+    call_count = [0]
+    session = MagicMock()
+
+    @asynccontextmanager  # type: ignore[arg-type]
+    async def _post(*args: Any, **kwargs: Any) -> Any:
+        call_count[0] += 1
+        resp = MagicMock()
+        resp.status = 400
+        resp.headers = {}
+        resp.text = AsyncMock(return_value="bad request")
+        yield resp
+
+    session.post = _post
+
+    result = await post_simple_message(1, "msg", session=session)
+    assert result is False
+    assert call_count[0] == 1  # no retry on 400
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_network_error_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.asyncio.sleep", AsyncMock(),
+    )
+
+    r2 = _mock_response(200)
+    session = _make_session_with_errors(aiohttp.ClientError("conn reset"), r2)
+
+    result = await post_simple_message(1, "msg", session=session)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_post_simple_message_network_error_twice_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.settings.discord_bot_token", "tok",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.discord_post.asyncio.sleep", AsyncMock(),
+    )
+
+    session = _make_session_with_errors(
+        aiohttp.ClientError("conn reset"),
+        aiohttp.ClientError("conn reset again"),
+    )
+
+    result = await post_simple_message(1, "msg", session=session)
     assert result is False
