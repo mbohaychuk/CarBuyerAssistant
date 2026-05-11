@@ -147,12 +147,14 @@ async def upsert_lot_with_status_cascade(
     if content_changed or parser_changed:
         lot.enrichment_status = EnrichmentStatus.PENDING
         lot.valuation_status = ValuationStatus.PENDING
-        # vision_status='skipped' is set by the vision-batcher when a lot is
-        # outside the top-10% deal-score gate. Don't promote skipped → pending
-        # on a content rescrape — vision is score-gated, and re-running it
-        # burns OpenAI vision-API budget on lots already judged not-worth-it.
-        # The batcher itself will re-evaluate on its next nightly pass if the
-        # deal score has improved.
+        # vision_status='skipped' is set by the Phase 8 vision-batcher when a
+        # lot has no photos OR every photo download/decode failed. Sub-threshold
+        # lots stay PENDING and are simply not selected by the batcher's
+        # shortlist that night — they re-enter the shortlist automatically if a
+        # bid update lifts their price_deal_score above the threshold. Don't
+        # promote SKIPPED → PENDING on a content rescrape: SKIPPED means
+        # "no usable photos", and a rescrape doesn't add photos that weren't
+        # there before.
         if lot.vision_status != VisionStatus.SKIPPED:
             lot.vision_status = VisionStatus.PENDING
         lot.notification_status = NotificationStatus.PENDING
