@@ -178,6 +178,11 @@ async def _sweep_one_discoverer(
                 session, raw, discovered_via=discoverer.name,
             )
             await notify(session, "auction_pending", str(auction.id))
+            if (
+                ref.source.startswith("unknown:")
+                and auction.needs_plugin_notified_at is None
+            ):
+                await notify(session, "needs_plugin", str(auction.id))
         found += 1
     return found
 
