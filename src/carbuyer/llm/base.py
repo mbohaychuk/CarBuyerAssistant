@@ -49,6 +49,10 @@ class DescribeInput:
 
 @dataclass(slots=True)
 class VisionInput:
+    # lot_id is forwarded into per-call usage logs so cost/latency lines stay
+    # correlatable to a specific lot in production. None is allowed for
+    # standalone evaluations / smoke tests that aren't tied to a DB row.
+    lot_id: int | None
     photo_paths: list[str]
     year: int | None
     make: str | None

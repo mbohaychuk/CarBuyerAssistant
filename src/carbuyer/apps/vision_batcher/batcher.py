@@ -111,19 +111,24 @@ def _bucket_diff(a: str | None, b: str | None) -> int:
     return abs(CONDITION_RANK.get(a, 2) - CONDITION_RANK.get(b, 2))
 
 
-def _apply_vision(lot: AuctionLot, out: VisionOutput) -> None:
+def _apply_vision(lot: AuctionLot, out: VisionOutput) -> bool:
     """Mutate lot with vision output. Pure assignment — no I/O.
 
-    Applies the pessimistic-condition override when vision_confidence and
-    bucket-distance thresholds are both met.  The override revises
-    condition_categorical down to the vision value, appends a synthetic red
-    flag, and marks valuation_status PENDING so the valuator rescores.
+    Returns True iff the pessimistic-condition override fired (caller uses this
+    to decide whether to NOTIFY ``valuation_pending`` — re-checking
+    ``lot.valuation_status`` would over-notify on lots that were already
+    PENDING when vision started, e.g. fresh rescrapes).
+
+    The override revises condition_categorical down to the vision value,
+    appends a synthetic red flag, and marks valuation_status PENDING so the
+    valuator rescores.
     """
     lot.vision_findings = out.model_dump()
     lot.vision_condition_overall = out.overall_vision_condition
     lot.vision_confidence = out.vision_confidence
     lot.vision_contradictions = out.contradictions_with_description
 
+    override_fired = False
     if (
         out.vision_confidence > _PESSIMISM_CONFIDENCE_THRESHOLD
         and _bucket_diff(
@@ -140,17 +145,25 @@ def _apply_vision(lot: AuctionLot, out: VisionOutput) -> None:
             lot.condition_categorical = out.overall_vision_condition
         flags = list(lot.red_flags or [])
         # Synthetic vision-only flag — not part of the description taxonomy.
+        # Fall back to a generic message when the LLM produced no contradiction
+        # strings, so dashboard surfaces something readable.
+        evidence = (
+            ", ".join(out.contradictions_with_description)
+            or "vision condition mismatch"
+        )
         flags.append(
             {
                 "flag": "description_oversells_condition",
-                "evidence": ", ".join(out.contradictions_with_description),
+                "evidence": evidence,
                 "weight": -2,
             }
         )
         lot.red_flags = flags
         lot.valuation_status = ValuationStatus.PENDING
+        override_fired = True
 
     lot.vision_status = VisionStatus.DONE
+    return override_fired
 
 
 async def _write_status(lot_id: int, status: VisionStatus) -> None:
@@ -230,6 +243,7 @@ async def _process_one(
             return "skipped"
 
         payload = VisionInput(
+            lot_id=snapshot.lot_id,
             photo_paths=[str(p) for p in paths],
             year=snapshot.year,
             make=snapshot.make,
@@ -245,14 +259,13 @@ async def _process_one(
             await _write_status(lot_id, VisionStatus.FAILED)
             return "failed"
 
-    # 3. Apply result in a short write tx; NOTIFY if rescore needed.
+    # 3. Apply result in a short write tx; NOTIFY only when the override fired.
     async with get_session() as s, s.begin():
         lot = await s.get(AuctionLot, lot_id)
         if lot is None:
             return "missing"
-        _apply_vision(lot, out)
-        if lot.valuation_status == ValuationStatus.PENDING:
-            # Pessimistic override fired — valuator must rescore with revised condition.
+        override_fired = _apply_vision(lot, out)
+        if override_fired:
             await notify(s, "valuation_pending", str(lot.id))
     return "done"
 

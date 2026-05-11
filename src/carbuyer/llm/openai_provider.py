@@ -61,8 +61,18 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI implementation. Implements both `describe` and `vision`
-    (Phase 8 fills in the vision pass — for now it raises NotImplementedError).
+    """OpenAI implementation of `describe` and `vision` (Phase 3 + Phase 8).
+
+    Both methods funnel through `_parse_to`, which is the single chokepoint
+    for the structured-output API call shape and per-call usage logging
+    (prompt_tokens / completion_tokens / total_tokens / duration_ms tagged
+    with a `kind` label: `describe`, `vision_per_image`, `vision_aggregate`).
+
+    The vision pass fans out one per-image LLM call per photo, then a single
+    aggregation call over the per-image JSON. Per-image failures (network
+    blips, schema-rejected output) are caught and skipped so partial photos
+    still aggregate; aggregation failures propagate so the worker can flip
+    `vision_status=FAILED`.
     """
 
     name = "openai"
@@ -206,7 +216,7 @@ class OpenAIProvider(LLMProvider):
                     messages=per_image_messages,
                     max_tokens=_VISION_PER_IMAGE_MAX_TOKENS,
                     kind="vision_per_image",
-                    lot_id=None,
+                    lot_id=payload.lot_id,
                 )
                 per_image_results.append(result)
             except Exception:
@@ -233,5 +243,5 @@ class OpenAIProvider(LLMProvider):
             messages=agg_messages,
             max_tokens=_VISION_AGGREGATE_MAX_TOKENS,
             kind="vision_aggregate",
-            lot_id=None,
+            lot_id=payload.lot_id,
         )
