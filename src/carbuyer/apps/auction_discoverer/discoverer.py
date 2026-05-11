@@ -18,10 +18,16 @@ from carbuyer.sources.base import (
     AuctionRef,
     RawAuction,
 )
+from carbuyer.sources.farmauctionguide.source import (
+    FarmAuctionGuideSource as _FagSource,  # registers plugin
+)
 from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # registers plugin
+from carbuyer.sources.mcdougall.source import (
+    McDougallSource as _McDougallSource,  # registers plugin
+)
 from carbuyer.sources.resolver import canonicalize_url
 
-_REGISTERED_PLUGINS = (_HibidSource.name,)
+_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name, _FagSource.name)
 
 log = get_logger("auction_discoverer")
 
