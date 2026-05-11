@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from carbuyer.llm.base import DescribeInput, VisionInput
+from carbuyer.llm.base import DescribeInput
 from carbuyer.llm.openai_provider import DESCRIBE_MAX_TOKENS, OpenAIProvider
 from carbuyer.llm.schemas import (
     EnrichmentOutput,
@@ -139,16 +139,6 @@ async def test_provider_async_context_manager_closes_client() -> None:
         assert p is provider
     provider.client.close.assert_awaited_once()
 
-
-@pytest.mark.asyncio
-async def test_vision_raises_not_implemented_until_phase8() -> None:
-    provider = _provider_with_mock(_enrichment_fixture())
-    with pytest.raises(NotImplementedError, match="Phase 8"):
-        await provider.vision(VisionInput(
-            photo_paths=[], year=None, make=None, model=None,
-            description_condition=None,
-            description_red_flags=[], description_green_flags=[],
-        ))
 
 
 def test_openai_provider_constructor_passes_retry_and_timeout(
