@@ -26,12 +26,14 @@ def create_app() -> FastAPI:
         feed,
         health,
         lots,
+        needs_plugin,
         purchases,
         sold,
         watched,
     )
     for router in (
         feed, closing, watched, lots, comps, sold, purchases, health, actions,
+        needs_plugin,
     ):
         app.include_router(router.router)
     return app
