@@ -226,6 +226,44 @@ async def test_distill_lot_was_notified_true_when_closing_notified_set(
     assert sales[0].was_notified is True
 
 
+async def test_distill_lot_was_notified_true_when_trajectory_notified_set(
+    session: AsyncSession,
+) -> None:
+    auction = _make_auction(session, source_auction_id="A5b")
+    lot = _make_lot(
+        session,
+        auction,
+        source_lot_id="L5b",
+        trajectory_notified_at=_NOW - timedelta(days=25),
+    )
+    await session.flush()
+
+    await distill_lot(session, lot, auction)
+    await session.flush()
+
+    sales = (await session.execute(sa_select(HistoricalSale))).scalars().all()
+    assert sales[0].was_notified is True
+
+
+async def test_distill_lot_was_notified_true_when_extended_notified_set(
+    session: AsyncSession,
+) -> None:
+    auction = _make_auction(session, source_auction_id="A5c")
+    lot = _make_lot(
+        session,
+        auction,
+        source_lot_id="L5c",
+        extended_notified_at=_NOW - timedelta(days=25),
+    )
+    await session.flush()
+
+    await distill_lot(session, lot, auction)
+    await session.flush()
+
+    sales = (await session.execute(sa_select(HistoricalSale))).scalars().all()
+    assert sales[0].was_notified is True
+
+
 async def test_distill_lot_was_notified_false_when_no_notification(
     session: AsyncSession,
 ) -> None:

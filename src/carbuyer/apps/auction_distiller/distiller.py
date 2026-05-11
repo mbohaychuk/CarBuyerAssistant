@@ -31,6 +31,12 @@ log = get_logger("distiller")
 
 # Algorithmic retention cutoffs — not ops-tunable cost knobs (same precedent as
 # _PESSIMISM_* in vision-batcher). Change these with a code deploy.
+#
+# DISTILL_AGE_DAYS is load-bearing with carbuyer.scoring.comps.RECENT_AUCTION_LOTS_DAYS:
+# the comp-builder reads from auction_lots within that window AND from historical_sales
+# beyond it. They must stay equal — if DISTILL is shorter, lots vanish from auction_lots
+# while the comp window still references them (gap); if DISTILL is longer, the same sale
+# appears in both tables (double-counted). Change them together.
 DISTILL_AGE_DAYS = 14
 KEEP_NOTIFIED_DAYS = 90
 
@@ -102,6 +108,7 @@ async def main(now: datetime | None = None) -> None:
     """
     if now is None:
         now = datetime.now(UTC)
+    log.info("distiller starting", now=now.isoformat())
     cutoff = now - timedelta(days=DISTILL_AGE_DAYS)
     keep_notified_cutoff = now - timedelta(days=KEEP_NOTIFIED_DAYS)
 
@@ -129,6 +136,11 @@ async def main(now: datetime | None = None) -> None:
 
     candidate_ids = [(row[0], row[1]) for row in rows]
     log.info("distiller candidates", count=len(candidate_ids))
+    if not candidate_ids:
+        # Distinct from a "complete with all-zeros counts" line — makes the
+        # "ran and had nothing to do" case unambiguous in nightly logs.
+        log.info("distiller no eligible lots; exiting")
+        return
 
     counts: dict[str, int] = {"distilled": 0, "missing": 0, "failed": 0}
     for lot_id, auction_id in candidate_ids:
@@ -147,7 +159,7 @@ async def main(now: datetime | None = None) -> None:
                 await distill_lot(session, lot, auction)
             counts["distilled"] += 1
         except Exception:
-            log.exception("distill_lot failed", lot_id=lot_id)
+            log.exception("distill_lot failed", lot_id=lot_id, auction_id=auction_id)
             counts["failed"] += 1
 
     log.info("distiller complete", **counts)
