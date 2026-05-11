@@ -17,6 +17,7 @@ The query stays in two SELECTs (no UNION) because:
   one-clever-query that the planner gets wrong; two narrow indexed selects
   are predictable.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,6 +32,12 @@ from carbuyer.db.models import AuctionLot, HistoricalSale
 # Recency window for auction-lot comps. Older lots are out-of-distribution
 # (market moves, seasonality) and the auction-distiller is expected to have
 # promoted them to historical_sales by then anyway.
+#
+# Load-bearing with carbuyer.apps.auction_distiller.distiller.DISTILL_AGE_DAYS:
+# they MUST stay equal. Distiller deletes lots older than DISTILL_AGE_DAYS from
+# auction_lots after copying them into historical_sales. If this window is
+# shorter than DISTILL, lots vanish before the comp builder is done with them
+# (gap). If longer, the same sale appears in both tables (double-counted).
 RECENT_AUCTION_LOTS_DAYS = 14
 
 
@@ -102,15 +109,17 @@ async def build_comp_set(
         price = h.final_price_with_premium_cad or h.final_listed_price_cad
         if price is None:
             continue
-        comps.append(ComparableSale(
-            price_cad=Decimal(price),
-            sale_channel=h.sale_channel,
-            year=h.year,
-            mileage_km=h.mileage_km,
-            days_listed=h.days_listed,
-            disposition_reason=h.disposition_reason,
-            source="historical_sales",
-        ))
+        comps.append(
+            ComparableSale(
+                price_cad=Decimal(price),
+                sale_channel=h.sale_channel,
+                year=h.year,
+                mileage_km=h.mileage_km,
+                days_listed=h.days_listed,
+                disposition_reason=h.disposition_reason,
+                source="historical_sales",
+            )
+        )
     for lot in al_rows:
         bid = lot.final_bid_cad
         if bid is None:
@@ -118,13 +127,15 @@ async def build_comp_set(
         # MVP: every AuctionLot comes from an estate-class auction source
         # (HiBid). When McDougall / RB land in Phase 10, this will need to
         # read from the joined Auction.auction_subtype to choose the channel.
-        comps.append(ComparableSale(
-            price_cad=Decimal(bid),
-            sale_channel="auction_estate",
-            year=lot.year,
-            mileage_km=lot.mileage_km,
-            days_listed=None,
-            disposition_reason="sold",
-            source="auction_lots",
-        ))
+        comps.append(
+            ComparableSale(
+                price_cad=Decimal(bid),
+                sale_channel="auction_estate",
+                year=lot.year,
+                mileage_km=lot.mileage_km,
+                days_listed=None,
+                disposition_reason="sold",
+                source="auction_lots",
+            )
+        )
     return comps

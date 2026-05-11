@@ -42,7 +42,10 @@ class Auction(Base, TimestampMixin):
     source_auction_id: Mapped[str] = mapped_column(String(128), nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     auction_subtype: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="estate", server_default="estate",
+        String(32),
+        nullable=False,
+        default="estate",
+        server_default="estate",
     )
     auctioneer_name: Mapped[str | None] = mapped_column(String(255))
     auctioneer_external_id: Mapped[str | None] = mapped_column(String(128))
@@ -62,12 +65,19 @@ class Auction(Base, TimestampMixin):
     gst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     pst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="upcoming", server_default="upcoming", index=True,
+        String(32),
+        nullable=False,
+        default="upcoming",
+        server_default="upcoming",
+        index=True,
     )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     discovery_confidence: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="high", server_default="high",
+        String(16),
+        nullable=False,
+        default="high",
+        server_default="high",
     )
     needs_plugin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     routing_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -80,14 +90,19 @@ class Auction(Base, TimestampMixin):
     # Names of Source plugins/routers that have surfaced this auction.
     # text[] (not JSONB) so we can append + dedupe atomically inside ON CONFLICT.
     discovered_via: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+        ARRAY(Text),
+        default=list,
+        server_default=text("'{}'::text[]"),
+        nullable=False,
     )
 
     lots: Mapped[list[AuctionLot]] = relationship(back_populates="auction", lazy="raise")
 
     __table_args__ = (
         UniqueConstraint(
-            "source", "source_auction_id", name="uq_auctions_source_source_auction_id",
+            "source",
+            "source_auction_id",
+            name="uq_auctions_source_source_auction_id",
         ),
     )
 
@@ -98,7 +113,8 @@ class AuctionLot(Base, TimestampMixin):
     # ── Owned by: lot-scraper (initial insert + URL/photo refresh) ──────────
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     auction_id: Mapped[int] = mapped_column(
-        ForeignKey("auctions.id", ondelete="CASCADE"), index=True,
+        ForeignKey("auctions.id", ondelete="CASCADE"),
+        index=True,
     )
     source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
     lot_number: Mapped[str | None] = mapped_column(String(64))
@@ -110,7 +126,10 @@ class AuctionLot(Base, TimestampMixin):
     title: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
     photos: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+        ARRAY(Text),
+        default=list,
+        server_default=text("'{}'::text[]"),
+        nullable=False,
     )
 
     # ── Owned by: lot-scraper (initial), description-enricher (LLM normalization) ──
@@ -124,7 +143,10 @@ class AuctionLot(Base, TimestampMixin):
     mileage_km: Mapped[int | None] = mapped_column(Integer)
     vin: Mapped[str | None] = mapped_column(String(32))
     title_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+        String(32),
+        nullable=False,
+        default="UNKNOWN",
+        server_default="UNKNOWN",
     )
     province_of_origin: Mapped[str | None] = mapped_column(String(8))
 
@@ -132,13 +154,22 @@ class AuctionLot(Base, TimestampMixin):
     condition_categorical: Mapped[str | None] = mapped_column(String(16))
     condition_confidence: Mapped[float | None] = mapped_column()
     red_flags: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
     )
     green_flags: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
     )
     showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
     )
     summary: Mapped[str | None] = mapped_column(Text)
     carfax_url: Mapped[str | None] = mapped_column(Text)
@@ -146,16 +177,28 @@ class AuctionLot(Base, TimestampMixin):
 
     # ── Owned by: description-enricher (rarity/desirability fields, LLM) ────
     desirable_trim_or_spec: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
     classic_or_collector: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
     desirability_signals: Mapped[list[str]] = mapped_column(
-        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
     )
     desirability_evidence: Mapped[list[str]] = mapped_column(
-        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
     )
     # historical_comp_count: written by valuator (DB-derived signal).
     historical_comp_count: Mapped[int | None] = mapped_column(Integer)
@@ -168,7 +211,10 @@ class AuctionLot(Base, TimestampMixin):
     vision_condition_overall: Mapped[str | None] = mapped_column(String(16))
     vision_confidence: Mapped[float | None] = mapped_column()
     vision_contradictions: Mapped[list[str]] = mapped_column(
-        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
     )
 
     # ── Owned by: bid-poller (continuous tiered cadence) ────────────────────
@@ -177,7 +223,11 @@ class AuctionLot(Base, TimestampMixin):
     bid_count_visible: Mapped[int | None] = mapped_column(Integer)
     reserve_met: Mapped[bool | None] = mapped_column(Boolean)
     lot_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="open", server_default="open", index=True,
+        String(32),
+        nullable=False,
+        default="open",
+        server_default="open",
+        index=True,
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -195,7 +245,10 @@ class AuctionLot(Base, TimestampMixin):
     flag_score: Mapped[int | None] = mapped_column(Integer)
     confidence_bucket: Mapped[str | None] = mapped_column(String(16))
     suspicious_underprice_flag: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
     scoring_version: Mapped[str | None] = mapped_column(String(32))
     weights_hash: Mapped[str | None] = mapped_column(String(64))
@@ -204,16 +257,32 @@ class AuctionLot(Base, TimestampMixin):
     # See carbuyer.db.enums for valid values; column is String(16) so PG enum
     # migration churn is avoided. Workers compare against StrEnum members.
     enrichment_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending", index=True,
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+        index=True,
     )
     valuation_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending", index=True,
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+        index=True,
     )
     vision_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending", index=True,
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+        index=True,
     )
     notification_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending", index=True,
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+        index=True,
     )
     enrichment_version: Mapped[str | None] = mapped_column(String(32))
     # Retry counter for the description-enricher. Incremented on every attempt;
@@ -221,7 +290,9 @@ class AuctionLot(Base, TimestampMixin):
     # re-claim until attempts >= settings.enrichment_max_attempts. Schema /
     # validation errors fail-fast (FAILED at attempts=1).
     enrichment_attempts: Mapped[int] = mapped_column(
-        Integer, server_default=text("0"), nullable=False,
+        Integer,
+        server_default=text("0"),
+        nullable=False,
     )
     last_enrichment_error: Mapped[str | None] = mapped_column(Text)
     # Phase 4 overlay #6: separate per-stage retry counter so failure modes are
@@ -231,7 +302,9 @@ class AuctionLot(Base, TimestampMixin):
     # make/model/year) skip directly via valuation_status='skipped' without
     # consuming an attempt.
     valuation_attempts: Mapped[int] = mapped_column(
-        Integer, server_default=text("0"), nullable=False,
+        Integer,
+        server_default=text("0"),
+        nullable=False,
     )
     last_valuation_error: Mapped[str | None] = mapped_column(Text)
     # Inferred-from-sparse-listing flag: when condition_confidence < 0.5 the
@@ -239,7 +312,10 @@ class AuctionLot(Base, TimestampMixin):
     # Phase 4 valuation can apply a separate sparse-listing pessimism penalty
     # (vs. a genuinely confident "decent" rating).
     condition_inferred_from_sparse_listing: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
     # LLM's self-assessment of how thin/detailed the listing description was.
     # Values: "thin" | "adequate" | "detailed". Phase 4 uses to dampen scoring
@@ -258,17 +334,26 @@ class AuctionLot(Base, TimestampMixin):
     user_action: Mapped[str | None] = mapped_column(String(16), index=True)
     notes: Mapped[str | None] = mapped_column(Text)
     was_purchased_by_us: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False, index=True,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+        index=True,
     )
 
     auction: Mapped[Auction] = relationship(back_populates="lots", lazy="raise")
     bid_history: Mapped[list[AuctionBidHistory]] = relationship(
-        back_populates="lot", lazy="raise", cascade="all, delete-orphan",
+        back_populates="lot",
+        lazy="raise",
+        cascade="all, delete-orphan",
+        passive_deletes=True,  # delegate child DELETE to DB FK ondelete=CASCADE; skip child SELECT
     )
 
     __table_args__ = (
         UniqueConstraint(
-            "auction_id", "source_lot_id", name="uq_auction_lots_auction_source_lot",
+            "auction_id",
+            "source_lot_id",
+            name="uq_auction_lots_auction_source_lot",
         ),
         Index("ix_auction_lots_make_model_year", "make", "model", "year"),
         Index("ix_auction_lots_price_deal_score", "price_deal_score", "lot_status"),
@@ -278,19 +363,23 @@ class AuctionLot(Base, TimestampMixin):
         # Partial indexes for queue claims — most rows are non-pending, so a
         # full-table b-tree on the status column is mostly dead weight.
         Index(
-            "ix_auction_lots_enrichment_pending", "id",
+            "ix_auction_lots_enrichment_pending",
+            "id",
             postgresql_where=text("enrichment_status = 'pending'"),
         ),
         Index(
-            "ix_auction_lots_valuation_pending", "id",
+            "ix_auction_lots_valuation_pending",
+            "id",
             postgresql_where=text("valuation_status = 'pending'"),
         ),
         Index(
-            "ix_auction_lots_vision_pending", "id",
+            "ix_auction_lots_vision_pending",
+            "id",
             postgresql_where=text("vision_status = 'pending'"),
         ),
         Index(
-            "ix_auction_lots_notification_pending", "id",
+            "ix_auction_lots_notification_pending",
+            "id",
             postgresql_where=text("notification_status = 'pending'"),
         ),
     )
@@ -301,7 +390,8 @@ class AuctionBidHistory(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     lot_id: Mapped[int] = mapped_column(
-        ForeignKey("auction_lots.id", ondelete="CASCADE"), index=True,
+        ForeignKey("auction_lots.id", ondelete="CASCADE"),
+        index=True,
     )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -327,7 +417,10 @@ class HistoricalSale(Base, TimestampMixin):
     mileage_km: Mapped[int | None] = mapped_column(Integer)
     vin: Mapped[str | None] = mapped_column(String(32))
     title_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+        String(32),
+        nullable=False,
+        default="UNKNOWN",
+        server_default="UNKNOWN",
     )
     province_of_origin: Mapped[str | None] = mapped_column(String(8))
     condition_categorical: Mapped[str | None] = mapped_column(String(16))
@@ -342,17 +435,29 @@ class HistoricalSale(Base, TimestampMixin):
     observed_first_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disposition_reason: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="unknown", server_default="unknown",
+        String(32),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
     )
     was_notified: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
     was_purchased_by_us: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=text("false"), nullable=False,
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
     )
     notes: Mapped[str | None] = mapped_column(Text)
     schema_version: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=1, server_default=text("1"),
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
     )
 
 
@@ -381,12 +486,21 @@ class Search(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="me", server_default="me",
+        String(64),
+        nullable=False,
+        default="me",
+        server_default="me",
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"),
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
     )
     enabled: Mapped[bool] = mapped_column(
-        Boolean, default=True, server_default=text("true"), nullable=False,
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        nullable=False,
     )
