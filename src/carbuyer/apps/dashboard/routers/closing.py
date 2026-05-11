@@ -9,17 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import get_session
-from carbuyer.db.enums import LotStatus
+from carbuyer.apps.dashboard.deps import OPEN_STATUSES, get_session
 from carbuyer.db.models import Auction, AuctionLot
 
 router = APIRouter()
 
-_OPEN_STATUSES: tuple[str, ...] = (
-    LotStatus.OPEN.value,
-    LotStatus.CLOSING_SOON.value,
-    LotStatus.EXTENDED.value,
-)
 _LIMIT = 50
 
 
@@ -34,7 +28,7 @@ async def closing(
         select(AuctionLot, Auction)
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
-            AuctionLot.lot_status.in_(_OPEN_STATUSES),
+            AuctionLot.lot_status.in_(OPEN_STATUSES),
             Auction.scheduled_end_at.is_not(None),
             Auction.scheduled_end_at <= cutoff,
         )
