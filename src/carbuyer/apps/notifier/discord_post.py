@@ -56,6 +56,60 @@ def _components_for_lot(lot_id: int) -> list[dict[str, Any]]:
     ]
 
 
+async def _post_with_retry(
+    s: aiohttp.ClientSession,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    *,
+    log_kwargs: dict[str, object],
+) -> bool:
+    """POST ``payload`` to ``url`` with one rate-limit retry and one network retry.
+
+    Returns True on HTTP 2xx; False on any unrecoverable error. Structured-log
+    context is passed via ``log_kwargs`` (e.g. channel_id, lot_id).
+
+    Rate-limit (429): waits Retry-After once, retries once, then returns False.
+    Network error (ClientError / TimeoutError): sleeps once, retries once, then
+    returns False.
+    Non-2xx non-429: returns False immediately (no retry — caller must not
+    re-POST on application errors).
+    """
+    for attempt in (_FIRST_ATTEMPT, _LAST_ATTEMPT):
+        try:
+            async with s.post(url, headers=headers, json=payload) as resp:
+                if resp.status == 429:  # noqa: PLR2004
+                    retry = float(
+                        resp.headers.get("Retry-After", _DEFAULT_RETRY_AFTER_S),
+                    )
+                    log.warning(
+                        "discord rate-limited",
+                        **log_kwargs, retry_after=retry, attempt=attempt,
+                    )
+                    if attempt == _FIRST_ATTEMPT:
+                        await asyncio.sleep(retry)
+                        continue
+                    return False
+                if 200 <= resp.status < 300:  # noqa: PLR2004
+                    log.info("discord message posted", **log_kwargs, status=resp.status)
+                    return True
+                body = await resp.text()
+                log.warning(
+                    "discord post failed",
+                    **log_kwargs, status=resp.status, body=body[:500],
+                )
+                return False
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning(
+                "discord post network error",
+                **log_kwargs, error=str(exc), attempt=attempt,
+            )
+            if attempt == _LAST_ATTEMPT:
+                return False
+            await asyncio.sleep(_DEFAULT_RETRY_AFTER_S)
+    return False
+
+
 async def post_message(
     channel_id: int,
     content: str,
@@ -81,49 +135,42 @@ async def post_message(
 
     url = f"{_DISCORD_API}/channels/{channel_id}/messages"
     headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
-    payload = {"content": content, "components": _components_for_lot(lot_id)}
-
-    async def _do(s: aiohttp.ClientSession) -> bool:
-        for attempt in (_FIRST_ATTEMPT, _LAST_ATTEMPT):
-            try:
-                async with s.post(url, headers=headers, json=payload) as resp:
-                    if resp.status == 429:  # noqa: PLR2004
-                        retry = float(
-                            resp.headers.get("Retry-After", _DEFAULT_RETRY_AFTER_S)
-                        )
-                        log.warning(
-                            "discord rate-limited",
-                            channel_id=channel_id, retry_after=retry, attempt=attempt,
-                        )
-                        if attempt == _FIRST_ATTEMPT:
-                            await asyncio.sleep(retry)
-                            continue
-                        return False
-                    if 200 <= resp.status < 300:  # noqa: PLR2004
-                        log.info(
-                            "discord message posted",
-                            channel_id=channel_id, lot_id=lot_id, status=resp.status,
-                        )
-                        return True
-                    body = await resp.text()
-                    log.warning(
-                        "discord post failed",
-                        channel_id=channel_id, lot_id=lot_id,
-                        status=resp.status, body=body[:500],
-                    )
-                    return False
-            except (aiohttp.ClientError, TimeoutError) as exc:
-                log.warning(
-                    "discord post network error",
-                    channel_id=channel_id, lot_id=lot_id,
-                    error=str(exc), attempt=attempt,
-                )
-                if attempt == _LAST_ATTEMPT:
-                    return False
-                await asyncio.sleep(_DEFAULT_RETRY_AFTER_S)
-        return False
+    payload: dict[str, Any] = {
+        "content": content,
+        "components": _components_for_lot(lot_id),
+    }
+    log_kwargs: dict[str, object] = {"channel_id": channel_id, "lot_id": lot_id}
 
     if session is not None:
-        return await _do(session)
+        return await _post_with_retry(session, url, headers, payload, log_kwargs=log_kwargs)
     async with aiohttp.ClientSession() as s:
-        return await _do(s)
+        return await _post_with_retry(s, url, headers, payload, log_kwargs=log_kwargs)
+
+
+async def post_simple_message(
+    channel_id: int,
+    content: str,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> bool:
+    """POST a button-less message to a Discord channel.
+
+    Mirrors ``post_message`` but omits the action-row components. Used for
+    system/needs_plugin alerts that don't need lot-action buttons.
+
+    Returns True on success (HTTP 2xx); False on missing token, HTTP error,
+    rate-limit (after one retry), or network error (after one retry).
+    """
+    if not settings.discord_bot_token:
+        log.error("DISCORD_BOT_TOKEN not configured")
+        return False
+
+    url = f"{_DISCORD_API}/channels/{channel_id}/messages"
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    payload: dict[str, Any] = {"content": content}
+    log_kwargs: dict[str, object] = {"channel_id": channel_id}
+
+    if session is not None:
+        return await _post_with_retry(session, url, headers, payload, log_kwargs=log_kwargs)
+    async with aiohttp.ClientSession() as s:
+        return await _post_with_retry(s, url, headers, payload, log_kwargs=log_kwargs)
