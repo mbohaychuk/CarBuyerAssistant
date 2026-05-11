@@ -20,8 +20,9 @@ from carbuyer.apps.bot.messages import (
     LotEmbedData,
     render_early_warning_text,
     render_going_cheap_text,
+    render_needs_plugin_text,
 )
-from carbuyer.apps.notifier.discord_post import post_message
+from carbuyer.apps.notifier.discord_post import post_message, post_simple_message
 from carbuyer.apps.notifier.triggers import LotState, TriggerResult, evaluate_triggers
 from carbuyer.db.enums import NotificationStatus
 from carbuyer.db.models import Auction, AuctionLot
@@ -242,15 +243,84 @@ async def _catchup_sweep(*, http_session: aiohttp.ClientSession) -> None:
     log.info("catchup sweep complete")
 
 
+async def _process_needs_plugin(
+    auction_id: int, *, http_session: aiohttp.ClientSession,
+) -> None:
+    # Catchup is implicit: the auction-discoverer re-fires this NOTIFY on every
+    # sweep while needs_plugin_notified_at is NULL, so a missed NOTIFY recovers
+    # on the next discovery pass (typically every few minutes / hours).
+    async with get_session() as session:
+        auction = await session.get(Auction, auction_id)
+        if auction is None:
+            log.warning("auction disappeared before needs_plugin", auction_id=auction_id)
+            return
+        if auction.needs_plugin_notified_at is not None:
+            return
+        if not auction.source.startswith("unknown:"):
+            return
+        channel_key = select_channel(trigger="needs_plugin", score=None)
+        channel_id = settings.discord_channels.get(channel_key)
+        if channel_id is None:
+            log.warning("no needs_plugin channel configured", channel_key=channel_key)
+            return
+        # Capture all fields before the HTTP call so we don't hold the session
+        # open during network I/O.
+        content = render_needs_plugin_text(
+            auction_id=auction.id,
+            url=auction.url,
+            auctioneer_name=auction.auctioneer_name,
+            pickup_city=auction.pickup_city,
+            pickup_province=auction.pickup_province,
+            scheduled_start_at=auction.scheduled_start_at,
+        )
+
+    # HTTP I/O outside the DB session.
+    posted = await post_simple_message(channel_id, content, session=http_session)
+    if not posted:
+        return
+
+    # Fresh write transaction to stamp the timestamp.
+    async with get_session() as session, session.begin():
+        auction = await session.get(Auction, auction_id)
+        if auction is None:
+            log.warning(
+                "auction vanished before needs_plugin stamp",
+                auction_id=auction_id,
+            )
+            return
+        auction.needs_plugin_notified_at = datetime.now(UTC)
+
+
+async def _listen_needs_plugin(*, http_session: aiohttp.ClientSession) -> None:
+    async for payload in listen("needs_plugin"):
+        try:
+            auction_id = int(payload)
+        except ValueError:
+            continue
+        try:
+            await _process_needs_plugin(auction_id, http_session=http_session)
+        except Exception:
+            log.exception("needs_plugin processing failed", payload=payload)
+
+
 async def main() -> None:
     if not settings.discord_bot_token:
         log.error("DISCORD_BOT_TOKEN not configured")
         sys.exit("DISCORD_BOT_TOKEN not configured")
     async with aiohttp.ClientSession() as http_session:
         await _catchup_sweep(http_session=http_session)
-        async for _payload in listen("notification_pending"):
-            try:
-                await process_pending(http_session=http_session)
-            except Exception:
-                log.exception("batch failed; sleeping before next NOTIFY")
-                await asyncio.sleep(5)
+
+        async def _lot_loop() -> None:
+            async for _payload in listen("notification_pending"):
+                try:
+                    await process_pending(http_session=http_session)
+                except Exception:
+                    log.exception("batch failed; sleeping before next NOTIFY")
+                    await asyncio.sleep(5)
+
+        async def _needs_plugin_loop() -> None:
+            await _listen_needs_plugin(http_session=http_session)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_lot_loop(), name="lot_loop")
+            tg.create_task(_needs_plugin_loop(), name="needs_plugin_loop")
