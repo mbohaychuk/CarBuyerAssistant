@@ -18,6 +18,7 @@ dependencies = [
     "openai>=1.40",
     "phonenumbers>=8.13",
     "pillow>=12.2.0",
+    "python-multipart>=0.0.28",
 ]
 
 [project.optional-dependencies]

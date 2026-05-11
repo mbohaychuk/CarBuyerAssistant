@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block title %}Recent sold — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Recent sold prices</h1>
+  <table>
+    <thead><tr><th>Year</th><th>Make/Model</th><th>km</th><th>Channel</th><th>Price</th><th>Date</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.year or "" }}</td>
+        <td>{{ r.make or "" }} {{ r.model or "" }} {{ r.trim or "" }}</td>
+        <td>{{ r.mileage_km or "?" }}</td>
+        <td>{{ r.sale_channel }}</td>
+        <td>{{ money(r.final_price_with_premium_cad or r.final_listed_price_cad) }}</td>
+        <td>{{ r.disappeared_at.strftime("%Y-%m-%d") if r.disappeared_at else "" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
