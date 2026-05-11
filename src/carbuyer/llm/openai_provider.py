@@ -17,11 +17,15 @@ worker can `async with OpenAIProvider() as provider:` for clean shutdown.
 """
 from __future__ import annotations
 
+import asyncio
 import time
+from base64 import b64encode
+from pathlib import Path
 from types import TracebackType
 from typing import Self, TypeVar
 
 from openai import APIError, AsyncOpenAI, RateLimitError
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from carbuyer.llm.base import (
@@ -29,8 +33,13 @@ from carbuyer.llm.base import (
     LLMProvider,
     VisionInput,
 )
-from carbuyer.llm.prompts import description_system_prompt, description_user_prompt
-from carbuyer.llm.schemas import EnrichmentOutput, VisionOutput
+from carbuyer.llm.prompts import (
+    VISION_AGGREGATION_PROMPT,
+    VISION_PER_IMAGE_PROMPT,
+    description_system_prompt,
+    description_user_prompt,
+)
+from carbuyer.llm.schemas import EnrichmentOutput, PerImageOutput, VisionOutput
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 
@@ -41,6 +50,12 @@ log = get_logger("openai_provider")
 # tokenizes around 1.5-2k completion tokens; 2048 had no margin and truncation
 # produces invalid JSON which the schema rejects, marking the lot failed.
 DESCRIBE_MAX_TOKENS = 3000
+
+# Phase 8 vision token ceilings. Per-image is single-shot structured output
+# (compact schema); aggregation synthesises N per-image JSON blobs into the
+# richer VisionOutput.
+_VISION_PER_IMAGE_MAX_TOKENS = 512
+_VISION_AGGREGATE_MAX_TOKENS = 1024
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -84,25 +99,21 @@ class OpenAIProvider(LLMProvider):
         self,
         *,
         response_format: type[T],
-        system: str,
-        user: str,
+        messages: list[ChatCompletionMessageParam],
         max_tokens: int,
         kind: str,
         lot_id: int | None,
     ) -> T:
         """Single chokepoint for the OpenAI structured-output call shape.
 
-        Logs token usage + duration on every call. Phase 8 vision pass reuses
-        this helper.
+        Accepts an already-assembled messages list so both text-only (describe)
+        and multimodal (vision) callers share token-usage + duration logging.
         """
         t0 = time.monotonic()
         try:
             response = await self.client.chat.completions.parse(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                messages=messages,
                 response_format=response_format,
                 temperature=0,
                 max_tokens=max_tokens,
@@ -150,16 +161,77 @@ class OpenAIProvider(LLMProvider):
             image_count=payload.image_count,
             current_year=payload.current_year,
         )
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": self._describe_system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
         return await self._parse_to(
             response_format=EnrichmentOutput,
-            system=self._describe_system_prompt,
-            user=user_prompt,
+            messages=messages,
             max_tokens=DESCRIBE_MAX_TOKENS,
             kind="describe",
             lot_id=payload.lot_id,
         )
 
     async def vision(self, payload: VisionInput) -> VisionOutput:
-        del payload  # vision pass implemented in Phase 8 — payload unused here.
-        msg = "vision pass implemented in Phase 8"
-        raise NotImplementedError(msg)
+        vehicle_line = (
+            f"Vehicle: {payload.year or '?'} {payload.make or '?'} {payload.model or '?'}."
+        )
+        red_flags_str = ", ".join(payload.description_red_flags) or "(none)"
+        green_flags_str = ", ".join(payload.description_green_flags) or "(none)"
+        condition_str = payload.description_condition or "(unknown)"
+
+        per_image_results: list[PerImageOutput] = []
+        for photo_path in payload.photo_paths:
+            # Photos are converted to JPEG by Task 36's `download_and_resize`;
+            # if the upstream contract changes, update this MIME type.
+            # asyncio.to_thread: Path.read_bytes is sync blocking I/O.
+            img_bytes = await asyncio.to_thread(Path(photo_path).read_bytes)
+            data_url = f"data:image/jpeg;base64,{b64encode(img_bytes).decode()}"
+            per_image_messages: list[ChatCompletionMessageParam] = [
+                {"role": "system", "content": VISION_PER_IMAGE_PROMPT},
+                {"role": "user", "content": [  # type: ignore[list-item]
+                    {"type": "text", "text": (
+                        f"{vehicle_line} "
+                        f"Description condition (claimed): {condition_str}. "
+                        f"Description red flags: {red_flags_str}. "
+                        f"Description green flags: {green_flags_str}."
+                    )},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ]},
+            ]
+            try:
+                result = await self._parse_to(
+                    response_format=PerImageOutput,
+                    messages=per_image_messages,
+                    max_tokens=_VISION_PER_IMAGE_MAX_TOKENS,
+                    kind="vision_per_image",
+                    lot_id=None,
+                )
+                per_image_results.append(result)
+            except Exception:
+                # Per-image failures are non-fatal: partial coverage is better
+                # than failing the entire vision pass when one image is corrupt
+                # or refused by the model. Aggregation runs on remaining results.
+                log.exception("vision per-image failed", photo_path=photo_path)
+                continue
+
+        findings_json = [r.model_dump() for r in per_image_results]
+        agg_user = (
+            f"Per-image findings (JSON):\n{findings_json}\n\n"
+            f"Description condition (claimed): {condition_str}\n"
+            f"Description red flags: {red_flags_str}\n"
+            f"Description green flags: {green_flags_str}"
+        )
+        agg_messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": VISION_AGGREGATION_PROMPT},
+            {"role": "user", "content": agg_user},
+        ]
+        # Aggregation failure propagates — the worker decides how to handle it.
+        return await self._parse_to(
+            response_format=VisionOutput,
+            messages=agg_messages,
+            max_tokens=_VISION_AGGREGATE_MAX_TOKENS,
+            kind="vision_aggregate",
+            lot_id=None,
+        )

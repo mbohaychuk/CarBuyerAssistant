@@ -144,3 +144,24 @@ CONTEXT:
 
 Return the structured EnrichmentOutput.
 """
+
+
+VISION_PER_IMAGE_PROMPT = """You are inspecting a single photo of a used vehicle for a deal-finder.
+
+Output the structured PerImageOutput. Rules:
+- Set explicit_unknowns for anything you cannot judge from THIS image alone.
+- Do not guess. Output `unknown`-equivalent values when uncertain.
+- Severity: 1=cosmetic, 2=needs repair, 3=structural / safety.
+- Confidence: 1=very unsure, 5=certain.
+"""
+
+
+VISION_AGGREGATION_PROMPT = """You are aggregating per-image findings (JSON only, no images) into an overall VisionOutput for a single vehicle.
+
+Rules:
+- coverage_gaps: list standard angles missing (e.g., "no engine bay shot", "no undercarriage").
+- cross_panel_paint_consistency only "consistent"/"inconsistent" if the same panel appears in 2+ shots; else "cannot_assess".
+- staging_signals: pro photography, perfect lighting, no underbody close-ups.
+- contradictions_with_description: list specific contradictions with the supplied description condition / flags.
+- Set overall_vision_condition pessimistically when finding severity 3 items.
+"""
