@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +24,7 @@ from carbuyer.apps.auction_distiller.distiller import (
     main,
 )
 from carbuyer.db.enums import LotStatus, UserAction
-from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.models import Auction, AuctionBidHistory, AuctionLot, HistoricalSale
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -465,3 +466,128 @@ async def test_main_bad_lot_does_not_block_others(
         await session.execute(sa_select(AuctionLot).where(AuctionLot.id == bad_id))
     ).scalar_one_or_none()
     assert remaining_bad is not None
+
+
+async def test_main_distills_not_interested_lot(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """NOT_INTERESTED lot past DISTILL_AGE_DAYS (but within KEEP_NOTIFIED_DAYS) is distilled.
+
+    Locks in the or_() SQL fix: NOT_INTERESTED must not be silently dropped by
+    SQL three-valued logic when user_action.not_in([INTERESTED, MAYBE]) is used.
+    """
+    session = _patched_get_session
+    # 30 days > DISTILL_AGE_DAYS (14), within KEEP_NOTIFIED_DAYS (90) — would be
+    # retained for INTERESTED/MAYBE, but NOT_INTERESTED has no such protection.
+    closed_30_days_ago = _NOW - timedelta(days=30)
+    auction = _make_auction(session)
+    _make_lot(
+        session,
+        auction,
+        closed_at=closed_30_days_ago,
+        user_action=UserAction.NOT_INTERESTED,
+    )
+    await session.flush()
+
+    await main(now=_NOW)
+
+    sales = (await session.execute(sa_select(HistoricalSale))).scalars().all()
+    assert len(sales) == 1
+
+
+async def test_distill_lot_cascade_deletes_bid_history_via_fresh_session(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Lot with bid_history rows is distilled correctly via a fresh session.
+
+    Regression guard for the cascade delete path and passive_deletes=True.
+    Without passive_deletes=True, SQLAlchemy emits a SELECT on auction_bid_history
+    to load children before deleting them (ORM-level delete-orphan cascade). With
+    passive_deletes=True, that SELECT is suppressed and the DB FK ondelete=CASCADE
+    handles child deletion — verified by capturing emitted SQL statements.
+
+    The fresh-session split is critical: seeding session flushes, then distill_lot
+    runs in a separate session with the bid_history collection in unloaded state,
+    matching the production code path (session.get -> distill_lot in distiller.py).
+    """
+    seed_session = _patched_get_session
+    maker = seed_session.info["maker"]
+
+    # ── seed ─────────────────────────────────────────────────────────────────
+    auction = _make_auction(seed_session, source_auction_id="A_CASCADE")
+    lot = _make_lot(seed_session, auction, source_lot_id="L_CASCADE")
+    await seed_session.flush()
+    lot_id = lot.id
+
+    for i in range(3):
+        bid = AuctionBidHistory(
+            lot_id=lot_id,
+            observed_at=_OLD_CLOSED + timedelta(hours=i),
+            current_high_bid_cad=Decimal(f"{5000 + i * 100}.00"),
+        )
+        seed_session.add(bid)
+    await seed_session.flush()
+
+    # ── act: distill in a fresh session; capture SQL to assert no bid SELECT ─
+    executed_sql: list[str] = []
+
+    def _before_cursor_execute(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: object,
+    ) -> None:
+        executed_sql.append(statement)
+
+    async with maker() as fresh_session, fresh_session.begin():
+        # Register the listener on the underlying sync connection.
+        sync_conn = await fresh_session.connection()
+        event.listen(
+            sync_conn.sync_connection,
+            "before_cursor_execute",
+            _before_cursor_execute,
+        )
+        try:
+            fresh_lot = await fresh_session.get(AuctionLot, lot_id)
+            assert fresh_lot is not None
+            fresh_auction = await fresh_session.get(Auction, fresh_lot.auction_id)
+            assert fresh_auction is not None
+            await distill_lot(fresh_session, fresh_lot, fresh_auction)
+        finally:
+            event.remove(
+                sync_conn.sync_connection,
+                "before_cursor_execute",
+                _before_cursor_execute,
+            )
+
+    # passive_deletes=True: no SELECT on auction_bid_history during delete.
+    bid_selects = [
+        s
+        for s in executed_sql
+        if "FROM auction_bid_history" in s and s.strip().startswith("SELECT")
+    ]
+    assert bid_selects == [], (
+        f"passive_deletes=True should suppress the child SELECT, got: {bid_selects}"
+    )
+
+    # ── assert: lot gone, sale present, bid history cascade-deleted by DB ─────
+    remaining_lot = (
+        await seed_session.execute(sa_select(AuctionLot).where(AuctionLot.id == lot_id))
+    ).scalar_one_or_none()
+    assert remaining_lot is None
+
+    sales = (await seed_session.execute(sa_select(HistoricalSale))).scalars().all()
+    assert any(s.make == "Toyota" for s in sales)
+
+    remaining_bids = (
+        (
+            await seed_session.execute(
+                sa_select(AuctionBidHistory).where(AuctionBidHistory.lot_id == lot_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(remaining_bids) == 0
