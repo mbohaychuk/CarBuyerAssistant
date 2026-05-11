@@ -282,3 +282,29 @@ async def test_vision_none_year_make_model_uses_question_mark(tmp_path: Path) ->
     text_part = user_content[0]["text"]
     assert "None" not in text_part
     assert "? ? ?." in text_part
+
+
+# ─── empty photo_paths ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_vision_empty_photo_paths_runs_aggregation_only() -> None:
+    """Zero photos → per-image loop runs 0 times, aggregation runs once.
+
+    Batcher guards against this upstream by writing SKIPPED before calling
+    vision(), but the provider is a public ABC method and could be called
+    from scripts or future callers without the guard. Aggregation must
+    handle an empty findings list gracefully.
+    """
+    provider = _provider()
+    provider.client.chat.completions.parse = AsyncMock(
+        side_effect=[
+            _fake_response(_vision_output_fixture()),
+        ],
+    )
+
+    result = await provider.vision(_vision_input([]))
+
+    assert isinstance(result, VisionOutput)
+    # Only the aggregation call ran; no per-image calls.
+    assert provider.client.chat.completions.parse.await_count == 1

@@ -223,7 +223,11 @@ class OpenAIProvider(LLMProvider):
                 # Per-image failures are non-fatal: partial coverage is better
                 # than failing the entire vision pass when one image is corrupt
                 # or refused by the model. Aggregation runs on remaining results.
-                log.exception("vision per-image failed", photo_path=photo_path)
+                log.exception(
+                    "vision per-image failed",
+                    photo_path=photo_path,
+                    lot_id=payload.lot_id,
+                )
                 continue
 
         findings_json = [r.model_dump() for r in per_image_results]

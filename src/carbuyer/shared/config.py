@@ -24,9 +24,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = Field(
-        default="postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer"
-    )
+    database_url: str = Field(default="postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer")
     openai_api_key: str = Field(default="")
     openai_model: str = Field(default="gpt-4o-mini")
     # Phase 3 design overlay #9: SDK-managed retries + per-call timeout. Empty
@@ -73,6 +71,13 @@ class Settings(BaseSettings):
     # Phase 4 scoring version — bump on any change to scoring formula or
     # weight tables so a backfill can re-pend stale rows.
     scoring_version: str = "v1"
+
+    # Phase 8 vision-batcher knobs. Threshold gates how aggressive the nightly
+    # vision pass is (lower = more lots inspected = more LLM cost). Limit caps
+    # one nightly run; bump if the cron window is wide enough to absorb more.
+    # Both are env-tunable so ops can throttle without a code deploy.
+    vision_shortlist_score_threshold: float = 0.10
+    vision_shortlist_limit: int = 100
 
     log_level: str = "INFO"
     http_user_agent: str = DEFAULT_USER_AGENT
