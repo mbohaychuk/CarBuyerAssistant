@@ -8525,6 +8525,73 @@ git commit -m "apps: auction-distiller (closed lots → historical_sales)"
     accepted noise pattern (`reportUnusedFunction` on `_patched_get_session`,
     `asynccontextmanager` deprecated). Zero new errors in production code.
 
+15. **Multi-reviewer pre-merge findings applied** (commit `5ab010b`).
+    Three parallel reviewers (bugs/security, architecture/convention, test
+    coverage/observability) ran against the branch. Items applied:
+    - **`was_notified` test coverage extended** to all five `*_notified_at`
+      columns (added trajectory + extended tests). Only 3 of 5 channels had
+      tests; a typo dropping either column from the `any(...)` rollup tuple
+      would have passed all 19 prior tests. Final test count: 341.
+    - **Cross-module constant coupling documented.** `DISTILL_AGE_DAYS`
+      (distiller.py) and `RECENT_AUCTION_LOTS_DAYS` (`scoring/comps.py`) are
+      load-bearing equal: comp builder reads from `auction_lots` within that
+      window AND from `historical_sales` beyond it. If DISTILL is shorter,
+      lots vanish before the comp builder is done with them (gap); if
+      longer, the same sale appears in both tables (double-counted). Added
+      cross-reference comments to both constants so a future maintainer
+      reading either file is warned not to change one without the other.
+    - **`log.info("distiller starting", now=...)`** at top of `main()` so
+      ops can see the cron woke up even if the DB query later hangs.
+    - **`log.info("distiller no eligible lots; exiting")`** when the
+      shortlist is empty — distinct from the all-zeros `"distiller
+      complete"` line which is ambiguous between "ran with nothing to do"
+      and "DB query returned no rows due to a bug."
+    - **`auction_id` added to the `distill_lot failed` exception log.**
+      Both ids are in scope; ops needs both to triage recurring failures.
+
+16. **Reviewer items deferred (not blocking merge):**
+    - Counts dict accuracy untested via direct assertion. The
+      `bad_lot_does_not_block_others` test checks DB state but doesn't
+      assert `counts["distilled"] == 1` and `counts["failed"] == 1`. The
+      counts log line is the only consumer; a future refactor that
+      double-counts would surface in production logs quickly. Not worth a
+      log-capture mock yet.
+    - Eligible-id query is inlined in `main()`, not extracted into
+      `_select_eligible_ids`. Vision-batcher extracted its query for
+      isolated testability; distiller's query is simpler so inline is
+      defensible. Stylistic — leave for future cleanup if either query
+      grows.
+    - `kept` key absent from counts dict. Watched-lot filtering moved to
+      SQL (overlay #5's safe-positive form), so kept lots never appear in
+      the Python iteration. Functionally correct; the original overlay #4
+      promise of `{distilled, kept, failed, missing}` is stale text.
+    - Two-cron-overlap race is benign by construction. Per-lot atomic tx
+      + PostgreSQL row-level lock on DELETE serializes writers; loser sees
+      0 rows affected → SQLAlchemy raises `StaleDataError` → caught by the
+      per-lot try/except (counted as `failed`). Rolled-back tx discards the
+      duplicate `HistoricalSale` insert. No need for an IN_PROGRESS claim
+      mechanism at MVP scale.
+    - Unbounded SELECT on the eligible-id query. At MVP scale it's small;
+      after several months of uptime with cron paused/resumed, the in-memory
+      list could be sizable. Add chunking if worker memory becomes a
+      concern.
+    - Discord button → `_set_user_action` → "Lot N not found" if the user
+      clicks 30+ days post-close on a non-watched lot. The bot already
+      handles `lot is None` gracefully (returns False, sends "Lot N not
+      found" ephemeral). Asymmetry (notified-and-clicked = 90 days;
+      notified-and-not-clicked = 14 days) is acceptable at MVP.
+    - `Purchase.linked_lot_id` FK has no `ondelete` clause. Distiller is
+      shielded by the `was_purchased_by_us.is_(False)` filter. A manual SQL
+      insert into `purchases` linking a lot that hasn't been flagged would
+      crash distillation on the next nightly run. Phase 12 ops territory.
+    - Empty `Auction` rows after all their lots are distilled — FK direction
+      is `lots → auctions ondelete=CASCADE`, not the reverse, so deletes
+      don't propagate up. Phase 12 ops cleanup.
+    - `disposition_reason="sold" if final_bid is not None else "unsold"`
+      mis-classifies a `LotStatus.SOLD` lot with null `final_bid_cad` as
+      "unsold". Vanishingly rare; `"unknown"` (the column default) would
+      be more honest. No `Disposition` enum exists yet.
+
 ---
 
 End of Phase 9. The pipeline is complete from discovery through bid polling, vision, and distillation. Phase 10 adds two more sources; Phase 11 builds the dashboard; Phase 12 wires production deployment.
