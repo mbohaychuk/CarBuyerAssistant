@@ -549,6 +549,28 @@ async def test_process_one_no_pessimistic_update_when_diff_too_small(
     assert notified == []
 
 
+# ── _process_one missing-lot path ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_process_one_missing_lot_returns_missing(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Read-tx finds no row for the given id → 'missing', no LLM call.
+
+    Read-tx case (the simpler and more likely race window: the lot was deleted
+    between shortlist selection and per-lot processing). Provider is a strict
+    MagicMock — any attempt to call .vision() would raise.
+    """
+    nonexistent_lot_id = 999_999_999
+    provider = MagicMock()
+    provider.vision = AsyncMock(side_effect=AssertionError("vision must not be called"))
+
+    outcome = await _process_one(nonexistent_lot_id, provider=provider)
+    assert outcome == "missing"
+    provider.vision.assert_not_called()
+
+
 # ── main() fail-fast ─────────────────────────────────────────────────────────
 
 

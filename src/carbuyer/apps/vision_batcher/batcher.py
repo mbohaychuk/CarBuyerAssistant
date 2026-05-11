@@ -55,21 +55,11 @@ from carbuyer.shared.logging import get_logger
 
 log = get_logger("vision_batcher")
 
-# Minimum price_deal_score to enter the nightly shortlist. Lots below this are
-# unlikely to be worth the vision API cost tonight.
-_SHORTLIST_SCORE_THRESHOLD = 0.10
-
-# Maximum lots to process per nightly run. At ~9 LLM calls per lot
-# (8 per-image + 1 aggregation), 100 lots ≈ 900 calls.
-_SHORTLIST_LIMIT = 100
-
-# Minimum vision_confidence required to apply the pessimistic condition override.
-# Below this, the vision pass is too uncertain to override the description.
+# Pessimism gate constants — algorithmic, not ops-tunable. Override fires only
+# when vision_confidence > THRESHOLD AND |vision_rank - desc_rank| >= MIN.
+# Score / limit knobs live on Settings (see settings.vision_shortlist_*) so ops
+# can throttle the nightly cost without a code deploy.
 _PESSIMISM_CONFIDENCE_THRESHOLD = 0.7
-
-# Minimum absolute bucket distance (bad=0 … great=4) between vision-derived
-# condition and description condition before we apply the pessimistic override.
-# 2 means at least two full steps apart (e.g. "poor" vs "good").
 _PESSIMISM_BUCKET_DIFF_MIN = 2
 
 CONDITION_RANK: dict[str, int] = {
@@ -178,15 +168,21 @@ async def _write_status(lot_id: int, status: VisionStatus) -> None:
 async def _select_shortlist(
     session: AsyncSession,
     *,
-    threshold: float = _SHORTLIST_SCORE_THRESHOLD,
-    limit: int = _SHORTLIST_LIMIT,
+    threshold: float | None = None,
+    limit: int | None = None,
 ) -> list[int]:
     """Return lot ids ordered by price_deal_score desc — the nightly shortlist.
 
     Filters to: vision_status PENDING, lot_status open/closing_soon/extended,
     price_deal_score >= threshold.  Returns ids only so the session can be
-    closed before any I/O.
+    closed before any I/O. Defaults pull from settings so ops can override the
+    threshold and limit via env without a code deploy; explicit kwargs are
+    honored for tests.
     """
+    if threshold is None:
+        threshold = settings.vision_shortlist_score_threshold
+    if limit is None:
+        limit = settings.vision_shortlist_limit
     stmt = (
         select(AuctionLot.id)
         .where(
@@ -233,12 +229,21 @@ async def _process_one(
 
     # 2. HTTP + LLM I/O outside any transaction.
     if not snapshot.photos:
+        # Surfaces a likely scraper-health issue: the lot cleared the score
+        # threshold but has zero photos. Distinct log key from the
+        # all-downloads-failed skip below.
+        log.info("vision skipped — no photos", lot_id=lot_id)
         await _write_status(lot_id, VisionStatus.SKIPPED)
         return "skipped"
 
     with tempfile.TemporaryDirectory() as tmp:
-        paths = await download_and_resize(snapshot.photos, tmp_dir=Path(tmp))
+        paths = await download_and_resize(
+            snapshot.photos, tmp_dir=Path(tmp), lot_id=lot_id,
+        )
         if not paths:
+            # Distinct from the no-photos branch above — the lot had photos but
+            # every download/decode failed (CDN outage, all formats rejected).
+            log.info("vision skipped — all downloads failed", lot_id=lot_id)
             await _write_status(lot_id, VisionStatus.SKIPPED)
             return "skipped"
 
@@ -263,9 +268,18 @@ async def _process_one(
     async with get_session() as s, s.begin():
         lot = await s.get(AuctionLot, lot_id)
         if lot is None:
+            log.warning("lot disappeared before vision write", lot_id=lot_id)
             return "missing"
+        prior_condition = lot.condition_categorical
         override_fired = _apply_vision(lot, out)
         if override_fired:
+            log.info(
+                "vision pessimistic override fired",
+                lot_id=lot_id,
+                vision_condition=out.overall_vision_condition,
+                prior_condition=prior_condition,
+                vision_confidence=out.vision_confidence,
+            )
             await notify(s, "valuation_pending", str(lot.id))
     return "done"
 
