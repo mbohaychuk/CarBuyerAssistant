@@ -164,4 +164,10 @@ Rules:
 - staging_signals: pro photography, perfect lighting, no underbody close-ups.
 - contradictions_with_description: list specific contradictions with the supplied description condition / flags.
 - Set overall_vision_condition pessimistically when finding severity 3 items.
+- vision_confidence is a float in [0.0, 1.0] (NOT the 1-5 scale used per-image).
+  Use ~0.9 when the image set covers the major angles and the per-image
+  findings agree on overall condition; ~0.5 when coverage is partial or
+  per-image findings contradict; <0.3 when only 1-2 photos or all photos are
+  the same angle. The downstream worker uses >0.7 to gate a pessimistic
+  description-override, so calibrate accordingly.
 """

@@ -3,6 +3,7 @@
 Mirrors the mock pattern from test_openai_provider.py — stub
 `client.chat.completions.parse` so no real API calls happen.
 """
+
 from __future__ import annotations
 
 import base64
@@ -47,6 +48,7 @@ def _vision_output_fixture() -> VisionOutput:
 
 def _vision_input(photo_paths: list[str]) -> VisionInput:
     return VisionInput(
+        lot_id=42,
         photo_paths=photo_paths,
         year=2015,
         make="Toyota",
@@ -69,7 +71,9 @@ def _fake_response(parsed: object) -> MagicMock:
     fake_response = MagicMock()
     fake_response.choices = [fake_choice]
     fake_response.usage = MagicMock(
-        prompt_tokens=10, completion_tokens=5, total_tokens=15,
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
     )
     return fake_response
 
@@ -160,10 +164,10 @@ async def test_vision_per_image_partial_failure_continues(tmp_path: Path) -> Non
     provider = _provider()
     provider.client.chat.completions.parse = AsyncMock(
         side_effect=[
-            _fake_response(per_image),   # photo 1: ok
+            _fake_response(per_image),  # photo 1: ok
             RuntimeError("model refused"),  # photo 2: fails
-            _fake_response(per_image),   # photo 3: ok
-            _fake_response(agg),         # aggregation
+            _fake_response(per_image),  # photo 3: ok
+            _fake_response(agg),  # aggregation
         ],
     )
 
@@ -260,12 +264,18 @@ async def test_vision_none_year_make_model_uses_question_mark(tmp_path: Path) ->
         ],
     )
 
-    await provider.vision(VisionInput(
-        photo_paths=[str(p)],
-        year=None, make=None, model=None,
-        description_condition=None,
-        description_red_flags=[], description_green_flags=[],
-    ))
+    await provider.vision(
+        VisionInput(
+            lot_id=None,
+            photo_paths=[str(p)],
+            year=None,
+            make=None,
+            model=None,
+            description_condition=None,
+            description_red_flags=[],
+            description_green_flags=[],
+        )
+    )
 
     first_call_kwargs = provider.client.chat.completions.parse.await_args_list[0].kwargs
     user_content = first_call_kwargs["messages"][1]["content"]
