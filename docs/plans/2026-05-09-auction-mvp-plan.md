@@ -8035,6 +8035,174 @@ git add src/carbuyer/apps/vision_batcher/batcher.py src/carbuyer/apps/vision_bat
 git commit -m "vision: nightly batcher (shortlist + reconciliation)"
 ```
 
+### Phase 8 post-implementation overlay
+
+Divergences from the plan-as-written and operational decisions made during
+Phase 8 implementation. These are corrections, not additional work.
+
+1. **`async_session_maker` does not exist** (recurring Phase 4/5/6/7 issue).
+   Replaced with `get_session()` / `get_session_maker()` from
+   `carbuyer.db.session`.
+
+2. **`OpenAIProvider` entered as `async with`** + fail-fast on missing
+   `OPENAI_API_KEY`. Plan instantiated `provider = OpenAIProvider()` without
+   the context manager, leaking the AsyncOpenAI client on shutdown. Mirrored
+   the enricher's startup/shutdown pattern (`apps/enricher/enricher.py:419`).
+
+3. **HTTP / LLM I/O moved outside DB transactions.** Plan held one long-lived
+   session open for the entire batch with nested `session.begin()` per lot,
+   and `vision_one` did `download_and_resize` (HTTP) + `provider.vision()`
+   (8 per-image LLM calls + 1 aggregation) all inside the begin. With
+   `statement_timeout=30s` and `idle_in_transaction_session_timeout=60s`
+   (`db/session.py`), the connection would have been torn down per lot.
+   Restructured to the enricher pattern: snapshot in short read tx → close →
+   I/O outside any tx → reopen short write tx → re-fetch lot by id → apply +
+   NOTIFY.
+
+4. **Per-lot `tempfile.TemporaryDirectory()` for photo cleanup.** Plan's
+   `download_and_resize` wrote into a hardcoded `/tmp/carbuyer-vision/` and
+   the caller never deleted the resulting JPEGs. After many nightly runs,
+   `/tmp` would fill with stale photos. Task 36's helper now requires a
+   `tmp_dir: Path` kwarg; the batcher wraps each lot's I/O in a
+   `TemporaryDirectory()` context. Tempdir entered BEFORE `download_and_resize`
+   and exited AFTER the `provider.vision()` call so the JPEGs are still on
+   disk when the LLM reads them.
+
+5. **NOTIFY `valuation_pending` after pessimistic-condition override.** Plan
+   set `lot.valuation_status = "pending"` after revising condition downward
+   but never NOTIFY'd. Same omission as Phase 7. Without the NOTIFY, the
+   valuator (LISTEN-only on `valuation_pending`) would not rescore until its
+   next restart catchup. Added inside the same write tx as the status flip.
+
+6. **`_apply_vision` returns `override_fired: bool`.** A naive
+   `if lot.valuation_status == ValuationStatus.PENDING: notify(...)` guard
+   would over-notify on lots that were ALREADY PENDING when vision started
+   (e.g. a fresh content rescrape that reset valuation_status). The pure
+   function now returns `True` iff the pessimistic-override branch fired, and
+   the caller NOTIFYs based on that signal.
+
+7. **`VisionInput.lot_id`** added (mirroring `DescribeInput.lot_id`) so
+   per-call OpenAI usage logs (`vision_per_image`, `vision_aggregate`) carry
+   the lot id and stay correlatable to a row in production. Earlier draft
+   passed `lot_id=None` to `_parse_to`, breaking cost/latency attribution.
+
+8. **`_parse_to` refactor (Task 37).** Existing helper took
+   `system: str, user: str` and constructed a 2-message text-only payload.
+   Vision needs multimodal `messages` (text + image_url parts). Refactored to
+   accept `messages: list[ChatCompletionMessageParam]`; both `describe` and
+   the two vision call sites now go through the same chokepoint with shared
+   token-usage logging tagged by `kind` (`describe` / `vision_per_image` /
+   `vision_aggregate`).
+
+9. **`VISION_AGGREGATION_PROMPT` clarifies `vision_confidence` scale.** Original
+   prompt didn't tell the model the aggregate confidence is `[0.0, 1.0]` —
+   easy to confuse with the per-image `confidence: 1-5` scale. Added explicit
+   guidance + calibration tied to the worker's `>0.7` override gate.
+
+10. **Synthetic red flag empty-evidence fallback.** When the override fires
+    but the LLM produced no `contradictions_with_description` strings, the
+    flag's `evidence` would have been the empty string. Falls back to
+    `"vision condition mismatch"` so dashboard surfaces something readable.
+
+11. **StrEnum members for status writes** (`VisionStatus.{DONE,SKIPPED,FAILED,PENDING}`,
+    `LotStatus.{OPEN,CLOSING_SOON,EXTENDED}`, `ValuationStatus.PENDING`)
+    instead of the plan's bare strings.
+
+12. **Magic numbers hoisted to module-level constants:**
+    `_SHORTLIST_SCORE_THRESHOLD=0.10`, `_SHORTLIST_LIMIT=100`,
+    `_PESSIMISM_CONFIDENCE_THRESHOLD=0.7`, `_PESSIMISM_BUCKET_DIFF_MIN=2`,
+    `_VISION_PER_IMAGE_MAX_TOKENS=512`, `_VISION_AGGREGATE_MAX_TOKENS=1024`.
+    Considered promoting to `Settings` for ops tunability — deferred (overlay
+    item #19) since changes need code review either way at MVP.
+
+13. **`_select_shortlist` returns `list[int]`, not `list[AuctionLot]`.** Plan
+    returned ORM objects, but accessing them after the session closes raises
+    `DetachedInstanceError`. Returning ids lets the session close before any
+    I/O (matches enricher's `claim_pending_ids` shape).
+
+14. **`_apply_vision` extracted as pure function.** Mirrors enricher's
+    `_apply_to_lot`. Independently testable without DB or LLM mocks.
+
+15. **`VisionInput.photo_paths` is `list[str]` ⇄ `download_and_resize` returns
+    `list[Path]`.** The batcher converts via `[str(p) for p in paths]`. Could
+    make `VisionInput.photo_paths: list[Path]` for type cleanliness, but `str`
+    matches what OpenAI's API ultimately accepts and the conversion is
+    harmless.
+
+16. **`vision_status='skipped'` semantics differ from the plan's lot-scraper
+    comment.** The lot-scraper comment in `scraper.py` originally claimed
+    SKIPPED was set "when a lot is outside the top-10% deal-score gate", but
+    the Phase 8 batcher only sets SKIPPED when the lot has no usable photos
+    (no `lot.photos` OR every download/decode failed). Sub-threshold lots
+    stay PENDING and are simply not selected by tonight's shortlist; they
+    re-enter the shortlist automatically if a bid update lifts their score.
+    Comment in `scraper.py:150-159` updated to match actual behavior.
+
+17. **Defensive try/except around per-lot dispatch in `main()`.** Mirrors
+    `bid_poller/poller.py:222-228` (added in Phase 7 overlay #20). Without
+    it, an unhandled exception in `_process_one` would propagate out of the
+    batch loop and exit the worker before later lots are processed. Each lot
+    now records its outcome in a `counts` dict that gets logged at end-of-run
+    for nightly observability.
+
+18. **The synthetic flag `description_oversells_condition` is NOT in
+    `flags/taxonomy.py`.** It is a vision-pass-only synthetic flag bypassing
+    the description-derived flag taxonomy. Acceptable because the taxonomy
+    governs description-derived flags; vision-derived flags are a separate
+    domain. Comment on the flag construction notes this so a future taxonomy
+    audit doesn't false-positive it as missing.
+
+19. **Sequential per-lot processing (no `asyncio.Semaphore + gather`).** At
+    ~9 LLM calls × ~2-3s × 100 lots ≈ 30-50 minutes per nightly run.
+    Defensible MVP tradeoff (the Phase 12 deployment plan slots vision into
+    a 2am cron with a wide window). A `Semaphore`-bounded `gather` would
+    give a 5-10× speedup if the nightly window matters operationally.
+    Defer until ops surfaces a real complaint.
+
+20. **Vision-batcher does NOT use IN_PROGRESS** (no claim/SKIP-LOCKED).
+    Cron-driven single-instance assumption (same as bid-poller). Crash
+    recovery is "the next nightly run picks up the still-PENDING lot."
+    Documented in module docstring so a future maintainer doesn't add a
+    `vision_pass_status` column out of consistency with other workers. The
+    Phase 2.5 watchdog (when it lands) sweeps `enrichment_status`,
+    `valuation_status`, `vision_status` (which the batcher writes), and
+    `notification_status` — but not the lot_status field bid_poller uses.
+    For vision, `vision_status` going from PENDING → unchanged across a
+    nightly run is the only crash signal; the batcher writes it inside the
+    short write tx so a half-finished batch leaves only the in-flight lot in
+    PENDING (which next-night picks up).
+
+21. **Pyright baseline.** Was 45 going in, 50 going out (+5). All five new
+    errors are in `tests/apps/test_vision_batcher.py` and match the existing
+    accepted test-fixture noise pattern: 3× `reportPrivateUsage` (test
+    importing `_bucket_diff` / `_process_one` / `_select_shortlist`), 1×
+    `reportUnusedFunction` (`_patched_get_session` fixture — pyright doesn't
+    see pytest fixture wiring), 1× `asynccontextmanager` deprecated. Zero new
+    errors in production code (`batcher.py`, `openai_provider.py`,
+    `prompts.py`, `base.py`, `lot_scraper/scraper.py`).
+
+22. **Tests added beyond the plan's single `test_download_and_resize_caps_count_and_size`:**
+    - photos.py (4 tests): happy path + 3 failure paths (HTTP 404 skip,
+      corrupt image bytes skip, empty URL list).
+    - vision provider (7 tests): happy path, multimodal message structure,
+      per-image partial failure, per-image None-parsed skip, aggregation
+      failure propagates, aggregation None-parsed raises RuntimeError,
+      None year/make/model formatting.
+    - vision batcher (19 tests): bucket-diff helper edge cases, shortlist
+      filtering + ordering + threshold, `_process_one` happy + pessimistic
+      override + no-photos + empty downloads + LLM-failed + no-NOTIFY-when-
+      no-override + missing-lot.
+    - Removed: `test_vision_raises_not_implemented_until_phase8` (no longer
+      true after Task 37).
+    - Net delta: +29 across the phase (289 → 318).
+
+23. **Coverage gaps deferred (overlay-only, not blocking merge):**
+    - No exact-threshold test (vision_confidence == 0.7 boundary, since
+      comparison is `>` not `>=`). Existing tests use 0.5 / 0.85 / 0.90.
+    - No `_process_one` test for the case where vision sees BETTER condition
+      than description claimed (bucket diff might be ≥ 2, but the
+      `vision_rank < desc_rank` guard correctly skips the override).
+
 ---
 
 ## Phase 9 — Distillation
