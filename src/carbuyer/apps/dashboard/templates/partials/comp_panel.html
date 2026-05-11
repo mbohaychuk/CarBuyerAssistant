@@ -1,0 +1,35 @@
+{% from "_macros.html" import money %}
+{% if fuzzy %}
+  <p class="muted">No exact matches in our database yet. As more auctions are tracked, similar vehicles will appear here.</p>
+{% endif %}
+<h4>Recently sold</h4>
+{% if sold %}
+  <div style="display:flex;overflow-x:auto;gap:0.5rem">
+    {% for s in sold %}
+      <div class="card" style="min-width:200px">
+        <strong>{{ s.year or "" }} {{ s.make or "" }} {{ s.model or "" }}</strong><br>
+        <span class="muted">{{ s.mileage_km or "?" }} km · {{ s.sale_channel }}</span><br>
+        Sold: {{ money(s.final_price_with_premium_cad or s.final_listed_price_cad) }}<br>
+        <span class="muted">{{ s.disappeared_at.strftime("%Y-%m-%d") if s.disappeared_at else "" }}</span>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="muted">No sold comps yet.</p>
+{% endif %}
+
+<h4>Currently up for auction</h4>
+{% if open %}
+  <div style="display:flex;overflow-x:auto;gap:0.5rem">
+    {% for o in open %}
+      <div class="card" style="min-width:200px">
+        <a href="/lots/{{ o.lot.id }}"><strong>{{ o.lot.year or "" }} {{ o.lot.make or "" }} {{ o.lot.model or "" }}</strong></a><br>
+        <span class="muted">{{ o.lot.mileage_km or "?" }} km · {{ o.auction.pickup_city or "?" }}, {{ o.auction.pickup_province or "?" }}</span><br>
+        Current: {{ money(o.lot.current_high_bid_cad) }}<br>
+        Closes: {{ o.auction.scheduled_end_at.strftime("%b %d") if o.auction.scheduled_end_at else "?" }}
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="muted">No open comps.</p>
+{% endif %}
