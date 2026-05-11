@@ -80,6 +80,63 @@ def _mock_transport(*, status: int = 200, body: str = "") -> httpx.MockTransport
     return httpx.MockTransport(handler)
 
 
+def _body_transport(body: str, *, status: int = 200) -> httpx.MockTransport:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_discover_auctions_parses_absolute_and_relative_hrefs() -> None:
+    # Real-world hrefs come in both shapes; both must reconstruct to a
+    # canonical absolute URL. Dedup on (auction_id) — duplicate links to the
+    # same auction collapse to one ref.
+    body = """
+    <html><body>
+      <a href="https://www.mcdougallauction.com/auction/12345/spring-sale">Abs</a>
+      <a href="/auction/67890/summer-dispersal">Relative</a>
+      <a href="/auction/12345/duplicate-slug">Dup of 12345</a>
+      <a href="/about">Internal nav</a>
+      <a href="/auction/nope">Non-numeric id</a>
+    </body></html>
+    """
+    async with McDougallSource(_transport=_body_transport(body)) as src:
+        refs = [ref async for ref in src.discover_auctions()]
+
+    ids = sorted(r.source_auction_id for r in refs)
+    assert ids == ["12345", "67890"]
+    urls = {r.url for r in refs}
+    # Relative href reconstructed; canonical form drops trailing junk.
+    assert any("/auction/12345" in u for u in urls)
+    assert any("/auction/67890" in u for u in urls)
+
+
+@pytest.mark.asyncio
+async def test_fetch_lots_parses_relative_lot_hrefs() -> None:
+    body = """
+    <html><body>
+      <a href="/lot/111/red-truck">Lot 1</a>
+      <a href="https://www.mcdougallauction.com/lot/222">Lot 2 absolute</a>
+      <a href="/lot/notnumeric">Non-numeric lot id</a>
+      <a href="/lot/">Empty lot id</a>
+    </body></html>
+    """
+    async with McDougallSource(_transport=_body_transport(body)) as src:
+        ref = AuctionRef(
+            source="mcdougall",
+            source_auction_id="12345",
+            url="https://www.mcdougallauction.com/auction/12345",
+        )
+        lot_refs = [lot async for lot in src.fetch_lots(ref)]
+
+    ids = sorted(lr.source_lot_id for lr in lot_refs)
+    assert ids == ["111", "222"]
+    for lr in lot_refs:
+        assert lr.source_auction_id == "12345"
+        assert lr.url.startswith("https://www.mcdougallauction.com/lot/")
+
+
 @pytest.mark.asyncio
 async def test_fetch_auction_returns_raw_auction() -> None:
     async with McDougallSource(_transport=_mock_transport()) as src:

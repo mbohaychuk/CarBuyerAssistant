@@ -289,6 +289,12 @@ async def _process_needs_plugin(
             )
             return
         auction.needs_plugin_notified_at = datetime.now(UTC)
+    log.info(
+        "needs_plugin alert posted",
+        auction_id=auction_id,
+        channel_id=channel_id,
+        channel_key=channel_key,
+    )
 
 
 async def _listen_needs_plugin(*, http_session: aiohttp.ClientSession) -> None:
@@ -309,6 +315,7 @@ async def main() -> None:
         sys.exit("DISCORD_BOT_TOKEN not configured")
     async with aiohttp.ClientSession() as http_session:
         await _catchup_sweep(http_session=http_session)
+        log.info("notifier starting", listeners=["lot_loop", "needs_plugin_loop"])
 
         async def _lot_loop() -> None:
             async for _payload in listen("notification_pending"):
