@@ -10872,6 +10872,142 @@ git commit -m "dashboard: action endpoints (mark / notes / rescore)"
 
 End of Phase 11. Dashboard is complete with all views and HTMX-driven interactivity.
 
+### Phase 11 post-implementation overlay
+
+Tasks 44, 45, 46, 47, 48 land in this phase. Task 43 (`/needs-plugin` view +
+retry-routing admin endpoint) was carried over from Phase 10 and lands here
+alongside the dashboard skeleton it depends on.
+
+#### Plan-vs-code corrections (recurring + new)
+
+1. **`async_session_maker` → `get_session_maker()` / `get_session()`**
+   (recurring fix every prior phase has applied). The plan's `deps.py`,
+   `lot_detail` test, `purchases_create`, and `actions` test all imported
+   `async_session_maker` — there is no such symbol. The dashboard's FastAPI
+   dependency is a plain async generator that calls `get_session_maker()()`
+   per request, so `set_engine_for_testing` reroutes it correctly without
+   import-time caching.
+
+2. **`from datetime import UTC`** instead of `from datetime import timezone`
+   / `timezone.utc` (Python 3.11+ idiom). Recurring.
+
+3. **Unknown-source filter is `Auction.source.like("unknown:%")`, not
+   `Auction.source == "farmauctionguide_unknown"`.** Phase 10 changed the
+   convention to per-host (`unknown:<host>`); the plan still references the
+   single-bucket name. The LIKE pattern matches every per-host bucket.
+
+4. **`resolve_platform()` returns `tuple[str, str] | None` (Phase 10 fix).**
+   The plan's `retry_routing` destructures the return value unconditionally;
+   `None` means "known host but no auction-id in path" (footer/help/nav
+   link) and must short-circuit before destructuring. Implementation handles
+   all three branches: `None` → no-op 204; `("unknown:<host>", id)` → no-op
+   204 (no plugin matches yet); `("hibid"|"mcdougall", id)` → re-route.
+
+5. **FastAPI dependency parameter ordering.** The plan's Task 47 signatures
+   put `session: Annotated[..., Depends(get_session)] = ...` after defaulted
+   `Form()` params. Python disallows non-default-after-default params; FastAPI
+   doesn't get a chance to fix this. All routers reorder so `Depends`
+   parameters come first and `Form()`/`Query()`-defaulted params come last.
+
+6. **`LotStatus` / status-string usage.** Workers use both `.value` and bare
+   StrEnum members interchangeably (StrEnum's `__eq__` makes them equivalent).
+   Dashboard standardized on `.value` for clarity at SQL boundaries.
+
+7. **`python-multipart` was missing from dependencies.** Required by
+   `Form()` — added to `pyproject.toml` as `python-multipart>=0.0.28`. Plan
+   didn't mention this transitive requirement.
+
+8. **`Result.rowcount` is not a typed attribute** on the abstract
+   `Result[Any]` returned by `session.execute(update(...))` — only on the
+   concrete `CursorResult` subclass. Dropped the `rows=...` kwarg from
+   `rescore_all`'s log line rather than fight the type cast; logging
+   "rescore triggered" without a count is sufficient for an admin endpoint.
+
+9. **Inner-import in `app.py`** (`from carbuyer.apps.dashboard.routers import
+   ...` deferred to inside `create_app()`) is necessary to avoid circular
+   import — routers import `templates` from `app.py`. Suppressed the
+   `PLC0415` (import-not-at-top-level) lint with `# noqa` plus a why-comment.
+
+10. **`current_user()` auth seam wired into `/health`** (multi-reviewer fix).
+    The plan defined a `current_user()` stub but never used it as a
+    dependency anywhere — dead code that would silently rot until the first
+    real auth wiring exposed signature drift. Adding it as
+    `Depends(current_user)` on `/health` (cheapest seam) means the dependency
+    resolver validates it on every commit; replacing the stub body with real
+    auth is now a single-file change.
+
+11. **`OPEN_STATUSES` centralized in `deps.py`** (multi-reviewer fix). The
+    same `(LotStatus.OPEN.value, LotStatus.CLOSING_SOON.value,
+    LotStatus.EXTENDED.value)` tuple was duplicated verbatim in
+    `feed.py`/`lots.py`/`closing.py`/`health.py`. Lifted to
+    `deps.OPEN_STATUSES` so adding a new biddable status updates one place,
+    not four.
+
+12. **`retry_routing` `IntegrityError` handling** (multi-reviewer
+    bugs/security fix). When a discoverer-direct `hibid`/`mcdougall` row
+    already exists for the same auction the dashboard is trying to re-route
+    away from `unknown:<host>`, the UPDATE collides with the
+    `(source, source_auction_id)` unique constraint. Plan's code would
+    crash with HTTP 500 (`asyncpg.UniqueViolationError`). Wrapped the
+    `await session.commit()` in `try/except IntegrityError`, return 409
+    after rollback so the dashboard surfaces the collision and ops can
+    delete the stale `unknown:*` row by hand. Regression test
+    `test_retry_routing_409_when_target_source_already_exists` locks this in.
+
+13. **`retry_routing` stamps `needs_plugin_notified_at` on success**
+    (multi-reviewer architecture fix). The column's invariant is "NULL =
+    state unresolved." Resolving via the dashboard is itself an
+    acknowledgement, even if no Discord post fired earlier. Setting the
+    timestamp to `now()` keeps the column truthful.
+
+14. **Structured logging in `needs_plugin.py`** (multi-reviewer
+    observability fix). The success path silently mutated source +
+    auction_id + timestamps + bulk-updated lot statuses + fired NOTIFY with
+    no log line — incident response would have been blind. Added
+    `log.info("auction re-routed", ...)` on success and `log.warning(...)`
+    on both silent-return branches (no auction-id; routing still unknown).
+
+#### Tests added
+
+Per-task counts for the multi-reviewer fix round (commit
+`a3036db`):
+
+- **Feed coverage (4 tests):** `test_feed_filters_by_min_score`,
+  `test_feed_filters_by_min_rarity` (both score-filter branches were
+  untested — silent column-rename regression would have shipped),
+  `test_feed_cursor_pagination` (infinite-scroll boundary was untested),
+  strengthened `test_feed_htmx_returns_partial` with a positive anchor
+  (would have passed even if the partial template were blanked).
+- **`retry_routing` coverage (extended + 1 new):** the happy path now
+  seeds a lot with non-pending statuses and asserts the bulk-update reset
+  them all to PENDING (proves the most operationally significant side
+  effect, not just the source rewrite); new
+  `test_retry_routing_409_when_target_source_already_exists` covers the
+  IntegrityError → 409 branch.
+
+Phase 11 net delta: +43 tests across 5 dashboard test files (394 → 437);
+1 pre-existing skip carried over.
+
+#### Pyright / ruff
+
+- **Pyright baseline.** 59 errors going in, 59 going out (unchanged).
+  Dashboard scope (`src/carbuyer/apps/dashboard` + `tests/apps/dashboard`)
+  is 0/0/0 — clean.
+- **Ruff clean.** All rules pass.
+
+#### Reviewer items not actioned (acknowledged)
+
+- **Stale `unknown:*` row left in place after a 409 collision** — by design.
+  Merging lots across the unique-constraint boundary risks a second
+  collision on AuctionLot's `(auction_id, source_lot_id)`; the safer move
+  is to surface the collision to ops and let them resolve it manually.
+- **`current_user()` body still returns a stub** — by design (MVP).
+  The seam is now exercised; replacing the body with real auth is a
+  single-file change.
+- **No log on `retry_routing` 404 path** — FastAPI's default access log
+  records the 404, and the path doesn't mutate state; matches
+  `actions.py`'s no-log-on-404 convention.
+
 ---
 
 ## Phase 12 — Production deployment
