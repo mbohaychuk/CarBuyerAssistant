@@ -8,17 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import get_session, is_htmx
-from carbuyer.db.enums import LotStatus, UserAction
+from carbuyer.apps.dashboard.deps import OPEN_STATUSES, get_session, is_htmx
+from carbuyer.db.enums import UserAction
 from carbuyer.db.models import Auction, AuctionLot
 
 router = APIRouter()
-
-_OPEN_STATUSES: tuple[str, ...] = (
-    LotStatus.OPEN.value,
-    LotStatus.CLOSING_SOON.value,
-    LotStatus.EXTENDED.value,
-)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -35,7 +29,7 @@ async def feed(
     stmt = (
         select(AuctionLot, Auction)
         .join(Auction, Auction.id == AuctionLot.auction_id)
-        .where(AuctionLot.lot_status.in_(_OPEN_STATUSES))
+        .where(AuctionLot.lot_status.in_(OPEN_STATUSES))
     )
     if province:
         stmt = stmt.where(Auction.pickup_province.in_(province))

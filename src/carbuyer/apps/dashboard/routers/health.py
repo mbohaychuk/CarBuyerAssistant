@@ -8,10 +8,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.apps.dashboard.deps import (
+    OPEN_STATUSES,
+    CurrentUser,
+    current_user,
+    get_session,
+)
 from carbuyer.db.enums import (
     EnrichmentStatus,
-    LotStatus,
     NotificationStatus,
     ValuationStatus,
 )
@@ -19,17 +23,14 @@ from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 
 router = APIRouter()
 
-_OPEN_STATUSES: tuple[str, ...] = (
-    LotStatus.OPEN.value,
-    LotStatus.CLOSING_SOON.value,
-    LotStatus.EXTENDED.value,
-)
-
 
 @router.get("/health", response_class=HTMLResponse)
 async def health(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
+    # Auth seam exercised here so it doesn't rot. Real auth replaces the
+    # current_user body without touching this signature.
+    _user: Annotated[CurrentUser, Depends(current_user)],
 ) -> HTMLResponse:
     auction_count = (await session.execute(
         select(func.count()).select_from(Auction),
@@ -39,7 +40,7 @@ async def health(
     )).scalar_one()
     open_count = (await session.execute(
         select(func.count()).select_from(AuctionLot)
-        .where(AuctionLot.lot_status.in_(_OPEN_STATUSES)),
+        .where(AuctionLot.lot_status.in_(OPEN_STATUSES)),
     )).scalar_one()
     pending_enrichment = (await session.execute(
         select(func.count()).select_from(AuctionLot)

@@ -6,7 +6,17 @@ from dataclasses import dataclass
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from carbuyer.db.enums import LotStatus
 from carbuyer.db.session import get_session_maker
+
+# Statuses representing "the lot is biddable right now" — shared by every view
+# that filters to live inventory (feed, lot detail, closing-soon, health).
+# Centralized here so adding a new biddable status updates one place, not four.
+OPEN_STATUSES: tuple[str, ...] = (
+    LotStatus.OPEN.value,
+    LotStatus.CLOSING_SOON.value,
+    LotStatus.EXTENDED.value,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -27,5 +37,8 @@ def is_htmx(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
 
 
+# Auth seam — returns a stub for MVP. Wired into /health (cheapest seam-test) so
+# the dependency signature is exercised on every commit; replacing the body
+# with real auth is a one-line change.
 def current_user() -> CurrentUser:
     return CurrentUser(id="me", role="dev")

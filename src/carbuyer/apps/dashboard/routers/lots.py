@@ -8,17 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import get_session
-from carbuyer.db.enums import LotStatus
+from carbuyer.apps.dashboard.deps import OPEN_STATUSES, get_session
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 
 router = APIRouter()
 
-_OPEN_STATUSES: tuple[str, ...] = (
-    LotStatus.OPEN.value,
-    LotStatus.CLOSING_SOON.value,
-    LotStatus.EXTENDED.value,
-)
 _YEAR_WINDOW = 2
 _MILEAGE_FACTOR_LO = 0.8
 _MILEAGE_FACTOR_HI = 1.2
@@ -83,7 +77,7 @@ async def lot_comps(
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
             AuctionLot.id != lot.id,
-            AuctionLot.lot_status.in_(_OPEN_STATUSES),
+            AuctionLot.lot_status.in_(OPEN_STATUSES),
             AuctionLot.make == lot.make,
             AuctionLot.model == lot.model,
             AuctionLot.year.between(
