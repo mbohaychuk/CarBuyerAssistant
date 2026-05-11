@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Feed — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Auction feed</h1>
+  {% include "partials/feed_filters.html" %}
+  <div id="lot-list">
+    {% include "partials/lot_list.html" %}
+  </div>
+{% endblock %}

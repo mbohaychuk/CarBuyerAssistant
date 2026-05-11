@@ -1,0 +1,28 @@
+{% from "_macros.html" import money %}
+{% set lot = item.lot %}
+{% set auction = item.auction %}
+<div class="card">
+  <h3>
+    <a href="/lots/{{ lot.id }}">{{ lot.year or "" }} {{ lot.make or "" }} {{ lot.model or "" }} {{ lot.trim or "" }}</a>
+  </h3>
+  <p class="muted">
+    {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
+    closes {{ auction.scheduled_end_at.strftime("%b %d %H:%M") if auction.scheduled_end_at else "?" }}
+  </p>
+  <p>
+    Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong>
+    {% if lot.all_in_at_current_bid_cad %} · All-in: {{ money(lot.all_in_at_current_bid_cad) }}{% endif %}
+    {% if lot.expected_value_cad %} · Est value: {{ money(lot.expected_value_cad) }}{% endif %}
+  </p>
+  <p>
+    {% if lot.rarity_score and lot.rarity_score >= 2.0 %}
+      <span class="tag rare">Rarity {{ "%.1f"|format(lot.rarity_score) }}</span>
+    {% endif %}
+    {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+      <span class="tag deal">Deal {{ "%.0f"|format(lot.price_deal_score * 100) }}%</span>
+    {% endif %}
+    {% if lot.suspicious_underprice_flag %}
+      <span class="tag" style="background:#ffe0e0">below low end</span>
+    {% endif %}
+  </p>
+</div>
