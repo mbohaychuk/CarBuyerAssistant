@@ -7658,6 +7658,19 @@ not additional work to do.
     `asynccontextmanager` deprecated (the test fixture idiom). Not new
     categories.
 
+20. **Defensive `try/except` around per-lot dispatch in `main()`** + bucket-cap
+    warning logs + per-cycle info log. Final-pass review caught that
+    `_poll_one` does not catch exceptions from `_write_observation` (only
+    from `poll_bid`); without a defensive wrapper at the dispatch site, a
+    single DB transient (idle_in_transaction_session_timeout, deadlock,
+    NOTIFY commit failure) would propagate out of the `while True` loop and
+    exit the worker process. Sibling workers (enricher `_bounded`, valuator
+    and notifier `process_pending` for-loops) all wrap the per-lot dispatch.
+    Bid-poller now does the same in both fast- and slow-bucket loops.
+    Added in the same pass: a `cycle complete` info log per pass (heartbeat
+    visibility for ops) and `fast/slow bucket capped` warning logs that
+    surface the overlay #16 scaling cliff in real time before it bites.
+
 ---
 
 ## Phase 8 — Vision pass

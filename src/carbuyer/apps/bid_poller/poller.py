@@ -219,10 +219,37 @@ async def main() -> None:
             now = datetime.now(UTC)
             fast, slow = await _load_open_lot_refs(now)
 
+            if len(fast) > _FAST_BUCKET_CAP:
+                log.warning(
+                    "fast bucket capped",
+                    total=len(fast),
+                    cap=_FAST_BUCKET_CAP,
+                )
+            if len(slow) > _SLOW_BUCKET_CAP:
+                log.warning(
+                    "slow bucket capped",
+                    total=len(slow),
+                    cap=_SLOW_BUCKET_CAP,
+                )
+
+            # Defensive try/except mirrors enricher/valuator/notifier — without it
+            # any unhandled exception (DB blip, NOTIFY failure, ...) would
+            # propagate out of `while True` and exit the worker process.
             for lot_id, ref in fast[:_FAST_BUCKET_CAP]:
-                await _poll_one(lot_id, ref, pollers=pollers)
+                try:
+                    await _poll_one(lot_id, ref, pollers=pollers)
+                except Exception:
+                    log.exception("poll_one unhandled", lot_id=lot_id)
 
             for lot_id, ref in slow[:_SLOW_BUCKET_CAP]:
-                await _poll_one(lot_id, ref, pollers=pollers)
+                try:
+                    await _poll_one(lot_id, ref, pollers=pollers)
+                except Exception:
+                    log.exception("poll_one unhandled", lot_id=lot_id)
 
+            log.info(
+                "cycle complete",
+                fast=min(len(fast), _FAST_BUCKET_CAP),
+                slow=min(len(slow), _SLOW_BUCKET_CAP),
+            )
             await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
