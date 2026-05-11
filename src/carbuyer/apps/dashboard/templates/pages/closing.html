@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block title %}Closing soon — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Closing in next {{ hours }}h</h1>
+  {% if not items %}<p class="muted">Nothing closing soon.</p>{% endif %}
+  {% for item in items %}
+    {% include "partials/lot_card.html" %}
+  {% endfor %}
+{% endblock %}

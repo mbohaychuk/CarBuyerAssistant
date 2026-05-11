@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block title %}Purchases — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Purchases ({{ year }} YTD: {{ ytd_count }})</h1>
+  {% if ytd_count >= 4 %}
+    <p style="color:#d33"><strong>At or above curbsider warning threshold.</strong>
+       BC's deeming clause kicks in at 5; AMVIC has zero tolerance. Stop and reassess.</p>
+  {% elif ytd_count == 3 %}
+    <p style="color:#c80">One more transfer this year is your hard ceiling.</p>
+  {% endif %}
+
+  <form method="post" action="/purchases" class="card">
+    <input name="purchase_date" type="date" required>
+    <input name="make" placeholder="Make" required>
+    <input name="model" placeholder="Model" required>
+    <input name="year" type="number" placeholder="Year" required>
+    <input name="purchase_price_cad" type="number" step="0.01" placeholder="Price CAD" required>
+    <input name="province_of_purchase" placeholder="Province" value="AB">
+    <button type="submit">Record purchase</button>
+  </form>
+
+  <table>
+    <thead><tr><th>Date</th><th>Vehicle</th><th>Price</th><th>Province</th><th>Sold?</th></tr></thead>
+    <tbody>
+      {% for p in rows %}
+        <tr>
+          <td>{{ p.purchase_date }}</td>
+          <td>{{ p.year }} {{ p.make }} {{ p.model }}</td>
+          <td>{{ money(p.purchase_price_cad) }}</td>
+          <td>{{ p.province_of_purchase or "" }}</td>
+          <td>{{ p.sale_date or "(held)" }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
