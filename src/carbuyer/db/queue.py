@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.enums import (
     EnrichmentStatus,
+    NotificationStatus,
     ValuationStatus,
     VisionStatus,
 )
@@ -18,17 +19,34 @@ StatusField = Literal[
 ]
 
 # Status fields with an IN_PROGRESS state — claimable via two-phase claim.
-# NotificationStatus has no IN_PROGRESS (notifier flips PENDING → DONE/SKIPPED
-# directly), so it's deliberately absent from this Literal.
+# NotificationStatus now has IN_PROGRESS so the notifier can use the same
+# claim pattern as the other workers.
 ClaimableStatusField = Literal[
-    "enrichment_status", "valuation_status", "vision_status",
+    "enrichment_status", "valuation_status", "vision_status", "notification_status",
 ]
 
 _IN_PROGRESS_BY_FIELD: dict[ClaimableStatusField, str] = {
     "enrichment_status": EnrichmentStatus.IN_PROGRESS,
     "valuation_status": ValuationStatus.IN_PROGRESS,
     "vision_status": VisionStatus.IN_PROGRESS,
+    "notification_status": NotificationStatus.IN_PROGRESS,
 }
+
+
+async def _mark_in_progress(
+    session: AsyncSession,
+    *,
+    ids: list[int],
+    status_field: ClaimableStatusField,
+) -> None:
+    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
+    update_stmt = (
+        update(AuctionLot)
+        .where(AuctionLot.id.in_(ids))
+        .values({status_field: in_progress_value})
+    )
+    await session.execute(update_stmt)
+    await session.flush()
 
 
 async def claim_pending_ids(
@@ -57,15 +75,34 @@ async def claim_pending_ids(
     rows = list((await session.execute(select_stmt)).scalars().all())
     if not rows:
         return []
-    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
-    update_stmt = (
-        update(AuctionLot)
-        .where(AuctionLot.id.in_(rows))
-        .values({status_field: in_progress_value})
-    )
-    await session.execute(update_stmt)
-    await session.flush()
+    await _mark_in_progress(session, ids=rows, status_field=status_field)
     return rows
+
+
+async def claim_pending_lots(
+    session: AsyncSession,
+    *,
+    status_field: ClaimableStatusField,
+    limit: int = 50,
+) -> list[AuctionLot]:
+    """Claim up to ``limit`` pending lots (full ORM rows) and flip them to
+    in_progress. SKIP-LOCKED + UPDATE atomicity matches claim_pending_ids;
+    this variant returns full rows so callers don't need a second SELECT
+    round-trip when the whole row is needed.
+    """
+    column = getattr(AuctionLot, status_field)
+    stmt = (
+        select(AuctionLot)
+        .where(column == "pending")
+        .order_by(AuctionLot.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    lots = list((await session.execute(stmt)).scalars().all())
+    if not lots:
+        return []
+    await _mark_in_progress(session, ids=[lot.id for lot in lots], status_field=status_field)
+    return lots
 
 
 async def select_pending_ids(
