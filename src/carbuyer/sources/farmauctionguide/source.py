@@ -72,12 +72,18 @@ PLATFORM_RULES: list[tuple[re.Pattern[str], str, re.Pattern[str]]] = [
 ]
 
 
-def resolve_platform(url: str) -> tuple[str, str]:
+def resolve_platform(url: str) -> tuple[str, str] | None:
     """Map an auction URL to (resolved_source, extracted_auction_id).
 
-    Returns ("hibid"|"mcdougall", "<numeric-id>") for known platforms, or
-    ("unknown:<host>", "<last-path-segment>") for anything else. The
-    "unknown:<host>" convention matches _sweep_one_discoverer's existing check
+    Returns ("hibid"|"mcdougall", "<numeric-id>") for known platforms with a
+    valid auction-id in the URL path, ("unknown:<host>", "<last-path-segment>")
+    for unknown hosts, or None for known hosts whose URL doesn't carry a
+    catalog/auction id (e.g. hibid.com footer links to /help, /about, etc.).
+
+    The None return tells callers to skip the link entirely — emitting it as
+    unknown:<known-host> would trigger a spurious needs_plugin alert for a
+    platform we already have a plugin for. The "unknown:<host>" convention
+    matches _sweep_one_discoverer's existing check
     (ref.source.startswith("unknown:")) without any worker-side changes.
     """
     parsed = urlparse(url)
@@ -87,8 +93,11 @@ def resolve_platform(url: str) -> tuple[str, str]:
             m = id_pat.search(parsed.path)
             if m:
                 return source_name, m.group(1)
-            # Host matched but ID extraction failed — still unknown.
-            break
+            # Host matched a known platform but the path doesn't carry an
+            # auction id — this is a non-auction link (nav, footer, help, etc.).
+            # Skip rather than emit as unknown to avoid a needs_plugin alert
+            # for a platform we already plug.
+            return None
     # Fallback: unknown:<host> with last non-empty path segment as ID.
     fallback_host = host or "unknown_host"
     last_segment = parsed.path.rstrip("/").split("/")[-1]
@@ -184,7 +193,12 @@ class FarmAuctionGuideSource(AuctionSource):
                 if link_host in _FAG_HOSTS:
                     # Internal farmauctionguide navigation — not an auction link.
                     continue
-                source, ext_id = resolve_platform(href)
+                resolved = resolve_platform(href)
+                if resolved is None:
+                    # Known host but no auction-id in path — non-auction link
+                    # (footer, nav, help). Skip to avoid spurious needs_plugin alert.
+                    continue
+                source, ext_id = resolved
                 key = (source, ext_id)
                 if key in seen:
                     continue

@@ -15,48 +15,40 @@ from carbuyer.sources.farmauctionguide.source import (  # registers source at im
 
 def test_resolve_platform_routes_hibid() -> None:
     url = "https://terrymcdougall.hibid.com/catalog/740236/some-slug"
-    source, ext_id = resolve_platform(url)
-    assert source == "hibid"
-    assert ext_id == "740236"
+    assert resolve_platform(url) == ("hibid", "740236")
 
 
 def test_resolve_platform_routes_mcdougall() -> None:
     url = "https://www.mcdougallauction.com/auction/12345/regina-summer"
-    source, ext_id = resolve_platform(url)
-    assert source == "mcdougall"
-    assert ext_id == "12345"
+    assert resolve_platform(url) == ("mcdougall", "12345")
 
 
 def test_resolve_platform_falls_back_to_unknown_with_host() -> None:
     url = "https://random-auctioneer.example.com/sale/abc"
-    source, ext_id = resolve_platform(url)
-    assert source == "unknown:random-auctioneer.example.com"
-    assert ext_id == "abc"
+    assert resolve_platform(url) == ("unknown:random-auctioneer.example.com", "abc")
 
 
 def test_resolve_platform_strips_www() -> None:
     # www.hibid.com should still match the hibid rule.
     url = "https://www.hibid.com/catalog/700001"
-    source, ext_id = resolve_platform(url)
-    assert source == "hibid"
-    assert ext_id == "700001"
+    assert resolve_platform(url) == ("hibid", "700001")
 
 
 def test_resolve_platform_handles_no_path_segment() -> None:
     url = "https://example.com/"
-    source, ext_id = resolve_platform(url)
-    assert source == "unknown:example.com"
     # When all path segments are empty after stripping the trailing slash,
     # the fallback uses the full URL as the id.
-    assert ext_id == url
+    assert resolve_platform(url) == ("unknown:example.com", url)
 
 
-def test_resolve_platform_unknown_host_only_when_id_extraction_fails() -> None:
-    # HiBid host but no /catalog/ or /auction/ in path — host matched but id failed.
-    url = "https://hibid.com/some/other/page"
-    source, _ext_id = resolve_platform(url)
-    # Host matched hibid rule but id regex didn't match → falls through to unknown.
-    assert source.startswith("unknown:")
+def test_resolve_platform_returns_none_for_known_host_without_auction_id() -> None:
+    # Known platform host (hibid) but URL has no catalog/auction id — this is
+    # a non-auction link (footer / nav / help page). Must return None so the
+    # caller skips it; emitting as unknown:hibid.com would trigger a spurious
+    # needs_plugin alert for a platform we already plug.
+    assert resolve_platform("https://hibid.com/some/other/page") is None
+    assert resolve_platform("https://www.hibid.com/help") is None
+    assert resolve_platform("https://www.mcdougallauction.com/about") is None
 
 
 # ── Registration and metadata ─────────────────────────────────────────────────
@@ -153,6 +145,29 @@ async def test_discover_auctions_deduplicates() -> None:
 
     hibid_refs = [r for r in refs if r.source == "hibid" and r.source_auction_id == "999"]
     assert len(hibid_refs) == 1
+
+
+@pytest.mark.asyncio
+async def test_discover_auctions_skips_known_host_without_auction_id() -> None:
+    # Footer/nav links on farmauctionguide pages may point to hibid.com/help
+    # (no catalog id). resolve_platform returns None for these; the discover
+    # loop must skip them, NOT emit them as unknown:hibid.com (which would
+    # trigger a spurious needs_plugin alert for a platform we already plug).
+    body = """
+    <html><body>
+      <a href="https://terrymcdougall.hibid.com/catalog/555/real-auction">Real</a>
+      <a href="https://www.hibid.com/help">Help</a>
+      <a href="https://www.hibid.com/findauctioneers">Find auctioneers</a>
+      <a href="https://www.mcdougallauction.com/about">About</a>
+    </body></html>
+    """
+    transport = _multi_transport({"https://www.farmauctionguide.com/canada/alberta/": (200, body)})
+    async with FarmAuctionGuideSource(provinces=["AB"], _transport=transport) as src:
+        refs = [ref async for ref in src.discover_auctions()]
+
+    assert len(refs) == 1
+    assert refs[0].source == "hibid"
+    assert refs[0].source_auction_id == "555"
 
 
 @pytest.mark.asyncio

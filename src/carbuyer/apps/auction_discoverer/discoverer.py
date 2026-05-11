@@ -183,6 +183,12 @@ async def _sweep_one_discoverer(
                 and auction.needs_plugin_notified_at is None
             ):
                 await notify(session, "needs_plugin", str(auction.id))
+                log.info(
+                    "needs_plugin notify emitted",
+                    source=ref.source,
+                    auction_id=auction.id,
+                    discoverer=discoverer.name,
+                )
         found += 1
     return found
 
