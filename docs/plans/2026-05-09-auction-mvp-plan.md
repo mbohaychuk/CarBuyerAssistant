@@ -9633,6 +9633,70 @@ views" list once the dashboard skeleton exists.
       `_listen_needs_plugin` infinite-loop wrapper isn't. Same intentional
       gap as every other listener loop in this codebase.
 
+17. **Multi-reviewer pre-merge findings applied** (commit `37f9ba2`).
+    Three parallel reviewers (bugs/security, architecture/convention, test
+    coverage/observability) ran against the branch. Items applied:
+    - **`resolve_platform` skip-on-known-host-without-auction-id.** Returns
+      `tuple[str, str] | None` now. When a known host (hibid/mcdougall)
+      matches but the URL path has no auction id (e.g. `hibid.com/help`,
+      `mcdougallauction.com/about` — footer/nav/help links on
+      farmauctionguide pages), returns `None` and the discover loop skips
+      the link entirely. Without this, those URLs would have fallen
+      through to `unknown:hibid.com` and triggered a spurious `needs_plugin`
+      Discord alert telling ops to "add a plugin" for hibid (which we
+      already plug). Caught by bugs reviewer; real noise risk on first
+      production deploy.
+    - **McDougall `discover_auctions` + `fetch_lots` regression tests.**
+      Both methods have real production logic (absolute-vs-relative href
+      reconstruction, dedup by auction/lot id, `/lot/<id>` segment parsing,
+      `isdigit()` filter for non-numeric ids) but had zero test coverage.
+      Added two tests exercising both branches with hand-crafted HTML
+      bodies via `MockTransport`. A regex or href-reconstruction regression
+      in either method would have shipped silently.
+    - **`_sweep_one_discoverer` `needs_plugin` NOTIFY branch tests.** The
+      core of the Phase 10 feature (NOTIFY trigger on unknown source + stamp
+      gate) had no test coverage. Added three tests: emits `needs_plugin`
+      for fresh unknown source; suppresses for already-stamped auction;
+      never fires for known source (`"hibid"` ref). Locks in the
+      `ref.source.startswith("unknown:")` and
+      `needs_plugin_notified_at IS NULL` guards.
+    - **`_process_needs_plugin` success log.** Added `log.info(
+      "needs_plugin alert posted", auction_id, channel_id, channel_key)`
+      between the stamp-write and return. Previously the only alert-class
+      notification in the system that didn't log on success; ops triage
+      would have been materially harder.
+    - **`_sweep_one_discoverer` NOTIFY-emission log.** Added `log.info(
+      "needs_plugin notify emitted", source, auction_id, discoverer)`
+      after the `notify(...needs_plugin)` call. Lets ops trace alerts back
+      to the originating sweep. The existing
+      `log.warning("unknown platform discovered")` fires on every sweep
+      (including for already-stamped auctions); the new info log
+      distinguishes first-time-NOTIFY from steady-state re-sightings.
+    - **Notifier `main()` startup log.** Added `log.info("notifier
+      starting", listeners=[...])` before the `asyncio.TaskGroup` spins
+      up. If the process exits immediately (e.g., one task fails on
+      startup), the log record shows both listeners were attempted.
+    - **Architecture reviewer noted the per-province exception swallowing
+      in farmauctionguide actually mirrors HibidSource exactly** — the
+      implementer's earlier framing as "different behavior" was wrong; it's
+      the same convention. No fix needed.
+
+18. **Reviewer items not actioned (acknowledged):**
+    - **Duplicate-alert window:** two discovery sweeps closely in time can
+      both see `needs_plugin_notified_at IS NULL` and fire NOTIFY twice,
+      resulting in two Discord posts for the same auction. Discord accepts
+      duplicates; documented as acceptable.
+    - **TaskGroup Discord rate-limit collision:** notifier now runs lot
+      posting + needs_plugin posting concurrently against the same bot.
+      `_post_with_retry`'s 429 handling absorbs collisions; needs_plugin
+      alerts are infrequent in practice. Will revisit if first production
+      ops shows 429 spam.
+    - **No `_listen_needs_plugin` infinite-loop test.** Sibling workers
+      also lack this — same intentional gap.
+    - **Already-notified `_process_needs_plugin` skip path:** intentionally
+      not logged (matches `_process_one`'s no-log-on-skip convention).
+      Steady state would log noisily otherwise.
+
 ---
 
 End of Phase 10. All three MVP sources are integrated and unknown-platform auctions are flagged for manual plugin addition. Task 43 (dashboard view + retry-routing) is picked up in Phase 11 alongside the dashboard skeleton.
