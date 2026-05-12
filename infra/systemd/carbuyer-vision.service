@@ -1,0 +1,13 @@
+[Unit]
+Description=CarBuyer vision batcher (oneshot)
+After=carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=oneshot
+User=mark
+WorkingDirectory=/home/mark/repos/CarBuyerAssistant
+EnvironmentFile=/home/mark/repos/CarBuyerAssistant/.env
+ExecStart=/home/mark/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.vision_batcher
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CarBuyer vision batcher nightly at 02:00 UTC
+After=carbuyer-postgres.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true
+Unit=carbuyer-vision.service
+
+[Install]
+WantedBy=timers.target
