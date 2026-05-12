@@ -11404,3 +11404,103 @@ git tag -a v0.1.0 -m "MVP: end-to-end auction deal-finder"
 **Verification path:** Phase 12 Task 52 is the end-to-end smoke that proves the whole pipeline works on real data.
 
 **Unknown-platform feedback loop:** Task 42 alerts on Discord whenever farmauctionguide finds an auction whose platform we can't parse. Task 43's `/needs-plugin` view + retry-routing endpoint lets the user add a plugin and reroute existing rows so the new plugin processes them. End-to-end: discovery → alert → user adds plugin → user clicks Retry routing → lot-scraper picks up the auction under the new source.
+
+---
+
+### Phase 12 post-implementation overlay
+
+Tasks 49, 50, 51 land in this phase. Task 52 (end-to-end smoke checklist) is
+the user's manual verification gate — runs against live OpenAI + Discord +
+Postgres after merge, not part of the implementation commits.
+
+#### Plan-vs-code corrections (recurring + new)
+
+1. **`.env.example` expanded to cover every `Settings` key.** Plan's
+   example was a 17-line stub; the actual `Settings` class in
+   `src/carbuyer/shared/config.py` has 25+ tunables. Restructured into four
+   sections: required-no-default, database, common knobs (shown
+   uncommented at defaults), and optional tunables (commented out with
+   their defaults). A user copying `.env.example → .env` now sees every
+   knob the system respects without having to read the code.
+
+2. **README worker list extended** to include `bid_poller`,
+   `vision_batcher`, `auction_distiller` (Phase 7/8/9 additions the
+   original plan README pre-dated). Production-deployment section gets a
+   table mapping each unit to its role + cadence (continuous vs 6h timer
+   vs nightly 02:00/03:00 UTC).
+
+3. **`backup.sh` date-format comment** added explaining the ISO-8601
+   `T...Z` choice (sortable + unambiguous UTC, no `:` to confuse
+   Windows/SMB shares).
+
+4. **Skipped Task 52 (smoke test) entirely.** It costs OpenAI tokens,
+   posts to Discord, and requires real credentials — the user runs this
+   manually when ready for cutover.
+
+#### Reviewer pass — findings applied (commit `5c2039e`)
+
+Single bugs/correctness reviewer pass against the branch. 3 critical + 2
+important findings, all applied:
+
+5. **`EnvironmentFile=` made optional across all 10 service units.** Plan
+   used the bare `EnvironmentFile=/.../.env` form. systemd treats a missing
+   file as a hard error in that form — first-deploy ordering (service
+   enabled before `.env` is created) would fail to start with `Failed to
+   load environment files`. Prefixed all 10 with `-` so missing `.env` is
+   silently OK; pydantic-settings still fail-fasts at Python startup if
+   required keys are absent. (The postgres service has no
+   `EnvironmentFile=` and is unaffected.)
+
+6. **`DISCORD_CHANNELS` example used wrong key names.** Plan's example
+   showed `closing_soon` and `watched` as channel keys; the `ChannelKey`
+   `Literal` in `apps/bot/channels.py` actually requires `auction_closing`
+   and `watchlist`. A user copying the example verbatim would silently
+   lose auction-closing and watchlist notifications (the notifier logs a
+   warning and continues on a missing channel key). Corrected to the real
+   `ChannelKey` values and rewrote the inline comment to point at the
+   source-of-truth file.
+
+7. **`backup.sh` atomicity fix.** Plan had
+   `docker exec ... pg_dump | gzip > "${OUT}"`. The shell opens `$OUT`
+   before the pipeline starts; if the container is down, `gzip` receives
+   immediate EOF and writes a valid-but-empty `.sql.gz` to `$OUT`.
+   `pipefail` then catches the docker exit code and aborts the script,
+   but the zero-byte file is already on disk and survives the 30-day
+   `find -delete` prune. The next `pg_restore` would silently lose that
+   day. Restructured: pre-flight `pg_isready` check that aborts cleanly
+   with stderr message, then write to `$OUT.tmp` and `mv` to `$OUT` only
+   on success (atomic; `trap` cleans the tmp on any abort).
+
+8. **`install.sh` now `chmod +x infra/backup.sh`** so the cron entry
+   documented in the README works even on a clone where
+   `git core.fileMode=false` has dropped the executable bit. Without
+   this, daily backups would silently fail with `Permission denied` and
+   cron usually emails nowhere by default.
+
+#### Pyright / ruff / pytest
+
+- **Pytest baseline.** 437 passed, 1 skipped — unchanged from Phase 11.
+  Phase 12 touched zero Python files.
+- **Pyright baseline.** 59 errors — unchanged.
+- **Ruff clean.** All checks pass.
+
+#### Reviewer items not actioned (acknowledged)
+
+- **`auction_watch`, `vision_updates`, `system_health` channel keys not
+  in the `.env.example` JSON example** — these `ChannelKey` literals are
+  reserved for future trigger types not yet wired in `_FIXED_ROUTES`.
+  Leaving them out keeps the example minimal and focused on what the
+  current notifier actually uses. The comment lists all eight valid keys
+  for future reference.
+- **Backup script does not verify checksum / parseability of the dump.**
+  pg_dump exits 0 only on successful completion, and the temp-file +
+  rename pattern means a partially-written dump never reaches `$OUT`.
+  Adding a per-file gzip integrity check (`gzip -t`) is cheap but
+  marginal once the atomicity issue is fixed.
+- **No log rotation for `journalctl` per-service.** Distro defaults apply;
+  ops can tune via `/etc/systemd/journald.conf` if needed.
+
+---
+
+End of Phase 12. MVP is implementation-complete; Task 52 (manual smoke
+test) is the cutover gate.
