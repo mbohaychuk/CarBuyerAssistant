@@ -6,6 +6,12 @@ UNIT_DIR="/etc/systemd/system"
 
 cd "$(dirname "$0")"
 
+# Ensure the backup script is executable. git core.fileMode=false (sometimes
+# set on cross-platform clones) drops the executable bit, which makes a daily
+# cron entry silently fail with "Permission denied" — and cron usually emails
+# nowhere by default.
+chmod +x "${REPO_DIR}/infra/backup.sh"
+
 echo "Linking units to ${UNIT_DIR}..."
 for f in *.service *.timer; do
   sudo ln -sf "$(realpath "$f")" "${UNIT_DIR}/${f}"
