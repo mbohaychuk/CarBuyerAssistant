@@ -1,0 +1,27 @@
+<form
+  hx-get="/"
+  hx-target="#lot-list"
+  hx-swap="innerHTML"
+  hx-trigger="change from:select, change from:input[type='checkbox'], keyup changed delay:300ms from:input[type='number'], submit"
+  hx-push-url="true"
+  class="card"
+>
+  <label>Province
+    <select name="province" multiple>
+      {% for p in ["AB", "BC", "SK", "MB"] %}
+        <option value="{{ p }}" {% if p in filters.province %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Min deal score
+    <input type="number" name="min_score" step="0.01" min="0" max="1" value="{{ filters.min_score }}">
+  </label>
+  <label>Min rarity score
+    <input type="number" name="min_rarity" step="0.5" min="0" max="5" value="{{ filters.min_rarity }}">
+  </label>
+  <label>
+    <input type="checkbox" name="exclude_not_interested" value="true"
+      {% if filters.exclude_not_interested %}checked{% endif %}>
+    Exclude not-interested
+  </label>
+</form>

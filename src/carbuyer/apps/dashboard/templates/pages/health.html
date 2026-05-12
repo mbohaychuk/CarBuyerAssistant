@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}System health — CarBuyer{% endblock %}
+{% block content %}
+  <h1>System health</h1>
+  <ul>
+    <li>Auctions tracked: {{ auction_count }}</li>
+    <li>Lots tracked (all): {{ lot_count }}</li>
+    <li>Open lots: {{ open_count }}</li>
+    <li>Pending enrichment: {{ pending_enrichment }}</li>
+    <li>Pending valuation: {{ pending_valuation }}</li>
+    <li>Pending notification: {{ pending_notification }}</li>
+    <li>Historical sales: {{ historical_count }}</li>
+  </ul>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% from "_macros.html" import money %}
+{% for item in items %}
+  {% include "partials/lot_card.html" %}
+{% endfor %}
+{% if next_cursor %}
+  <div
+    hx-get="/?cursor={{ next_cursor }}{% if filters.province %}{% for p in filters.province %}&province={{ p }}{% endfor %}{% endif %}&min_score={{ filters.min_score }}&min_rarity={{ filters.min_rarity }}&exclude_not_interested={{ filters.exclude_not_interested|lower }}"
+    hx-trigger="revealed"
+    hx-swap="afterend"
+  ></div>
+{% endif %}

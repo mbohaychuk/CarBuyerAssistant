@@ -1,0 +1,7 @@
+{% macro money(value) %}
+{%- if value is none -%}—{%- else -%}${{ "{:,.0f}".format(value|float) }}{%- endif -%}
+{% endmacro %}
+
+{% macro pct(value) %}
+{%- if value is none -%}—{%- else -%}{{ "{:.1%}".format(value|float) }}{%- endif -%}
+{% endmacro %}

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Needs plugin — CarBuyer{% endblock %}
+{% block content %}
+  <h1>Auctions needing a plugin</h1>
+  <p class="muted">
+    farmauctionguide.com surfaced these auctions but their underlying platform
+    isn't covered by any of our scraper plugins yet. Add a plugin under
+    <code>src/carbuyer/sources/&lt;name&gt;/</code> and register it in the
+    discoverer + lot-scraper + bid-poller registries, then click
+    <strong>Retry routing</strong> below to reprocess.
+  </p>
+  {% if not rows %}
+    <p class="muted">Nothing waiting. New unknown-platform auctions will appear here as they're discovered.</p>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+        <th>URL</th>
+        <th>Auctioneer</th>
+        <th>Location</th>
+        <th>Starts</th>
+        <th>First seen</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in rows %}
+        <tr>
+          <td><a href="{{ a.url }}" target="_blank">{{ a.url[:60] }}…</a></td>
+          <td>{{ a.auctioneer_name or "(unknown)" }}</td>
+          <td>{{ a.pickup_city or "?" }}, {{ a.pickup_province or "?" }}</td>
+          <td>
+            {% if a.scheduled_start_at %}
+              {{ a.scheduled_start_at.strftime("%b %d") }}
+              {% set delta = (a.scheduled_start_at - now).total_seconds() // 86400 %}
+              ({{ delta|int }}d)
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>{{ a.first_seen_at.strftime("%Y-%m-%d") }}</td>
+          <td>
+            <button
+              hx-post="/admin/auctions/{{ a.id }}/retry_routing"
+              hx-swap="none"
+            >Retry routing</button>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}CarBuyer{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  <script src="/static/vendor/chart.umd.js" defer></script>
+</head>
+<body>
+  <nav class="topnav">
+    <a href="/">Feed</a>
+    <a href="/closing">Closing soon</a>
+    <a href="/watched">Watched</a>
+    <a href="/comps">Comps</a>
+    <a href="/sold">Sold</a>
+    <a href="/purchases">Purchases</a>
+    <a href="/needs-plugin">Needs plugin</a>
+    <a href="/health">Health</a>
+  </nav>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

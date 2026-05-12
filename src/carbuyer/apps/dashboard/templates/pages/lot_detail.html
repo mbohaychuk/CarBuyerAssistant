@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block title %}{{ lot.title or "Lot" }}{% endblock %}
+{% block content %}
+  <h1>{{ lot.year or "" }} {{ lot.make or "" }} {{ lot.model or "" }} {{ lot.trim or "" }}</h1>
+  <p class="muted">
+    {{ auction.auctioneer_name or auction.source }} ·
+    {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
+    <a href="{{ lot.url }}" target="_blank">view at source</a>
+  </p>
+
+  <section class="card">
+    <h3>Comparable vehicles</h3>
+    <div hx-get="/lots/{{ lot.id }}/comps" hx-trigger="load" hx-swap="innerHTML">
+      Loading…
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Pricing</h3>
+    <p>Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong></p>
+    <p>All-in at current bid: {{ money(lot.all_in_at_current_bid_cad) }}</p>
+    <p>Expected value (private equiv): {{ money(lot.expected_value_cad) }}</p>
+    <p>Recommended max bid: <strong>{{ money(lot.recommended_max_bid_cad) }}</strong></p>
+  </section>
+
+  <section class="card">
+    <h3>Flags</h3>
+    {% if lot.red_flags %}<p>Red: {% for f in lot.red_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
+    {% if lot.green_flags %}<p>Green: {% for f in lot.green_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
+    {% if lot.showstopper_flags %}<p style="color:#d33">Showstoppers: {% for f in lot.showstopper_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <h3>Actions</h3>
+    <form hx-post="/lots/{{ lot.id }}/mark" hx-swap="none" style="display:inline">
+      <button name="action" value="interested">Interested</button>
+      <button name="action" value="maybe">Maybe</button>
+      <button name="action" value="not_interested">Not interested</button>
+    </form>
+  </section>
+{% endblock %}
