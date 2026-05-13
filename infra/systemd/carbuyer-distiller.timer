@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CarBuyer auction distiller nightly at 03:00 UTC
+After=carbuyer-postgres.service
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+Unit=carbuyer-distiller.service
+
+[Install]
+WantedBy=timers.target

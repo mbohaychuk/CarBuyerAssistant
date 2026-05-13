@@ -1,0 +1,18 @@
+[Unit]
+Description=CarBuyer lot scraper worker
+After=network-online.target carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=simple
+User=mark
+WorkingDirectory=/home/mark/repos/CarBuyerAssistant
+EnvironmentFile=-/home/mark/repos/CarBuyerAssistant/.env
+ExecStart=/home/mark/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.lot_scraper
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
