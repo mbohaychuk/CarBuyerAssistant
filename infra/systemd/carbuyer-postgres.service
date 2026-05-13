@@ -1,0 +1,14 @@
+[Unit]
+Description=CarBuyer Postgres (Docker)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/home/mark/repos/CarBuyerAssistant/infra
+ExecStart=/usr/bin/docker compose up -d postgres
+ExecStop=/usr/bin/docker compose stop postgres
+
+[Install]
+WantedBy=multi-user.target
