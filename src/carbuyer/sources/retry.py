@@ -7,7 +7,17 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from carbuyer.shared.logging import get_logger
+
 RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+
+# A misbehaving server (or a CDN incident) can send Retry-After: 3600. With
+# max_retries=4, an unbounded honor would stall a worker process for hours.
+# Cap independently of `cap` (which only bounds exponential backoff) so server
+# guidance is respected but bounded.
+DEFAULT_RETRY_AFTER_CAP_S = 120.0
+
+log = get_logger("sources.retry")
 
 
 def _parse_retry_after(value: str) -> float | None:
@@ -41,11 +51,13 @@ class RetryTransport(httpx.AsyncBaseTransport):
         max_retries: int = 4,
         base: float = 1.0,
         cap: float = 30.0,
+        retry_after_cap: float = DEFAULT_RETRY_AFTER_CAP_S,
     ) -> None:
         self._inner = inner
         self._max_retries = max_retries
         self._base = base
         self._cap = cap
+        self._retry_after_cap = retry_after_cap
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         last: httpx.Response | None = None
@@ -63,6 +75,14 @@ class RetryTransport(httpx.AsyncBaseTransport):
             delay = _parse_retry_after(ra) if ra else None
             if delay is None:
                 delay = min(self._cap, self._base * (2**attempt))
+            elif delay > self._retry_after_cap:
+                log.warning(
+                    "retry-after capped",
+                    url=str(request.url),
+                    server_value_s=delay,
+                    cap_s=self._retry_after_cap,
+                )
+                delay = self._retry_after_cap
             delay = delay + random.uniform(0, max(delay * 0.25, 0.05))  # jitter
             await asyncio.sleep(delay)
         # Unreachable, but keeps the type checker happy.
