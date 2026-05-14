@@ -7,7 +7,7 @@ After=docker.service
 Type=oneshot
 RemainAfterExit=true
 WorkingDirectory=/home/mark/repos/CarBuyerAssistant/infra
-ExecStart=/usr/bin/docker compose up -d postgres
+ExecStart=/usr/bin/docker compose up -d --wait postgres
 ExecStop=/usr/bin/docker compose stop postgres
 
 [Install]
