@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     # valuator does no LLM I/O, so it can drain larger batches.
     valuation_batch_size: int = 30
     valuation_max_attempts: int = 3
+    # Phase 13: notifier retry cap. A Discord POST returning False
+    # (429-after-retry, 4xx, network blip, missing channel) leaves
+    # notification_status=PENDING and increments notification_attempts;
+    # once attempts >= this, the worker flips to FAILED. Mirrors the
+    # enrichment/valuation retry semantics.
+    notification_max_attempts: int = 3
+    notification_batch_size: int = 50
     # Phase 4 overlay #12: lots whose RAW cumulative red-flag weight (pre-clip,
     # pre-dilution-cap) is at or below this are excluded from notifications
     # regardless of price-deal score. Heuristic; revisit after first 100 lots.

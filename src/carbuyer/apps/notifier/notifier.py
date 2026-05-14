@@ -102,13 +102,24 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     }.get(trigger)
 
 
-async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> str:  # noqa: PLR0912
+async def _process_one(  # noqa: PLR0912
+    lot_id: int, *, http_session: aiohttp.ClientSession,
+) -> str:
     """Process one claimed lot end-to-end.
 
     Returns:
-      - ``"done"`` — triggers evaluated, posts attempted, status DONE.
-      - ``"skipped"`` — no triggers fired, status SKIPPED.
+      - ``"done"`` — at least one configured trigger posted successfully,
+        status DONE with timestamps stamped.
+      - ``"skipped"`` — no triggers fired (no work to do), status SKIPPED.
       - ``"missing"`` — lot row vanished between claim and load.
+      - ``"transient"`` — at least one trigger had a configured channel and
+        the post failed. Status returns to PENDING with notification_attempts
+        incremented; caller's self-NOTIFY drains the leftover.
+      - ``"failed"`` — same as transient but attempts >= max; flips to FAILED.
+
+    Phase 13 fix C2: previously every outcome other than "no triggers" wrote
+    notification_status=DONE, so a Discord rate-limit / 4xx / network blip
+    silently lost the notification while the DB showed the lot as notified.
     """
     # Load lot + auction in a short read transaction.
     async with get_session() as s:
@@ -146,6 +157,9 @@ async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> s
     # HTTP I/O outside any DB transaction.
     last_channel: str | None = None
     stamped: dict[str, datetime] = {}
+    any_post_attempted = False
+    any_post_succeeded = False
+    last_error: str | None = None
     for trigger in triggers:
         channel_key = select_channel(
             trigger=trigger.trigger, score=lot.price_deal_score,
@@ -158,10 +172,13 @@ async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> s
                 lot_id=lot_id,
                 trigger=trigger.trigger,
             )
+            last_error = f"no_channel:{channel_key}"
             continue
+        any_post_attempted = True
         content = _render(trigger, data)
         posted = await post_message(channel_id, content, lot_id, session=http_session)
         if posted:
+            any_post_succeeded = True
             last_channel = channel_key
             ts_field = _timestamp_field_for_trigger(trigger.trigger)
             if ts_field:
@@ -171,27 +188,58 @@ async def _process_one(lot_id: int, *, http_session: aiohttp.ClientSession) -> s
                 lot_id=lot_id, trigger=trigger.trigger, channel=channel_key,
             )
         else:
+            last_error = f"post_failed:{channel_key}:{trigger.trigger}"
             log.warning(
                 "notification post failed",
                 lot_id=lot_id, trigger=trigger.trigger, channel_key=channel_key,
             )
 
-    # Write timestamps + status in a fresh short transaction.
-    async with get_session() as s, s.begin():
-        row = await s.get(AuctionLot, lot_id)
-        if row is not None:
+    # Decide outcome based on whether anything reached Discord.
+    if any_post_succeeded:
+        async with get_session() as s, s.begin():
+            row = await s.get(AuctionLot, lot_id)
+            if row is None:
+                log.error(
+                    "lot vanished after posts; timestamps lost"
+                    " — duplicate notification possible on recovery",
+                    lot_id=lot_id,
+                )
+                return "done"
             for field, ts in stamped.items():
                 setattr(row, field, ts)
             if last_channel is not None:
                 row.last_notified_channel = last_channel
             row.notification_status = NotificationStatus.DONE
-        else:
-            log.error(
-                "lot vanished after posts; timestamps lost"
-                " — duplicate notification possible on recovery",
-                lot_id=lot_id,
+            row.last_notification_error = None
+        return "done"
+
+    # No posts succeeded. If every trigger landed on a missing channel,
+    # SKIP — re-running won't fix configuration. Otherwise it's transient.
+    async with get_session() as s, s.begin():
+        row = await s.get(AuctionLot, lot_id)
+        if row is None:
+            log.warning(
+                "lot vanished before transient/failed write", lot_id=lot_id,
             )
-    return "done"
+            return "transient"
+        row.notification_attempts = (row.notification_attempts or 0) + 1
+        row.last_notification_error = last_error
+        if not any_post_attempted:
+            # Every trigger had no channel configured — ops misconfiguration,
+            # re-trying won't help. Mark SKIPPED with the error recorded.
+            row.notification_status = NotificationStatus.SKIPPED
+            return "skipped"
+        if row.notification_attempts >= settings.notification_max_attempts:
+            row.notification_status = NotificationStatus.FAILED
+            log.error(
+                "notification max attempts exceeded",
+                lot_id=lot_id,
+                attempts=row.notification_attempts,
+                last_error=last_error,
+            )
+            return "failed"
+        row.notification_status = NotificationStatus.PENDING
+    return "transient"
 
 
 async def process_pending(*, http_session: aiohttp.ClientSession) -> int:
@@ -199,8 +247,13 @@ async def process_pending(*, http_session: aiohttp.ClientSession) -> int:
 
     Returns the count of lots claimed (not successes — skips count too).
 
-    Sequential by design — Discord rate limits apply per-bot globally across all
-    channels; concurrent posts would race the rate limit instantly.
+    Sequential by design — Discord rate limits apply per-bot globally across
+    all channels; concurrent posts would race the rate limit instantly.
+
+    Phase 13: when at least one lot finishes with outcome="transient" (i.e.
+    a Discord blip left it PENDING for retry), self-NOTIFY notification_pending
+    so the listener loop drains them next pass instead of waiting for a
+    worker restart.
     """
     sm = get_session_maker()
     async with sm() as claim_session, claim_session.begin():
@@ -213,11 +266,18 @@ async def process_pending(*, http_session: aiohttp.ClientSession) -> int:
         return 0
 
     lot_ids = [lot.id for lot in lots]
+    outcomes: list[str] = []
     for lot_id in lot_ids:
         try:
-            await _process_one(lot_id, http_session=http_session)
+            outcomes.append(
+                await _process_one(lot_id, http_session=http_session),
+            )
         except Exception:
             log.exception("process_one unhandled", lot_id=lot_id)
+            outcomes.append("transient")
+    if any(o == "transient" for o in outcomes):
+        async with get_session() as s, s.begin():
+            await notify(s, "notification_pending", "")
     return len(lot_ids)
 
 

@@ -307,6 +307,19 @@ class AuctionLot(Base, TimestampMixin):
         nullable=False,
     )
     last_valuation_error: Mapped[str | None] = mapped_column(Text)
+    # Phase 13 (review fix): retry counter for the notifier. Mirrors
+    # enrichment_attempts / valuation_attempts. A Discord POST that returns
+    # False (429-after-retry, 4xx, network blip, missing channel) increments
+    # this and leaves notification_status at PENDING for re-claim until
+    # attempts >= settings.notification_max_attempts, at which point the
+    # status is flipped to FAILED. Without this, every transient Discord blip
+    # silently lost the notification (lot looked DONE in the DB; no message).
+    notification_attempts: Mapped[int] = mapped_column(
+        Integer,
+        server_default=text("0"),
+        nullable=False,
+    )
+    last_notification_error: Mapped[str | None] = mapped_column(Text)
     # Inferred-from-sparse-listing flag: when condition_confidence < 0.5 the
     # enricher coerces condition_categorical to "decent" but sets this True so
     # Phase 4 valuation can apply a separate sparse-listing pessimism penalty
