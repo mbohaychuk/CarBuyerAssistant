@@ -229,6 +229,60 @@ async def test_apply_to_lot_overrides_description_quality_on_thin(
 
 
 @pytest.mark.asyncio
+async def test_apply_to_lot_rejects_out_of_range_mileage(
+    session: AsyncSession,
+) -> None:
+    """Phase 13: LLM hallucinated mileage (negative, or a mi→km unit swap that
+    produces an impossibly large number) must not overwrite the existing value.
+    Bad mileage silently poisons the comp set and flips the deal score."""
+    _, lot = _seed_auction_and_lot(session)
+    lot.mileage_km = 180_000
+    session.add(lot)
+    await session.flush()
+
+    bad_nv = _enrichment().normalized_vehicle.model_copy(update={"mileage_km": 9_999_999})
+    bad = _enrichment().model_copy(update={"normalized_vehicle": bad_nv})
+    _apply_to_lot(lot, _EnrichmentResult(output=bad, carfax_findings=None), raw_carfax_url=None)
+    assert lot.mileage_km == 180_000
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_rejects_negative_mileage(
+    session: AsyncSession,
+) -> None:
+    _, lot = _seed_auction_and_lot(session)
+    lot.mileage_km = 150_000
+    session.add(lot)
+    await session.flush()
+
+    bad_nv = _enrichment().normalized_vehicle.model_copy(update={"mileage_km": -50000})
+    bad = _enrichment().model_copy(update={"normalized_vehicle": bad_nv})
+    _apply_to_lot(lot, _EnrichmentResult(output=bad, carfax_findings=None), raw_carfax_url=None)
+    assert lot.mileage_km == 150_000
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_rejects_implausible_year(
+    session: AsyncSession,
+) -> None:
+    """1899 or 2099 — neither is a plausible vehicle year. Preserve prior."""
+    _, lot = _seed_auction_and_lot(session)
+    lot.year = 2014
+    session.add(lot)
+    await session.flush()
+
+    bad_nv = _enrichment().normalized_vehicle.model_copy(update={"year": 1899})
+    bad = _enrichment().model_copy(update={"normalized_vehicle": bad_nv})
+    _apply_to_lot(lot, _EnrichmentResult(output=bad, carfax_findings=None), raw_carfax_url=None)
+    assert lot.year == 2014
+
+    bad_nv2 = _enrichment().normalized_vehicle.model_copy(update={"year": 2099})
+    bad2 = _enrichment().model_copy(update={"normalized_vehicle": bad_nv2})
+    _apply_to_lot(lot, _EnrichmentResult(output=bad2, carfax_findings=None), raw_carfax_url=None)
+    assert lot.year == 2014
+
+
+@pytest.mark.asyncio
 async def test_apply_to_lot_attaches_carfax_findings(
     session: AsyncSession,
 ) -> None:

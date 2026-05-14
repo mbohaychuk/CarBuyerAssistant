@@ -67,6 +67,14 @@ log = get_logger("enricher")
 # sparse-listing pessimism penalty separately.
 SPARSE_LISTING_CONFIDENCE_THRESHOLD = 0.5
 
+# Phase 13 review: LLM-supplied numerics must be sanity-checked before write.
+# Pydantic accepts any int; a hallucinated -50000 or a mi→km unit-swap (e.g.
+# 250000 stored as km when listing said 155k miles) silently poisons the comp
+# set and flips price-deal alerts. Cheap reject + log.
+_MILEAGE_KM_MIN = 0
+_MILEAGE_KM_MAX = 1_500_000
+_YEAR_MIN = 1900
+
 # Below this many bytes of description, we override the LLM's
 # description_quality to "thin" regardless of what the model said. Matches the
 # prompt's "<100 chars" boundary from the system prompt.
@@ -212,7 +220,14 @@ def _apply_to_lot(
     """
     out = result.output
     nv = out.normalized_vehicle
-    lot.year = nv.year or lot.year
+    year_cap = datetime.now(UTC).year + 1
+    if nv.year is not None and not (_YEAR_MIN <= nv.year <= year_cap):
+        log.warning(
+            "rejecting out-of-range year from LLM",
+            lot_id=lot.id, llm_year=nv.year,
+        )
+    else:
+        lot.year = nv.year or lot.year
     lot.make = nv.make or lot.make
     lot.model = nv.model or lot.model
     lot.trim = nv.trim or lot.trim
@@ -222,7 +237,15 @@ def _apply_to_lot(
         lot.transmission = nv.transmission
     if nv.drivetrain != "unknown":
         lot.drivetrain = nv.drivetrain
-    lot.mileage_km = nv.mileage_km or lot.mileage_km
+    if nv.mileage_km is not None and not (
+        _MILEAGE_KM_MIN <= nv.mileage_km <= _MILEAGE_KM_MAX
+    ):
+        log.warning(
+            "rejecting out-of-range mileage from LLM",
+            lot_id=lot.id, llm_mileage_km=nv.mileage_km,
+        )
+    else:
+        lot.mileage_km = nv.mileage_km or lot.mileage_km
     lot.vin = nv.vin or lot.vin
     if out.title_status != "UNKNOWN":
         lot.title_status = out.title_status
