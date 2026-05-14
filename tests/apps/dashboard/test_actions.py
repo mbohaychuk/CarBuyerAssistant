@@ -162,3 +162,26 @@ async def test_rescore_resets_valuation_status(_patch_deps: AsyncSession) -> Non
         select(AuctionLot.valuation_status).where(AuctionLot.id == lot_id),
     )).scalars().all())
     assert statuses == [ValuationStatus.PENDING.value]
+
+
+@pytest.mark.asyncio
+async def test_rescore_emits_valuation_pending_notify(
+    _patch_deps: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without this, the valuator (LISTEN-only) sees the rescore only at its
+    next restart's catchup sweep."""
+    from carbuyer.apps.dashboard.routers import actions as actions_mod
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_notify(_s: object, channel: str, payload: str) -> None:
+        calls.append((channel, payload))
+
+    monkeypatch.setattr(actions_mod, "notify", fake_notify)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post("/admin/rescore")
+    assert r.status_code == 204  # noqa: PLR2004
+    assert calls == [("valuation_pending", "")]
