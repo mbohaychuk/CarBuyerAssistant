@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.apps.dashboard.deps import CurrentUser, get_session, require_admin
 from carbuyer.db.enums import (
     EnrichmentStatus,
     NotificationStatus,
@@ -55,6 +55,7 @@ async def needs_plugin_view(
 async def retry_routing(
     auction_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[CurrentUser, Depends(require_admin)],
 ) -> Response:
     auction = await session.get(Auction, auction_id)
     if auction is None:

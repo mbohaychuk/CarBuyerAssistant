@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Annotated
 
-from fastapi import Request
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.enums import LotStatus
@@ -37,8 +38,25 @@ def is_htmx(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
 
 
-# Auth seam — returns a stub for MVP. Wired into /health (cheapest seam-test) so
-# the dependency signature is exercised on every commit; replacing the body
-# with real auth is a one-line change.
-def current_user() -> CurrentUser:
+# Auth seam — returns a stub for MVP, but wired into every mutating endpoint
+# (mark / notes / rescore / retry_routing / purchases_create) so the dependency
+# signature is exercised on every request that changes state. Replacing the
+# body with real auth (e.g. session cookie + DB lookup) is a one-file change.
+#
+# `request: Request` is accepted now (unused) so the future real implementation
+# can read headers/cookies without changing every caller's signature.
+def current_user(request: Request) -> CurrentUser:  # noqa: ARG001
     return CurrentUser(id="me", role="dev")
+
+
+# Admin-only seam. Today every authenticated user passes; future real auth can
+# check role/scope. Keeps the /admin/* endpoints dependency-gated separately
+# from regular mutating endpoints so adding a real role check is one place.
+def require_admin(
+    user: Annotated[CurrentUser, Depends(current_user)],
+) -> CurrentUser:
+    # Future: if user.role != "admin": raise HTTPException(403, ...). The stub
+    # currently returns role="dev" which passes the seam check.
+    if user.role not in {"admin", "dev"}:
+        raise HTTPException(status_code=403, detail="admin required")
+    return user
