@@ -45,7 +45,11 @@ from carbuyer.apps._runner import run_worker
 from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.db.notify import listen, notify
-from carbuyer.db.queue import claim_pending_ids, select_pending_ids
+from carbuyer.db.queue import (
+    claim_pending_ids,
+    recover_orphans,
+    select_pending_ids,
+)
 from carbuyer.db.session import get_session, get_session_maker
 from carbuyer.llm.base import DescribeInput
 from carbuyer.llm.carfax import (
@@ -421,8 +425,20 @@ async def _catchup_sweep(provider: OpenAIProvider) -> None:
 
     Phase 2 design overlay #12 + Phase 3 overlay #3: every continuous worker
     must do this before entering ``LISTEN`` to recover NOTIFYs missed during
-    downtime.
+    downtime. Phase 13: prepend orphan recovery — flip IN_PROGRESS rows from
+    a prior crash back to PENDING so claim_pending_ids picks them up.
+    Without this, a SIGKILL between claim and write-completion strands the
+    row forever (Phase 2.5 watchdog is referenced in queue.py:64 but isn't
+    actually implemented yet).
     """
+    async with get_session() as s, s.begin():
+        recovered = await recover_orphans(s, status_field="enrichment_status")
+    if recovered > 0:
+        log.warning(
+            "recovered orphaned IN_PROGRESS lots at startup",
+            count=recovered,
+            note="prior worker crash; rows reset to pending",
+        )
     async with get_session() as s:
         ids = await select_pending_ids(
             s, status_field="enrichment_status", limit=10_000,
