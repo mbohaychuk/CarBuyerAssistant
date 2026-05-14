@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import aiohttp
 
@@ -24,6 +25,7 @@ from carbuyer.apps.bot.messages import (
     render_lot_extended_text,
     render_needs_plugin_text,
 )
+from carbuyer.apps.notifier.channel_resolver import resolve_channels
 from carbuyer.apps.notifier.discord_post import post_message, post_simple_message
 from carbuyer.apps.notifier.triggers import LotState, TriggerResult, evaluate_triggers
 from carbuyer.db.enums import NotificationStatus
@@ -253,6 +255,9 @@ async def _process_one(  # noqa: PLR0912
             )
             last_error = f"no_channel:{channel_key}"
             continue
+        # Post-resolution invariant: every value in discord_channels is an
+        # int. Names are either resolved at notifier startup or dropped.
+        assert isinstance(channel_id, int), f"unresolved channel {channel_key!r}"
         any_post_attempted = True
         content = _render(trigger, data)
         posted = await post_message(channel_id, content, lot_id, session=http_session)
@@ -413,6 +418,8 @@ async def _process_needs_plugin(
         if channel_id is None:
             log.warning("no needs_plugin channel configured", channel_key=channel_key)
             return
+        # Post-resolution invariant — see _process_one for the rationale.
+        assert isinstance(channel_id, int), f"unresolved channel {channel_key!r}"
         # Capture all fields before the HTTP call so we don't hold the session
         # open during network I/O.
         content = render_needs_plugin_text(
@@ -465,6 +472,18 @@ async def main() -> None:
         sys.exit("DISCORD_BOT_TOKEN not configured")
     lock_conn = await acquire_singleton_lock("notifier")
     try:
+        # Resolve any string channel names → IDs once at startup so the
+        # rest of the pipeline only deals with stable integer IDs. cast()
+        # widens dict[str,int] to the field's declared dict[str,int|str];
+        # dict values are invariant so the assignment can't be inferred.
+        settings.discord_channels = cast(
+            "dict[str, int | str]",
+            await resolve_channels(
+                settings.discord_channels,
+                guild_id=settings.discord_guild_id,
+                bot_token=settings.discord_bot_token,
+            ),
+        )
         async with aiohttp.ClientSession() as http_session:
             await _catchup_sweep(http_session=http_session)
             log.info("notifier starting", listeners=["lot_loop", "needs_plugin_loop"])
