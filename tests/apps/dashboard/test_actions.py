@@ -5,12 +5,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
+from carbuyer.apps.dashboard.deps import CurrentUser, current_user, require_admin
 from carbuyer.db.enums import UserAction, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot
 
@@ -162,6 +164,73 @@ async def test_rescore_resets_valuation_status(_patch_deps: AsyncSession) -> Non
         select(AuctionLot.valuation_status).where(AuctionLot.id == lot_id),
     )).scalars().all())
     assert statuses == [ValuationStatus.PENDING.value]
+
+
+# ─── auth seam ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mark_requires_authenticated_user(_patch_deps: AsyncSession) -> None:
+    """Phase 13: every mutating endpoint must call current_user. Override the
+    dependency to raise 401 and confirm the endpoint propagates it."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    def _denied(_request: Request) -> CurrentUser:
+        raise HTTPException(status_code=401, detail="auth required")
+
+    app.dependency_overrides[current_user] = _denied
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/lots/{lot_id}/mark", data={"action": "interested"},
+            )
+        assert r.status_code == 401  # noqa: PLR2004
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_notes_requires_authenticated_user(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    def _denied(_request: Request) -> CurrentUser:
+        raise HTTPException(status_code=401, detail="auth required")
+
+    app.dependency_overrides[current_user] = _denied
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/lots/{lot_id}/notes", data={"note": "x"},
+            )
+        assert r.status_code == 401  # noqa: PLR2004
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_rescore_requires_admin(_patch_deps: AsyncSession) -> None:
+    """admin-only endpoint must reject a non-admin via require_admin's check."""
+    def _denied(
+        _user: CurrentUser = CurrentUser(id="x", role="dev"),  # noqa: B008
+    ) -> CurrentUser:
+        raise HTTPException(status_code=403, detail="admin required")
+
+    app.dependency_overrides[require_admin] = _denied
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post("/admin/rescore")
+        assert r.status_code == 403  # noqa: PLR2004
+    finally:
+        app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio

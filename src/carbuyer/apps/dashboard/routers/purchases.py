@@ -10,7 +10,7 @@ from sqlalchemy import extract, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.apps.dashboard.deps import CurrentUser, current_user, get_session
 from carbuyer.db.models import Purchase
 
 router = APIRouter()
@@ -39,6 +39,7 @@ async def purchases_list(
 @router.post("/purchases")
 async def purchases_create(
     session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[CurrentUser, Depends(current_user)],
     purchase_date: Annotated[date, Form()],
     make: Annotated[str, Form()],
     model: Annotated[str, Form()],
