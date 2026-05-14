@@ -286,6 +286,10 @@ async def test_process_one_unconfigured_channel_marks_skipped(
     assert lot.notification_status == NotificationStatus.SKIPPED
     assert lot.last_notification_error is not None
     assert not posted_calls
+    # Phase 13 review fix #2: no-channel SKIPPED isn't a delivery failure, so
+    # the retry counter must not be polluted. Otherwise if ops fixes the
+    # channel config and re-queues the lot, it starts closer to FAILED.
+    assert lot.notification_attempts == 0
 
 
 @pytest.mark.asyncio
