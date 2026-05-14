@@ -207,7 +207,12 @@ class OpenAIProvider(LLMProvider):
                         f"Description red flags: {red_flags_str}. "
                         f"Description green flags: {green_flags_str}."
                     )},
-                    {"type": "image_url", "image_url": {"url": data_url}},
+                    # detail="low" — ~85 input tokens per image vs ~1100 at
+                    # "high" (which is what "auto" routes 1024×1024 to). For
+                    # rust/dent/panel-gap detection on a downscaled 1024px
+                    # JPEG, low detail is more than sufficient; saves ~$3.70
+                    # of every $4 of monthly vision-input spend.
+                    {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
                 ]},
             ]
             try:
