@@ -15,6 +15,29 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from carbuyer.flags.taxonomy import GREEN_FLAG_TAXONOMY, RED_FLAG_TAXONOMY
+from carbuyer.shared.logging import get_logger
+
+_log = get_logger("scoring.score")
+
+# Authoritative flag→weight map built from the taxonomy at module load. The
+# enricher's prompt instructs the LLM to copy weights verbatim, but a
+# hallucinated -5 on a -1 flag (or any drift between schema and prompt) would
+# silently pull lots past the excessive_red_flag_weight cutoff. Look up at
+# score time and ignore whatever weight the LLM put in the JSON blob.
+#
+# `description_oversells_condition` is a vision-pass synthetic flag that
+# intentionally lives outside the description taxonomy (Phase 8 overlay #18);
+# its -2 weight is pinned here so flag_score still scores it.
+_SYNTHETIC_FLAG_WEIGHTS: dict[str, int] = {
+    "description_oversells_condition": -2,
+}
+FLAG_WEIGHT_LOOKUP: dict[str, int] = {
+    **{f["flag"]: f["weight"] for f in RED_FLAG_TAXONOMY},
+    **{f["flag"]: f["weight"] for f in GREEN_FLAG_TAXONOMY},
+    **_SYNTHETIC_FLAG_WEIGHTS,
+}
+
 # Phase 4 overlay #11 constants. When more than this many magnitude-1 RED
 # flags fire, their cumulative contribution is capped at LIGHT_RED_DILUTION_CAP
 # so a typical "out_of_province + winter_tires_only + mileage_unknown +
@@ -132,7 +155,21 @@ def recommended_max_bid(
 
 
 def _weight(f: dict[str, Any]) -> int:
-    return int(f.get("weight", 0))
+    """Authoritative weight from the taxonomy, not from the LLM blob.
+
+    Unknown flag names fall back to 0 with a log line so a typo or drift
+    surfaces without taking the score down. The LLM's `f["weight"]` field is
+    ignored — see FLAG_WEIGHT_LOOKUP module docstring.
+    """
+    flag_name = f.get("flag", "")
+    if flag_name in FLAG_WEIGHT_LOOKUP:
+        return FLAG_WEIGHT_LOOKUP[flag_name]
+    _log.warning(
+        "unknown flag at scoring time; weight=0",
+        flag=flag_name,
+        llm_weight=f.get("weight"),
+    )
+    return 0
 
 
 def _sum_weights(flags: Iterable[dict[str, Any]]) -> int:
