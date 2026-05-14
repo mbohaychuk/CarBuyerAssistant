@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     enrichment_version: str = "v1"
     discord_bot_token: str = Field(default="")
     discord_guild_id: int | None = None
-    discord_channels: dict[str, int] = Field(default_factory=dict)
+    # Values can be int channel IDs OR string channel names. Names are
+    # resolved via channel_resolver.resolve_channels() at notifier startup.
+    discord_channels: dict[str, int | str] = Field(default_factory=dict)
     home_province: Province = "AB"
 
     notify_threshold: float = 0.15
@@ -97,16 +99,25 @@ class Settings(BaseSettings):
 
     @field_validator("discord_channels", mode="before")
     @classmethod
-    def _parse_discord_channels(cls, value: Any) -> dict[str, int]:
+    def _parse_discord_channels(cls, value: Any) -> dict[str, int | str]:
         if value is None or value == "":
             return {}
         if isinstance(value, str):
             value = json.loads(value)
         if not isinstance(value, dict):
-            raise ValueError("DISCORD_CHANNELS must be a JSON object of name→channel_id")
-        result: dict[str, int] = {}
+            raise ValueError(
+                "DISCORD_CHANNELS must be a JSON object of key→(channel_id or name)",
+            )
+        result: dict[str, int | str] = {}
         for k, v in value.items():  # type: ignore[reportUnknownVariableType]
-            result[str(k)] = int(v)  # type: ignore[reportUnknownArgumentType]
+            key = str(k)  # type: ignore[reportUnknownArgumentType]
+            if isinstance(v, int):
+                result[key] = v
+            elif isinstance(v, str) and v.lstrip("#").isdigit():
+                # Numeric-string IDs ("12345") are normalized to int up front.
+                result[key] = int(v.lstrip("#"))
+            else:
+                result[key] = str(v)  # type: ignore[reportUnknownArgumentType]
         return result
 
 
