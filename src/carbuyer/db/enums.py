@@ -39,6 +39,10 @@ class NotificationStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     DONE = "done"
     SKIPPED = "skipped"
+    # Phase 13: all posts failed and attempts exceeded
+    # settings.notification_max_attempts. Mirrors EnrichmentStatus.FAILED so
+    # ops can grep for stuck notifications via a single status value.
+    FAILED = "failed"
 
 
 class LotStatus(StrEnum):

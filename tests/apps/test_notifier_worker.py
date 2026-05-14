@@ -164,15 +164,13 @@ async def test_process_one_fires_going_cheap(
 
 
 @pytest.mark.asyncio
-async def test_process_one_post_failure_still_marks_done(
+async def test_process_one_post_failure_keeps_pending_and_increments_attempts(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When post_message returns False, status goes to DONE but no timestamp set.
-
-    We don't retry notification posts — the lot has been evaluated and the
-    status moves to DONE so it won't be reclaimed. A missed post is logged
-    but not a retryable failure.
+    """Phase 13 C2: when every post_message returns False (Discord blip),
+    status returns to PENDING with notification_attempts incremented. Locks
+    in the fix for 'lot looked DONE in the DB but no Discord message landed'.
     """
     session = _patched_get_session
     _, lot = _seed_lot(
@@ -198,24 +196,64 @@ async def test_process_one_post_failure_still_marks_done(
 
     http = MagicMock()
     outcome = await _process_one(lot.id, http_session=http)
-    assert outcome == "done"
+    assert outcome == "transient"
 
     await session.refresh(lot)
-    assert lot.notification_status == NotificationStatus.DONE
-    # No timestamp set because the post failed.
-    assert lot.cheap_notified_at is None
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 1
+    assert lot.last_notification_error is not None
+    assert lot.cheap_notified_at is None  # no stamp on failure
 
 
 @pytest.mark.asyncio
-async def test_process_one_unconfigured_channel_skips_post(
+async def test_process_one_post_failure_flips_failed_at_max_attempts(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When settings.discord_channels is empty, triggers fire but no post is made.
+    """After settings.notification_max_attempts unsuccessful attempts, the
+    lot stops re-queueing and lands FAILED for ops to investigate."""
+    from carbuyer.shared.config import settings as cfg
 
-    Status goes to DONE (triggers were evaluated), no timestamp stamped,
-    no post_message called.
-    """
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.30,
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        notification_status="in_progress",
+    )
+    # Simulate cfg.notification_max_attempts - 1 prior failed attempts.
+    lot.notification_attempts = cfg.notification_max_attempts - 1
+    await session.flush()
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "failed"
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.FAILED
+    assert lot.notification_attempts == cfg.notification_max_attempts
+
+
+@pytest.mark.asyncio
+async def test_process_one_unconfigured_channel_marks_skipped(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every trigger lands on a missing channel — ops config gap, retrying
+    won't help. SKIPPED with last_notification_error recorded."""
     session = _patched_get_session
     _, lot = _seed_lot(
         session,
@@ -242,12 +280,57 @@ async def test_process_one_unconfigured_channel_skips_post(
 
     http = MagicMock()
     outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "skipped"
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.SKIPPED
+    assert lot.last_notification_error is not None
+    assert not posted_calls
+
+
+@pytest.mark.asyncio
+async def test_process_one_partial_success_marks_done(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two triggers, first succeeds, second fails. Outcome is DONE — at least
+    one message landed, so the lot is notified. Phase 13 contract: 'done'
+    means user got SOMETHING about this lot, not 'every trigger succeeded'."""
+    session = _patched_get_session
+    far_end = datetime(2026, 6, 10, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        rarity_score=3.0,  # early_warning fires
+        price_deal_score=0.30,  # going_cheap also fires
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        early_warning_notified_at=None,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    call_count = {"n": 0}
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        call_count["n"] += 1
+        return call_count["n"] == 1  # first succeeds, rest fail
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"early_warning": 1, "hot_deals": 2, "watchlist": 3},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
     assert outcome == "done"
 
     await session.refresh(lot)
     assert lot.notification_status == NotificationStatus.DONE
-    assert lot.cheap_notified_at is None
-    assert not posted_calls
 
 
 @pytest.mark.asyncio
