@@ -189,14 +189,15 @@ class HibidSource(AuctionSource):
     async def poll_bid(self, ref: LotRef) -> BidObservation:
         resp = await self._http.get(ref.url)
         # HiBid serves 404 for closed/removed lot URLs (catalog drops them after
-        # the auction ends). Treat 404 as "missing" — the scheduler then flips
-        # the lot to CLOSED on the next cycle. Without this branch,
+        # the auction ends). 410 Gone is RFC-defined as permanently removed and
+        # carries the same meaning. Treat both as "missing" — the scheduler then
+        # flips the lot to CLOSED on the next cycle. Without this branch,
         # raise_for_status() raises, the bid-poller catches and logs, and the
         # lot stays OPEN forever — every cycle the lot lands in the fast bucket
         # (negative time-to-close → <=10min branch in scheduler), polled every
         # 30s indefinitely.
-        http_not_found = 404
-        if resp.status_code == http_not_found:
+        lot_gone_status_codes = (404, 410)
+        if resp.status_code in lot_gone_status_codes:
             return BidObservation(
                 ref=ref,
                 observed_at=datetime.now(UTC),

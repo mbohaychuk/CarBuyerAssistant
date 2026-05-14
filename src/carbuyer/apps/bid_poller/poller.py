@@ -40,6 +40,7 @@ import asyncio
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
+import httpx
 from sqlalchemy import select
 
 from carbuyer.apps.bid_poller.scheduler import next_poll_delay
@@ -244,6 +245,19 @@ async def _poll_one(
 
     try:
         obs = await poller.poll_bid(ref)
+    except httpx.HTTPStatusError as exc:
+        # Review fix #4: surface the upstream status code + Retry-After header
+        # so ops can spot WAF rejections / 5xx outages in the journal. Without
+        # this, every upstream error logs as a generic "poll_bid failed" and
+        # an operator has no way to know the lots are being WAF-blocked.
+        log.warning(
+            "poll_bid http error",
+            lot_id=lot_id,
+            status_code=exc.response.status_code,
+            retry_after=exc.response.headers.get("Retry-After"),
+            url=ref.url,
+        )
+        return
     except Exception:
         log.exception("poll_bid failed", lot_id=lot_id)
         return

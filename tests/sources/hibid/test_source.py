@@ -118,6 +118,30 @@ async def test_poll_bid_404_returns_missing_not_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_poll_bid_410_returns_missing_not_raises() -> None:
+    """RFC 7231 §6.5.9: 410 Gone is permanent and means the resource is
+    intentionally removed. HiBid uses 404 today, but if it ever returns 410
+    for closed lots we must treat it the same as 404 — otherwise the
+    bid-poller catches raise_for_status, logs, and re-polls the lot every
+    30s until the existing 24h _MAX_OPEN_PAST_END_SECONDS guard kicks in.
+    Review fix #4.
+    """
+    http_gone = 410
+    async with HibidSource(
+        provinces=["AB"], _transport=_mock_transport(body="", status=http_gone),
+    ) as src:
+        ref = LotRef(
+            source="hibid",
+            source_auction_id="740236",
+            source_lot_id="999999",
+            url="https://hibid.com/lot/999999",
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.status_at_observation == "missing"
+    assert obs.current_high_bid_cad is None
+
+
+@pytest.mark.asyncio
 async def test_using_source_outside_context_manager_raises() -> None:
     src = HibidSource(provinces=["AB"])
     with pytest.raises(RuntimeError, match="outside"):
