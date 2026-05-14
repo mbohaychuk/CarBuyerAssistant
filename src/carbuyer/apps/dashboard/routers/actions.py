@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.dashboard.deps import get_session
 from carbuyer.db.enums import UserAction, ValuationStatus
 from carbuyer.db.models import AuctionLot
+from carbuyer.db.notify import notify
 from carbuyer.shared.logging import get_logger
 
 router = APIRouter()
@@ -55,6 +56,9 @@ async def rescore_all(
     await session.execute(
         update(AuctionLot).values(valuation_status=ValuationStatus.PENDING.value),
     )
+    # Bulk wake-up: valuator's catchup sweep won't run until next restart,
+    # and a single NOTIFY drains every pending row (payload ignored).
+    await notify(session, "valuation_pending", "")
     await session.commit()
     log.info("rescore triggered")
     return Response(status_code=204)
