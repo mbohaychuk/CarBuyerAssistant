@@ -300,13 +300,15 @@ async def _process_one(  # noqa: PLR0912
                 "lot vanished before transient/failed write", lot_id=lot_id,
             )
             return "transient"
-        row.notification_attempts = (row.notification_attempts or 0) + 1
         row.last_notification_error = last_error
         if not any_post_attempted:
             # Every trigger had no channel configured — ops misconfiguration,
-            # re-trying won't help. Mark SKIPPED with the error recorded.
+            # re-trying won't help. Mark SKIPPED with the error recorded but
+            # leave notification_attempts untouched (config errors aren't
+            # delivery failures and must not consume the retry budget).
             row.notification_status = NotificationStatus.SKIPPED
             return "skipped"
+        row.notification_attempts = (row.notification_attempts or 0) + 1
         if row.notification_attempts >= settings.notification_max_attempts:
             row.notification_status = NotificationStatus.FAILED
             log.error(
