@@ -698,6 +698,106 @@ async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
     assert posted  # post DID fire
 
 
+# ─── Phase 13 review: missing-import + uncovered-path regression ────────────
+
+
+def test_notifier_module_imports_runtime_names() -> None:
+    """Both `notify` and `recover_orphans` are referenced inside async
+    functions that earlier tests never reached. Python's lazy name resolution
+    let them slip through. This module-level attr check is the cheapest gate
+    against a recurrence — fails at test-discovery if either import is
+    deleted in a future refactor.
+    """
+    from carbuyer.apps.notifier import notifier as nm  # noqa: PLC0415
+
+    assert callable(nm.notify), "notifier.py must import `notify`"
+    assert callable(nm.recover_orphans), "notifier.py must import `recover_orphans`"
+
+
+@pytest.mark.asyncio
+async def test_process_pending_self_notifies_on_transient_failure(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When at least one lot ends `transient`, process_pending must reach the
+    self-NOTIFY branch without raising. Historically a NameError lurked there
+    because tests only seeded successful posts. The mere absence of an
+    exception here is the regression signal — see the smoke test above for
+    why we can't monkey-track `notify` directly without masking the bug.
+    """
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.30,  # going_cheap fires
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        notification_status="pending",
+    )
+    await session.flush()
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        return False  # every post fails → transient → self-NOTIFY branch
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    count = await process_pending(http_session=http)
+    assert count == 1
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_catchup_sweep_recovers_orphaned_in_progress(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker crash between SELECT FOR UPDATE SKIP LOCKED and the terminal
+    status write leaves the row stuck IN_PROGRESS. _catchup_sweep must flip
+    these back to PENDING at startup so they're claimable again. Historically
+    `recover_orphans` was called without being imported — this exercises the
+    call site so the NameError can't hide.
+    """
+    from carbuyer.apps.notifier.notifier import (  # noqa: PLC0415
+        _catchup_sweep,
+    )
+
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.05,  # no triggers → SKIPPED post-recovery
+        notification_status="in_progress",  # the orphaned state
+    )
+    await session.flush()
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    await _catchup_sweep(http_session=http)
+
+    await session.refresh(lot)
+    # Recovery + downstream processing both ran; the lot is no longer stuck.
+    assert lot.notification_status != NotificationStatus.IN_PROGRESS
+
+
 @pytest.mark.asyncio
 async def test_process_one_quiet_hours_override_fires_closing_in_1h(
     _patched_get_session: AsyncSession,
