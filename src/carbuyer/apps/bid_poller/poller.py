@@ -71,6 +71,11 @@ _CYCLE_SLEEP_SECONDS = 30
 # stop spending fast-bucket slots on it than to poll forever every 30s. Phase 7
 # overlay #16's "scaling cliff" eats this without the guard.
 _MAX_OPEN_PAST_END_SECONDS = 24 * 3600
+# Clock-skew ceiling: a gap larger than this means either the source pushed
+# bogus end times or our clock has drifted. Force-closing on bad time data could
+# wipe legitimate live auctions, so we refuse to act and let the warning surface
+# in the journal for operator investigation.
+_MAX_FORCE_CLOSE_AGE_SECONDS = 7 * 24 * 3600
 
 
 def _build_pollers() -> dict[str, BidPoller]:
@@ -118,22 +123,39 @@ async def _load_open_lot_refs(
             # scheduled end. The source's poll_bid should have returned
             # "missing" or "closed" by now; if it hasn't (404 raised before
             # the missing branch, source returning bogus data, etc.) we'd
-            # poll forever at 30s. Flip to CLOSED out-of-band so the next
-            # claim_pending_ids snapshot excludes it.
+            # poll forever at 30s. Flip to FORCE_CLOSED out-of-band so the
+            # next claim_pending_ids snapshot excludes it.
+            #
+            # Two thresholds bracket the action:
+            #   gap > _MAX_OPEN_PAST_END_SECONDS (24h)   → force-close
+            #   gap > _MAX_FORCE_CLOSE_AGE_SECONDS (7d)  → skip + warn
+            # The ceiling protects against clock drift wiping a whole batch
+            # of live auctions if NTP misbehaves.
             end = auction.scheduled_end_at
-            if (
-                end is not None
-                and (now - end).total_seconds() > _MAX_OPEN_PAST_END_SECONDS
-            ):
-                log.warning(
-                    "lot stale past end; force-closing",
-                    lot_id=lot.id,
-                    source=auction.source,
-                    scheduled_end_at=end.isoformat(),
-                    age_hours=(now - end).total_seconds() / 3600,
-                )
-                lot.lot_status = LotStatus.CLOSED
-                continue
+            if end is not None:
+                age = (now - end).total_seconds()
+                if age > _MAX_FORCE_CLOSE_AGE_SECONDS:
+                    log.error(
+                        "lot age exceeds clock-skew ceiling; refusing"
+                        " to force-close (clock or source data suspect)",
+                        lot_id=lot.id,
+                        source=auction.source,
+                        scheduled_end_at=end.isoformat(),
+                        age_days=age / 86400,
+                    )
+                    continue
+                if age > _MAX_OPEN_PAST_END_SECONDS:
+                    log.warning(
+                        "lot stale past end; force-closing",
+                        lot_id=lot.id,
+                        source=auction.source,
+                        scheduled_end_at=end.isoformat(),
+                        age_hours=age / 3600,
+                    )
+                    lot.lot_status = LotStatus.FORCE_CLOSED
+                    lot.closed_at = now
+                    lot.final_bid_cad = lot.current_high_bid_cad
+                    continue
             delay = next_poll_delay(
                 scheduled_end=auction.scheduled_end_at,
                 now=now,

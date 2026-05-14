@@ -332,7 +332,13 @@ async def test_load_open_lot_refs_force_closes_stale_lot_past_end(
 ) -> None:
     """Phase 13: a lot whose scheduled_end is >24h in the past but lot_status
     is still OPEN is unreachable or the source is buggy. Force-close it so the
-    bid-poller's fast bucket doesn't burn 30s slots on it forever."""
+    bid-poller's fast bucket doesn't burn 30s slots on it forever.
+
+    Review fix #3: the force-close path must (a) distinguish itself from
+    naturally-closed lots via FORCE_CLOSED, (b) stamp closed_at so downstream
+    consumers don't see CLOSED-with-null-closed_at, and (c) preserve the last
+    observed bid as final_bid_cad.
+    """
     from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
         _load_open_lot_refs,
     )
@@ -342,6 +348,7 @@ async def test_load_open_lot_refs_force_closes_stale_lot_past_end(
     long_ago = now - timedelta(hours=48)
     _, lot = _seed_lot(
         session, lot_status="open", scheduled_end_at=long_ago,
+        current_high_bid_cad=Decimal("1250.00"),
     )
     session.add(lot)
     await session.flush()
@@ -352,7 +359,44 @@ async def test_load_open_lot_refs_force_closes_stale_lot_past_end(
     assert lot_id not in [lid for lid, _ in fast]
     assert lot_id not in [lid for lid, _ in slow]
     await session.refresh(lot)
-    assert lot.lot_status == LotStatus.CLOSED
+    assert lot.lot_status == LotStatus.FORCE_CLOSED
+    assert lot.closed_at is not None
+    assert lot.final_bid_cad == Decimal("1250.00")
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_clock_skew_guard_skips_force_close(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Review fix #3 ceiling: if the gap between now and scheduled_end_at
+    exceeds the clock-skew threshold (default 7 days), the data is
+    untrustworthy — either the source pushed bogus end times or our clock has
+    drifted. Refuse to act: don't force-close, but also don't keep polling.
+    Operator sees a clear warning and can investigate.
+    """
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    way_too_long_ago = now - timedelta(days=10)
+    _, lot = _seed_lot(
+        session, lot_status="open", scheduled_end_at=way_too_long_ago,
+    )
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    # Excluded from polling rotation (no point burning slots on bad data).
+    assert lot_id not in [lid for lid, _ in fast]
+    assert lot_id not in [lid for lid, _ in slow]
+    # BUT NOT force-closed — clock can't be trusted, so don't mutate state.
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.OPEN
+    assert lot.closed_at is None
 
 
 @pytest.mark.asyncio
