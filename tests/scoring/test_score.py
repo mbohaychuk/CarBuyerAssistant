@@ -215,8 +215,17 @@ def test_flag_score_heavy_reds_still_count_with_dilution_cap() -> None:
 
 def test_flag_score_dilution_cap_with_offsetting_greens() -> None:
     # 5 light reds (cap -2) + 3 light greens (+3) → +1.
-    red = [{"flag": f"light_{i}", "weight": -1} for i in range(5)]
-    green = [{"flag": f"good_{i}", "weight": 1} for i in range(3)]
+    red = [
+        {"flag": name, "weight": -1}
+        for name in (
+            "out_of_province", "winter_tires_only", "mileage_unknown",
+            "no_service_records", "smoker_owned",
+        )
+    ]
+    green = [
+        {"flag": name, "weight": 1}
+        for name in ("single_owner", "garage_kept", "non_smoker")
+    ]
     assert flag_score(red, green) == 1
 
 
@@ -224,3 +233,28 @@ def test_flag_score_constants_are_consistent() -> None:
     assert LIGHT_RED_DILUTION_THRESHOLD == 3  # noqa: PLR2004
     assert LIGHT_RED_DILUTION_CAP == -2  # noqa: PLR2004
     assert THIN_DESCRIPTION_FLAG_FLOOR == -2  # noqa: PLR2004
+
+
+def test_flag_score_ignores_hallucinated_llm_weight() -> None:
+    """The LLM's weight field is advisory only; the authoritative weight comes
+    from RED_FLAG_TAXONOMY. A hallucinated weight=-5 on a -1 flag must NOT
+    cascade into the score (otherwise one hallucination could pull a lot past
+    the excessive_red_flag_weight cutoff)."""
+    # rust_mentioned is -1 in the taxonomy; the LLM here invented -5.
+    red = [{"flag": "rust_mentioned", "weight": -5}]
+    assert flag_score(red, []) == -1
+
+
+def test_flag_score_unknown_flag_contributes_zero() -> None:
+    """A flag name that doesn't appear in the taxonomy (typo, drift, future
+    addition without taxonomy update) must NOT contribute its LLM weight."""
+    red = [{"flag": "made_up_flag_name", "weight": -3}]
+    assert flag_score(red, []) == 0
+
+
+def test_flag_score_synthetic_vision_flag_carries_minus_two() -> None:
+    """description_oversells_condition is intentionally outside the description
+    taxonomy (Phase 8 overlay #18); its weight is pinned in
+    _SYNTHETIC_FLAG_WEIGHTS so flag_score still recognizes it."""
+    red = [{"flag": "description_oversells_condition", "evidence": "x", "weight": 999}]
+    assert flag_score(red, []) == -2  # noqa: PLR2004
