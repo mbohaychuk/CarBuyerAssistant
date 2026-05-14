@@ -225,8 +225,17 @@ async def _catchup_sweep(*, http_session: aiohttp.ClientSession) -> None:
     """Drain rows that were already PENDING when the worker started.
 
     Every continuous worker runs this before LISTEN to recover NOTIFYs missed
-    during downtime (Phase 2 idiom).
+    during downtime (Phase 2 idiom). Phase 13: orphan recovery prepended so a
+    prior-crash IN_PROGRESS row doesn't sit forever (the SKIP-LOCKED claim
+    only selects PENDING).
     """
+    async with get_session() as s, s.begin():
+        recovered = await recover_orphans(s, status_field="notification_status")
+    if recovered > 0:
+        log.warning(
+            "recovered orphaned IN_PROGRESS lots at startup",
+            count=recovered,
+        )
     async with get_session() as s:
         ids = await select_pending_ids(
             s, status_field="notification_status", limit=10_000,
