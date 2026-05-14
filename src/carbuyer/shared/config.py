@@ -26,13 +26,13 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer")
     openai_api_key: str = Field(default="")
-    openai_model: str = Field(default="gpt-4o-mini")
+    openai_model: str = Field(default="gpt-5-nano")
     # Phase 3 design overlay #9: SDK-managed retries + per-call timeout. Empty
     # API key triggers fail-fast at worker startup, not on first call.
     openai_max_retries: int = 5
     openai_request_timeout_s: float = 60.0
     # Phase 3 design overlay #12: bounded LLM concurrency per worker. tier-1
-    # gpt-4o-mini handles 500 RPM comfortably; 4-way is conservative.
+    # gpt-5-nano caps at 500 RPM / 200K TPM; 4-way is conservative.
     openai_concurrency: int = 4
     enrichment_batch_size: int = 20
     # Phase 3 design overlay #4 + #26: enrichment retry counter. Transient
