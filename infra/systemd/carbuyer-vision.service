@@ -5,15 +5,15 @@ Requires=carbuyer-postgres.service
 
 [Service]
 Type=oneshot
-User=mark
-WorkingDirectory=/home/mark/repos/CarBuyerAssistant
-EnvironmentFile=-/home/mark/repos/CarBuyerAssistant/.env
-ExecStart=/home/mark/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.vision_batcher
+User=markbohaychuk
+WorkingDirectory=/home/markbohaychuk/repos/CarBuyerAssistant
+EnvironmentFile=-/home/markbohaychuk/repos/CarBuyerAssistant/.env
+ExecStart=/home/markbohaychuk/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.vision_batcher
 StandardOutput=journal
 StandardError=journal
 # Phase 13 H11: sandboxing. Workers speak TCP to Postgres/OpenAI/Discord and
 # write tempfiles under PrivateTmp; nothing else is needed. Future step:
-# switch User=mark to a dedicated 'carbuyer' system user (see README).
+# switch to a dedicated 'carbuyer' system user (see README).
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
@@ -29,4 +29,4 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/home/mark/repos/CarBuyerAssistant
+ReadWritePaths=/home/markbohaychuk/repos/CarBuyerAssistant

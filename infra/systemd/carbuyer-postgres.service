@@ -6,7 +6,7 @@ After=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=true
-WorkingDirectory=/home/mark/repos/CarBuyerAssistant/infra
+WorkingDirectory=/home/markbohaychuk/repos/CarBuyerAssistant/infra
 ExecStart=/usr/bin/docker compose up -d --wait postgres
 ExecStop=/usr/bin/docker compose stop postgres
 

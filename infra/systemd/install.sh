@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="/home/mark/repos/CarBuyerAssistant"
+REPO_DIR="/home/markbohaychuk/repos/CarBuyerAssistant"
 UNIT_DIR="/etc/systemd/system"
 
 cd "$(dirname "$0")"
