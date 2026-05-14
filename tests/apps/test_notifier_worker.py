@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -573,3 +573,167 @@ async def test_embed_data_green_flags_fallback_when_desirability_signals_empty(
 
     data = _embed_data(lot, auction)
     assert data.top_green_flags == ("sport-tuned suspension",)
+
+
+# ─── quiet hours (Phase 13 H7) ─────────────────────────────────────────────
+
+
+def test_in_quiet_hours_wraparound_window() -> None:
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+
+    # Window 22..08 (wraparound at midnight)
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=22), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=23), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=2), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=7), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=8), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=12), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=21), 22, 8) is False
+
+
+def test_in_quiet_hours_non_wraparound() -> None:
+    """Window 9..17 (intuitive non-midnight-crossing case): inclusive start,
+    exclusive end."""
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=9), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=16), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=17), 9, 17) is False
+    assert _in_quiet_hours(base.replace(hour=8), 9, 17) is False
+
+
+@pytest.mark.asyncio
+async def test_process_one_defers_during_quiet_hours_for_low_score_going_cheap(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §6e: a going_cheap with price_deal_score below
+    quiet_hours_override_score is suppressed until morning. Outcome =
+    'deferred', status stays PENDING, attempts NOT incremented."""
+    from carbuyer.apps.notifier import notifier as notifier_mod_local
+
+    session = _patched_get_session
+    # Far-out scheduled_end so closing-T-1h doesn't override.
+    far_end = datetime(2099, 1, 1, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.20,  # >= notify_threshold 0.15, < override 0.30
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    # Force "in quiet hours" regardless of current wall-clock.
+    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+
+    posted: list[object] = []
+
+    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "deferred"
+    assert not posted
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 0  # NOT incremented — deferral isn't failure
+
+
+@pytest.mark.asyncio
+async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """price_deal_score >= quiet_hours_override_score (0.30) overrides quiet
+    hours — the post fires immediately."""
+    from carbuyer.apps.notifier import notifier as notifier_mod_local
+
+    session = _patched_get_session
+    far_end = datetime(2099, 1, 1, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.40,  # >= override threshold
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+
+    posted: list[object] = []
+
+    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "done"
+    assert posted  # post DID fire
+
+
+@pytest.mark.asyncio
+async def test_process_one_quiet_hours_override_fires_closing_in_1h(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lot closing within 1h fires regardless of quiet hours (T-1h spec)."""
+    from carbuyer.apps.notifier import notifier as notifier_mod_local
+
+    session = _patched_get_session
+    soon_end = datetime.now(UTC) + timedelta(minutes=30)
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.20,  # below override
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=soon_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+
+    posted: list[object] = []
+
+    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002, "auction_closing": 1234},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "done"
+    assert posted  # T-1h fires through quiet hours

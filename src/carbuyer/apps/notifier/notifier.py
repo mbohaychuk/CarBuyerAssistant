@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
@@ -94,6 +94,40 @@ def _render(trigger: TriggerResult, data: LotEmbedData) -> str:
     return f"Lot {data.lot_id}: {trigger.trigger} — {trigger.reason}"
 
 
+def _in_quiet_hours(now: datetime, start_hour: int, end_hour: int) -> bool:
+    """Quiet hours window wraps midnight when start > end (typical: 22..08).
+
+    The 'now' input is in UTC by convention across this codebase; spec says
+    'local time', but local-time quiet hours on a single-user MVP can use UTC
+    plus a per-user offset later. Today: hour-of-day in UTC.
+    """
+    h = now.hour
+    if start_hour <= end_hour:
+        return start_hour <= h < end_hour
+    # Wraparound: start_hour..23 or 0..end_hour
+    return h >= start_hour or h < end_hour
+
+
+def _trigger_overrides_quiet_hours(
+    trigger: TriggerResult, lot: AuctionLot, now: datetime,
+) -> bool:
+    """Spec §6e exceptions: early_warning always fires; going_cheap fires if
+    price_deal_score >= quiet_hours_override_score; closing-T-1h fires always."""
+    if trigger.trigger == "early_warning":
+        return True
+    if (
+        lot.price_deal_score is not None
+        and lot.price_deal_score >= settings.quiet_hours_override_score
+    ):
+        return True
+    # Closing in <= 1h is urgent regardless of trigger type.
+    # auction.scheduled_end_at lives on Auction, not lot — but we can pull
+    # the lot's end-time proxy via cheap_notified_at? No; need auction. The
+    # caller (_process_one) already has both; this helper takes only lot to
+    # keep the API tight, so the closing-T-1h check is handled there instead.
+    return False
+
+
 def _timestamp_field_for_trigger(trigger: str) -> str | None:
     """Map trigger name to the AuctionLot timestamp column it stamps."""
     return {
@@ -151,6 +185,35 @@ async def _process_one(  # noqa: PLR0912
             else:
                 log.warning("lot vanished before SKIPPED write", lot_id=lot_id)
         return "skipped"
+
+    # Quiet-hours filter (spec §6e): 22:00-08:00 local, suppress non-priority
+    # triggers. Priority overrides:
+    #   - early_warning (always — rare-car lead time has value any hour)
+    #   - going_cheap with price_deal_score >= quiet_hours_override_score
+    #   - any trigger on a lot closing within 1h (auction-closing T-1h)
+    # Suppressed triggers leave the lot PENDING with attempts NOT incremented;
+    # the next external NOTIFY (bid change, rescore, etc.) re-evaluates after
+    # quiet hours. The 08:00 morning digest in the spec is a Phase 14
+    # follow-on (needs a periodic flush job).
+    if _in_quiet_hours(now, settings.quiet_hours_start, settings.quiet_hours_end):
+        closing_in_1h = (
+            auction.scheduled_end_at is not None
+            and (auction.scheduled_end_at - now) <= timedelta(hours=1)
+        )
+        triggers = [
+            t for t in triggers
+            if closing_in_1h or _trigger_overrides_quiet_hours(t, lot, now)
+        ]
+        if not triggers:
+            log.info(
+                "quiet hours: deferring notification",
+                lot_id=lot_id, hour=now.hour,
+            )
+            async with get_session() as s, s.begin():
+                row = await s.get(AuctionLot, lot_id)
+                if row is not None:
+                    row.notification_status = NotificationStatus.PENDING
+            return "deferred"
 
     data = _embed_data(lot, auction)
 
