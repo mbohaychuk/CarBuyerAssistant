@@ -49,6 +49,7 @@ from carbuyer.db.models import Auction, AuctionBidHistory, AuctionLot
 from carbuyer.db.notify import notify
 from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES, BidObservation, BidPoller, LotRef
 from carbuyer.sources.farmauctionguide.source import (
     FarmAuctionGuideSource as _FagSource,  # registers plugin
@@ -277,46 +278,50 @@ async def main() -> None:
         if name not in SOURCES:
             raise RuntimeError(f"plugin {name!r} failed to self-register at import")
 
+    lock_conn = await acquire_singleton_lock("bid_poller")
     pollers = _build_pollers()
-    async with AsyncExitStack() as stack:
-        for p in pollers.values():
-            await stack.enter_async_context(p)
+    try:
+        async with AsyncExitStack() as stack:
+            for p in pollers.values():
+                await stack.enter_async_context(p)
 
-        while True:
-            now = datetime.now(UTC)
-            fast, slow = await _load_open_lot_refs(now)
+            while True:
+                now = datetime.now(UTC)
+                fast, slow = await _load_open_lot_refs(now)
 
-            if len(fast) > _FAST_BUCKET_CAP:
-                log.warning(
-                    "fast bucket capped",
-                    total=len(fast),
-                    cap=_FAST_BUCKET_CAP,
+                if len(fast) > _FAST_BUCKET_CAP:
+                    log.warning(
+                        "fast bucket capped",
+                        total=len(fast),
+                        cap=_FAST_BUCKET_CAP,
+                    )
+                if len(slow) > _SLOW_BUCKET_CAP:
+                    log.warning(
+                        "slow bucket capped",
+                        total=len(slow),
+                        cap=_SLOW_BUCKET_CAP,
+                    )
+
+                # Defensive try/except mirrors enricher/valuator/notifier —
+                # without it any unhandled exception (DB blip, NOTIFY failure,
+                # ...) would propagate out of `while True` and exit the worker.
+                for lot_id, ref in fast[:_FAST_BUCKET_CAP]:
+                    try:
+                        await _poll_one(lot_id, ref, pollers=pollers)
+                    except Exception:
+                        log.exception("poll_one unhandled", lot_id=lot_id)
+
+                for lot_id, ref in slow[:_SLOW_BUCKET_CAP]:
+                    try:
+                        await _poll_one(lot_id, ref, pollers=pollers)
+                    except Exception:
+                        log.exception("poll_one unhandled", lot_id=lot_id)
+
+                log.info(
+                    "cycle complete",
+                    fast=min(len(fast), _FAST_BUCKET_CAP),
+                    slow=min(len(slow), _SLOW_BUCKET_CAP),
                 )
-            if len(slow) > _SLOW_BUCKET_CAP:
-                log.warning(
-                    "slow bucket capped",
-                    total=len(slow),
-                    cap=_SLOW_BUCKET_CAP,
-                )
-
-            # Defensive try/except mirrors enricher/valuator/notifier — without it
-            # any unhandled exception (DB blip, NOTIFY failure, ...) would
-            # propagate out of `while True` and exit the worker process.
-            for lot_id, ref in fast[:_FAST_BUCKET_CAP]:
-                try:
-                    await _poll_one(lot_id, ref, pollers=pollers)
-                except Exception:
-                    log.exception("poll_one unhandled", lot_id=lot_id)
-
-            for lot_id, ref in slow[:_SLOW_BUCKET_CAP]:
-                try:
-                    await _poll_one(lot_id, ref, pollers=pollers)
-                except Exception:
-                    log.exception("poll_one unhandled", lot_id=lot_id)
-
-            log.info(
-                "cycle complete",
-                fast=min(len(fast), _FAST_BUCKET_CAP),
-                slow=min(len(slow), _SLOW_BUCKET_CAP),
-            )
-            await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
+                await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
+    finally:
+        await lock_conn.close()

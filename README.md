@@ -65,6 +65,21 @@ Suggested crontab entry:
 0 3 * * * /home/mark/repos/CarBuyerAssistant/infra/backup.sh >> /home/mark/carbuyer-backups/backup.log 2>&1
 ```
 
+### Single-instance enforcement
+
+Each continuous worker (notifier, enricher, valuator, bid_poller,
+lot_scraper) acquires a Postgres advisory lock via `pg_try_advisory_lock`
+at startup, held by a dedicated psycopg connection for the process
+lifetime. If the lock is already taken — typically because an operator
+ran `python -m carbuyer.apps.notifier` from a shell while the systemd
+unit was also active — the worker logs an error and exits non-zero;
+`Restart=always` will keep cycling until the contention clears. This
+exists because the SELECT FOR UPDATE SKIP LOCKED claim plus
+`recover_orphans` catchup-sweep both assume no concurrent claimer, and
+duplicate workers would produce duplicate Discord posts.
+
+See `src/carbuyer/shared/singleton.py` for the implementation.
+
 ### Hardening
 
 The worker units ship with a baseline sandbox stanza (`NoNewPrivileges`,
