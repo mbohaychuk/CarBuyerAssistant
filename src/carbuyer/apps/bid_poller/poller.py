@@ -66,6 +66,11 @@ _FAST_BUCKET_CUTOFF_SECONDS = 300
 _FAST_BUCKET_CAP = 20
 _SLOW_BUCKET_CAP = 50
 _CYCLE_SLEEP_SECONDS = 30
+# Hard cap on how long a lot can keep its OPEN/CLOSING_SOON/EXTENDED status past
+# its scheduled end. Beyond this the source is unreachable or buggy; better to
+# stop spending fast-bucket slots on it than to poll forever every 30s. Phase 7
+# overlay #16's "scaling cliff" eats this without the guard.
+_MAX_OPEN_PAST_END_SECONDS = 24 * 3600
 
 
 def _build_pollers() -> dict[str, BidPoller]:
@@ -109,6 +114,26 @@ async def _load_open_lot_refs(
         slow: list[tuple[int, LotRef]] = []
 
         for lot, auction in rows:
+            # Drop lots stuck OPEN/CLOSING_SOON/EXTENDED far past their
+            # scheduled end. The source's poll_bid should have returned
+            # "missing" or "closed" by now; if it hasn't (404 raised before
+            # the missing branch, source returning bogus data, etc.) we'd
+            # poll forever at 30s. Flip to CLOSED out-of-band so the next
+            # claim_pending_ids snapshot excludes it.
+            end = auction.scheduled_end_at
+            if (
+                end is not None
+                and (now - end).total_seconds() > _MAX_OPEN_PAST_END_SECONDS
+            ):
+                log.warning(
+                    "lot stale past end; force-closing",
+                    lot_id=lot.id,
+                    source=auction.source,
+                    scheduled_end_at=end.isoformat(),
+                    age_hours=(now - end).total_seconds() / 3600,
+                )
+                lot.lot_status = LotStatus.CLOSED
+                continue
             delay = next_poll_delay(
                 scheduled_end=auction.scheduled_end_at,
                 now=now,

@@ -97,6 +97,27 @@ async def test_poll_bid_missing_lot_returns_missing_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_poll_bid_404_returns_missing_not_raises() -> None:
+    """HiBid drops closed-lot URLs from the catalog and serves 404. Without
+    treating that as 'missing', the bid-poller catches the raise_for_status
+    exception, logs, and leaves the lot OPEN — the scheduler then re-polls it
+    every 30s indefinitely."""
+    http_not_found = 404
+    async with HibidSource(
+        provinces=["AB"], _transport=_mock_transport(body="", status=http_not_found),
+    ) as src:
+        ref = LotRef(
+            source="hibid",
+            source_auction_id="740236",
+            source_lot_id="999999",
+            url="https://hibid.com/lot/999999",
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.status_at_observation == "missing"
+    assert obs.current_high_bid_cad is None
+
+
+@pytest.mark.asyncio
 async def test_using_source_outside_context_manager_raises() -> None:
     src = HibidSource(provinces=["AB"])
     with pytest.raises(RuntimeError, match="outside"):
