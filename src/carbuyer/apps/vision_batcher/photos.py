@@ -7,6 +7,7 @@ context-manager exit.  This keeps disk usage bounded across long nightly runs.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 from pathlib import Path
@@ -64,11 +65,27 @@ async def download_and_resize(
             jpg_path = tmp_dir / f"{digest}.jpg"
 
             try:
-                img = Image.open(io.BytesIO(r.content))
-                img.thumbnail((max_dim, max_dim))
-                img.convert("RGB").save(jpg_path, format="JPEG", quality=85)
+                # Pillow decode/resize/encode is CPU-bound and blocks the
+                # event loop. A 4-8MP source × downscale to 1024px on the long
+                # edge + JPEG re-encode is tens-to-hundreds of ms each, and
+                # MAX_IMAGE_PIXELS=50M means a near-cap image can pin the loop
+                # for seconds. asyncio.to_thread offloads to a worker thread.
+                await asyncio.to_thread(
+                    _decode_resize_save, r.content, jpg_path, max_dim,
+                )
                 out.append(jpg_path)
             except Exception:
                 log.warning("photo resize failed", url=url, lot_id=lot_id)
 
     return out
+
+
+def _decode_resize_save(content: bytes, jpg_path: Path, max_dim: int) -> None:
+    """Pure sync helper — runs in a worker thread via asyncio.to_thread.
+
+    Kept as a module-level function (not a closure) so the thread doesn't
+    capture the caller's locals; cheaper to ship to the executor.
+    """
+    img = Image.open(io.BytesIO(content))
+    img.thumbnail((max_dim, max_dim))
+    img.convert("RGB").save(jpg_path, format="JPEG", quality=85)
