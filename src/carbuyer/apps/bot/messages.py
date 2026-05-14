@@ -86,6 +86,34 @@ def render_going_cheap_text(d: LotEmbedData) -> str:
     ).rstrip()
 
 
+def render_closing_soon_text(d: LotEmbedData) -> str:
+    title = _vehicle_title(d)
+    bid = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no bid yet)"
+    all_in = f"${int(d.all_in_cad):,}" if d.all_in_cad else "?"
+    if d.value_low_cad and d.value_high_cad:
+        rng = f"${int(d.value_low_cad):,}–${int(d.value_high_cad):,}"  # noqa: RUF001
+    else:
+        rng = "(uncomped)"
+    return (
+        f"⏰ Closes in 1h — {title} ({d.location})\n"
+        f"Current bid: {bid}  →  All-in: {all_in}\n"
+        f"Estimated value: {rng}\n"
+        f"{d.url}"
+    )
+
+
+def render_lot_extended_text(d: LotEmbedData) -> str:
+    title = _vehicle_title(d)
+    end = d.scheduled_end_at.strftime("%b %d %H:%M UTC") if d.scheduled_end_at else "?"
+    bid = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no bid)"
+    return (
+        f"🔁 Soft-close extension — {title} ({d.location})\n"
+        f"New end time: {end}\n"
+        f"Current bid: {bid} (bid landed in final minutes — auction extended)\n"
+        f"{d.url}"
+    )
+
+
 def render_needs_plugin_text(
     *,
     auction_id: int,

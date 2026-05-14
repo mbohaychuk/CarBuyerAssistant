@@ -18,8 +18,10 @@ import aiohttp
 from carbuyer.apps.bot.channels import select_channel
 from carbuyer.apps.bot.messages import (
     LotEmbedData,
+    render_closing_soon_text,
     render_early_warning_text,
     render_going_cheap_text,
+    render_lot_extended_text,
     render_needs_plugin_text,
 )
 from carbuyer.apps.notifier.discord_post import post_message, post_simple_message
@@ -52,6 +54,9 @@ def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
         cheap_notified_at=lot.cheap_notified_at,
         # No DB column yet — rescore path inactive until a future phase adds it.
         last_cheap_score=None,
+        lot_status=lot.lot_status,
+        closing_notified_at=lot.closing_notified_at,
+        extended_notified_at=lot.extended_notified_at,
     )
 
 
@@ -90,6 +95,10 @@ def _render(trigger: TriggerResult, data: LotEmbedData) -> str:
         return render_early_warning_text(data)
     if trigger.trigger == "going_cheap":
         return render_going_cheap_text(data)
+    if trigger.trigger == "closing_soon":
+        return render_closing_soon_text(data)
+    if trigger.trigger == "lot_extended":
+        return render_lot_extended_text(data)
     # Unrecognised trigger — fall back to a minimal message.
     return f"Lot {data.lot_id}: {trigger.trigger} — {trigger.reason}"
 
@@ -112,19 +121,23 @@ def _trigger_overrides_quiet_hours(
     trigger: TriggerResult, lot: AuctionLot, now: datetime,
 ) -> bool:
     """Spec §6e exceptions: early_warning always fires; going_cheap fires if
-    price_deal_score >= quiet_hours_override_score; closing-T-1h fires always."""
-    if trigger.trigger == "early_warning":
+    price_deal_score >= quiet_hours_override_score; closing-T-1h fires always.
+
+    closing_soon and lot_extended are inherently urgency-class — they only fire
+    on lots the user already flagged interested/maybe AND only at the imminent
+    boundary (T-1h for closing_soon, soft-close extension event for extended).
+    Waiting for the morning digest defeats the trigger's whole purpose.
+    """
+    if trigger.trigger in {"early_warning", "closing_soon", "lot_extended"}:
         return True
     if (
         lot.price_deal_score is not None
         and lot.price_deal_score >= settings.quiet_hours_override_score
     ):
         return True
-    # Closing in <= 1h is urgent regardless of trigger type.
-    # auction.scheduled_end_at lives on Auction, not lot — but we can pull
-    # the lot's end-time proxy via cheap_notified_at? No; need auction. The
-    # caller (_process_one) already has both; this helper takes only lot to
-    # keep the API tight, so the closing-T-1h check is handled there instead.
+    # Closing-T-1h timing check (applies to any other trigger on a lot
+    # closing within 1h) is handled in _process_one because it needs
+    # auction.scheduled_end_at, which doesn't live on AuctionLot.
     return False
 
 
@@ -133,6 +146,8 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     return {
         "early_warning": "early_warning_notified_at",
         "going_cheap": "cheap_notified_at",
+        "closing_soon": "closing_notified_at",
+        "lot_extended": "extended_notified_at",
     }.get(trigger)
 
 
