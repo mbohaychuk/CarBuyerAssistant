@@ -11,3 +11,22 @@ EnvironmentFile=-/home/mark/repos/CarBuyerAssistant/.env
 ExecStart=/home/mark/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.vision_batcher
 StandardOutput=journal
 StandardError=journal
+# Phase 13 H11: sandboxing. Workers speak TCP to Postgres/OpenAI/Discord and
+# write tempfiles under PrivateTmp; nothing else is needed. Future step:
+# switch User=mark to a dedicated 'carbuyer' system user (see README).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/home/mark/repos/CarBuyerAssistant

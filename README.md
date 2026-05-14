@@ -65,6 +65,29 @@ Suggested crontab entry:
 0 3 * * * /home/mark/repos/CarBuyerAssistant/infra/backup.sh >> /home/mark/carbuyer-backups/backup.log 2>&1
 ```
 
+### Hardening
+
+The worker units ship with a baseline sandbox stanza (`NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`,
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `MemoryDenyWriteExecute`,
+no extra capabilities). The repo path is whitelisted via `ReadWritePaths=`
+so Python's bytecode cache works; everything else under `/home` is read-only.
+
+**Next step (not yet automated):** services currently run as `User=mark`,
+the developer's interactive login account. To reduce blast radius further,
+create a dedicated system user and relocate the repo:
+
+```bash
+sudo useradd --system --shell /usr/sbin/nologin --home-dir /opt/carbuyer carbuyer
+sudo rsync -a /home/mark/repos/CarBuyerAssistant/ /opt/carbuyer/
+sudo chown -R carbuyer:carbuyer /opt/carbuyer
+# Then sed-update User=mark → User=carbuyer and the path references in
+# infra/systemd/*.service and re-run install.sh.
+```
+
+Until then, a process compromise inside any worker can read the operator's
+`~/.ssh`, `~/.gnupg`, and `~/.config` (write is blocked by `ProtectHome`).
+
 ## Tests
 
 ```bash
