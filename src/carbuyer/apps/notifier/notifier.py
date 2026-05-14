@@ -28,8 +28,8 @@ from carbuyer.apps.notifier.discord_post import post_message, post_simple_messag
 from carbuyer.apps.notifier.triggers import LotState, TriggerResult, evaluate_triggers
 from carbuyer.db.enums import NotificationStatus
 from carbuyer.db.models import Auction, AuctionLot
-from carbuyer.db.notify import listen
-from carbuyer.db.queue import claim_pending_lots, select_pending_ids
+from carbuyer.db.notify import listen, notify
+from carbuyer.db.queue import claim_pending_lots, recover_orphans, select_pending_ids
 from carbuyer.db.session import get_session, get_session_maker
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
