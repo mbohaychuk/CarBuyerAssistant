@@ -127,30 +127,42 @@ def _apply_vision(lot: AuctionLot, out: VisionOutput) -> bool:
         )
         >= _PESSIMISM_BUCKET_DIFF_MIN
     ):
-        # Vision sees significantly worse condition than description claimed AND
-        # confidence is high — revise downward rather than trusting the text.
+        # Bucket-diff is absolute; the override is one-sided. Only when vision
+        # sees WORSE than the description (rank lower) do we flip condition,
+        # tag the synthetic red flag, and re-queue the valuator. Vision seeing
+        # the lot as BETTER than the description claimed must not pull the
+        # condition down or fire description_oversells_condition.
         vision_rank = CONDITION_RANK[out.overall_vision_condition]
         desc_rank = CONDITION_RANK[lot.condition_categorical or "decent"]
         if vision_rank < desc_rank:
             lot.condition_categorical = out.overall_vision_condition
-        flags = list(lot.red_flags or [])
-        # Synthetic vision-only flag — not part of the description taxonomy.
-        # Fall back to a generic message when the LLM produced no contradiction
-        # strings, so dashboard surfaces something readable.
-        evidence = (
-            ", ".join(out.contradictions_with_description)
-            or "vision condition mismatch"
-        )
-        flags.append(
-            {
-                "flag": "description_oversells_condition",
-                "evidence": evidence,
-                "weight": -2,
-            }
-        )
-        lot.red_flags = flags
-        lot.valuation_status = ValuationStatus.PENDING
-        override_fired = True
+            # The sparse-listing flag carried over from the description pass
+            # is no longer meaningful once vision has high-confidence disagreed;
+            # downstream scoring conditions on it for thin-listing dampening.
+            lot.condition_inferred_from_sparse_listing = False
+            lot.condition_confidence = out.vision_confidence
+            flags = list(lot.red_flags or [])
+            evidence = (
+                ", ".join(out.contradictions_with_description)
+                or "vision condition mismatch"
+            )
+            # Idempotent: a content rescrape can reset vision_status=PENDING
+            # and trigger another override on the next nightly run. Without
+            # dedup, the synthetic flag would accumulate copies in red_flags.
+            already_flagged = any(
+                f.get("flag") == "description_oversells_condition" for f in flags
+            )
+            if not already_flagged:
+                flags.append(
+                    {
+                        "flag": "description_oversells_condition",
+                        "evidence": evidence,
+                        "weight": -2,
+                    }
+                )
+                lot.red_flags = flags
+            lot.valuation_status = ValuationStatus.PENDING
+            override_fired = True
 
     lot.vision_status = VisionStatus.DONE
     return override_fired
