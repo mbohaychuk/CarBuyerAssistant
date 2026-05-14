@@ -146,6 +146,9 @@ async def test_vision_multimodal_message_structure(tmp_path: Path) -> None:
     assert user_content[0]["type"] == "text"
     assert user_content[1]["type"] == "image_url"
     assert user_content[1]["image_url"]["url"] == expected_data_url
+    # detail=low keeps input tokens ~85/image vs ~1100 at high (default
+    # "auto" routes 1024px JPEGs to high). Lock in the explicit cost-saver.
+    assert user_content[1]["image_url"]["detail"] == "low"
 
 
 # ─── per-image partial failure ────────────────────────────────────────────────
