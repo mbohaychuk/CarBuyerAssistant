@@ -62,7 +62,7 @@ install, start them in order: `postgres -> bot -> dashboard -> workers`.
 Suggested crontab entry:
 
 ```
-0 3 * * * /home/mark/repos/CarBuyerAssistant/infra/backup.sh >> /home/mark/carbuyer-backups/backup.log 2>&1
+0 3 * * * /home/markbohaychuk/repos/CarBuyerAssistant/infra/backup.sh >> /home/markbohaychuk/carbuyer-backups/backup.log 2>&1
 ```
 
 ### Single-instance enforcement
@@ -94,9 +94,9 @@ create a dedicated system user and relocate the repo:
 
 ```bash
 sudo useradd --system --shell /usr/sbin/nologin --home-dir /opt/carbuyer carbuyer
-sudo rsync -a /home/mark/repos/CarBuyerAssistant/ /opt/carbuyer/
+sudo rsync -a /home/markbohaychuk/repos/CarBuyerAssistant/ /opt/carbuyer/
 sudo chown -R carbuyer:carbuyer /opt/carbuyer
-# Then sed-update User=mark → User=carbuyer and the path references in
+# Then sed-update User=markbohaychuk → User=carbuyer and the path references in
 # infra/systemd/*.service and re-run install.sh.
 ```
 
