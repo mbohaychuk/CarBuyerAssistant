@@ -62,6 +62,7 @@ from carbuyer.scoring.score import (
 )
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 
 log = get_logger("valuator")
 
@@ -349,13 +350,17 @@ async def _catchup_sweep() -> None:
 
 
 async def main() -> None:
-    await _catchup_sweep()
-    async for _payload in listen("valuation_pending"):
-        try:
-            await process_pending()
-        except Exception:
-            log.exception("batch failed; sleeping before next NOTIFY")
-            await asyncio.sleep(5)
+    lock_conn = await acquire_singleton_lock("valuator")
+    try:
+        await _catchup_sweep()
+        async for _payload in listen("valuation_pending"):
+            try:
+                await process_pending()
+            except Exception:
+                log.exception("batch failed; sleeping before next NOTIFY")
+                await asyncio.sleep(5)
+    finally:
+        await lock_conn.close()
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.db.notify import listen, notify
 from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import (
     SOURCES,
     AuctionFetcher,
@@ -242,20 +243,24 @@ async def main() -> None:
     for name in _REGISTERED_PLUGINS:
         if name not in SOURCES:
             raise RuntimeError(f"plugin {name!r} failed to self-register at import")
+    lock_conn = await acquire_singleton_lock("lot_scraper")
     fetchers: dict[str, AuctionFetcher] = {
         s.name: s for s in SOURCES.values() if isinstance(s, AuctionFetcher)
     }
-    async with AsyncExitStack() as stack:
-        for f in fetchers.values():
-            await stack.enter_async_context(f)
-        await _catchup_sweep(fetchers)
-        async for payload in listen("auction_pending"):
-            try:
-                auction_id = int(payload)
-            except ValueError:
-                continue
-            log.info("processing", auction_id=auction_id)
-            try:
-                await process_auction(auction_id, fetchers)
-            except Exception:
-                log.exception("process_auction failed", auction_id=auction_id)
+    try:
+        async with AsyncExitStack() as stack:
+            for f in fetchers.values():
+                await stack.enter_async_context(f)
+            await _catchup_sweep(fetchers)
+            async for payload in listen("auction_pending"):
+                try:
+                    auction_id = int(payload)
+                except ValueError:
+                    continue
+                log.info("processing", auction_id=auction_id)
+                try:
+                    await process_auction(auction_id, fetchers)
+                except Exception:
+                    log.exception("process_auction failed", auction_id=auction_id)
+    finally:
+        await lock_conn.close()

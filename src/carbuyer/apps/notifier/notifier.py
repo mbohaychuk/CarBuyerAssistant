@@ -33,6 +33,7 @@ from carbuyer.db.queue import claim_pending_lots, recover_orphans, select_pendin
 from carbuyer.db.session import get_session, get_session_maker
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 
 log = get_logger("notifier")
 
@@ -462,21 +463,25 @@ async def main() -> None:
     if not settings.discord_bot_token:
         log.error("DISCORD_BOT_TOKEN not configured")
         sys.exit("DISCORD_BOT_TOKEN not configured")
-    async with aiohttp.ClientSession() as http_session:
-        await _catchup_sweep(http_session=http_session)
-        log.info("notifier starting", listeners=["lot_loop", "needs_plugin_loop"])
+    lock_conn = await acquire_singleton_lock("notifier")
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            await _catchup_sweep(http_session=http_session)
+            log.info("notifier starting", listeners=["lot_loop", "needs_plugin_loop"])
 
-        async def _lot_loop() -> None:
-            async for _payload in listen("notification_pending"):
-                try:
-                    await process_pending(http_session=http_session)
-                except Exception:
-                    log.exception("batch failed; sleeping before next NOTIFY")
-                    await asyncio.sleep(5)
+            async def _lot_loop() -> None:
+                async for _payload in listen("notification_pending"):
+                    try:
+                        await process_pending(http_session=http_session)
+                    except Exception:
+                        log.exception("batch failed; sleeping before next NOTIFY")
+                        await asyncio.sleep(5)
 
-        async def _needs_plugin_loop() -> None:
-            await _listen_needs_plugin(http_session=http_session)
+            async def _needs_plugin_loop() -> None:
+                await _listen_needs_plugin(http_session=http_session)
 
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(_lot_loop(), name="lot_loop")
-            tg.create_task(_needs_plugin_loop(), name="needs_plugin_loop")
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(_lot_loop(), name="lot_loop")
+                tg.create_task(_needs_plugin_loop(), name="needs_plugin_loop")
+    finally:
+        await lock_conn.close()

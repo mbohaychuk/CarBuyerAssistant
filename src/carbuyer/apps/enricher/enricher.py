@@ -62,6 +62,7 @@ from carbuyer.llm.openai_provider import OpenAIProvider
 from carbuyer.llm.schemas import CarfaxFindings, EnrichmentOutput
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 
 log = get_logger("enricher")
 
@@ -460,14 +461,18 @@ async def main() -> None:
         # Phase 3 design overlay #16: fail at startup, not on first lot.
         log.error("OPENAI_API_KEY not configured")
         sys.exit("OPENAI_API_KEY not configured")
-    async with OpenAIProvider() as provider:
-        await _catchup_sweep(provider)
-        async for _payload in listen("enrichment_pending"):
-            try:
-                await process_pending(provider)
-            except Exception:
-                log.exception("batch failed; sleeping before next NOTIFY")
-                await asyncio.sleep(5)
+    lock_conn = await acquire_singleton_lock("enricher")
+    try:
+        async with OpenAIProvider() as provider:
+            await _catchup_sweep(provider)
+            async for _payload in listen("enrichment_pending"):
+                try:
+                    await process_pending(provider)
+                except Exception:
+                    log.exception("batch failed; sleeping before next NOTIFY")
+                    await asyncio.sleep(5)
+    finally:
+        await lock_conn.close()
 
 
 if __name__ == "__main__":
