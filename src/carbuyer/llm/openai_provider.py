@@ -120,6 +120,12 @@ class OpenAIProvider(LLMProvider):
         and multimodal (vision) callers share token-usage + duration logging.
         """
         t0 = time.monotonic()
+        # reasoning_effort is only meaningful for GPT-5 / o-series models;
+        # leave it off the call when unset so we stay compatible with older
+        # models (gpt-4o-mini, gpt-4o) that reject the parameter.
+        extra: dict[str, str] = {}
+        if settings.openai_reasoning_effort:
+            extra["reasoning_effort"] = settings.openai_reasoning_effort
         try:
             response = await self.client.chat.completions.parse(
                 model=self.model,
@@ -127,6 +133,7 @@ class OpenAIProvider(LLMProvider):
                 response_format=response_format,
                 temperature=0,
                 max_tokens=max_tokens,
+                **extra,  # type: ignore[arg-type]
             )
         except (APIError, RateLimitError):
             log.exception(
