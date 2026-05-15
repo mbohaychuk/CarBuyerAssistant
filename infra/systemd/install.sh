@@ -31,6 +31,22 @@ done
 
 sudo systemctl daemon-reload
 
+# SELinux relabel — required on Fedora/RHEL so systemd's init_t context
+# can read+execute the python binary, source files, and .env under our
+# repo. Files in /home default to `user_home_t` which init_t can't read,
+# manifesting as "ExecStart fails to launch" or SELinux notification
+# pop-ups. Labeling the repo tree as bin_t makes it readable + executable
+# by system services. We `semanage` to make it persistent across
+# `restorecon` runs and reboots, then apply with `restorecon`.
+if command -v semanage &>/dev/null && getenforce 2>/dev/null | grep -qv "Disabled"; then
+  echo "SELinux relabel of ${REPO_DIR} (one-time persistent rule)..."
+  # semanage -a is not idempotent: it errors if the rule already exists.
+  # Delete-then-add is the idempotent pattern.
+  sudo semanage fcontext -d "${REPO_DIR}(/.*)?" 2>/dev/null || true
+  sudo semanage fcontext -a -t bin_t "${REPO_DIR}(/.*)?"
+  sudo restorecon -RF "${REPO_DIR}"
+fi
+
 for svc in carbuyer-postgres carbuyer-bot carbuyer-dashboard \
            carbuyer-enricher carbuyer-valuator carbuyer-notifier \
            carbuyer-bid-poller; do
