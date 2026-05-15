@@ -312,3 +312,93 @@ def test_lot_search_live_fixture_parses_without_errors() -> None:
     assert len(summaries) == EXPECTED_LIVE_LOT_COUNT
     # Each summary has a non-empty itemId-derived source_lot_id.
     assert all(s.source_lot_id for s in summaries)
+
+
+# ── discover_vehicle_lots (cross-auction LotSearch) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_discover_vehicle_lots_yields_auction_lot_pairs_from_live_fixture() -> None:
+    """Walk the captured 100-lot cross-auction response and verify each
+    yielded pair has both a RawAuction (derived from the embedded auction
+    sub-selection) and a RawLot. No second AuctionDetails round-trip
+    required — that's the whole point of the lot-first ingest model."""
+    fixture = json.loads((FIX / "lot_search_cross_auction.json").read_text())
+
+    def page_response(page: int) -> dict[str, Any]:
+        # Single-page response for the test: return the fixture only on
+        # pageNumber=1, then terminate by returning empty results.
+        if page == 1:
+            return fixture
+        return {"data": {"lotSearch": {"pagedResults": {
+            "pageLength": 100, "pageNumber": page,
+            "totalCount": 100, "filteredCount": 100, "results": [],
+        }}}}
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if url == "https://hibid.com/" or "/auctions/" in url:
+            return httpx.Response(200, text="")
+        if url.endswith("/graphql"):
+            body = json.loads(req.content)
+            page = body.get("variables", {}).get("pageNumber", 1)
+            return httpx.Response(200, json=page_response(page))
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with HibidSource(provinces=["AB"], _transport=transport) as src:
+        pairs = [pair async for pair in src.discover_vehicle_lots("AB")]
+    expected_page1_count = 100
+    assert len(pairs) == expected_page1_count
+    for auction, lot in pairs:
+        assert auction.ref.source == "hibid"
+        assert auction.ref.source_auction_id.isdigit()
+        assert lot.ref.source_lot_id.isdigit()
+        # Auction sub-selection populates pickup_province + auctioneer_name.
+        assert auction.pickup_province  # Alberta auctions have this set.
+        assert auction.scheduled_end_at is not None
+
+
+@pytest.mark.asyncio
+async def test_discover_vehicle_lots_skips_records_missing_auction_or_itemid() -> None:
+    """Defensive: a malformed record without the embedded auction or itemId
+    is dropped silently. The lot-first ingest cannot upsert a row without
+    a parent auction row, so we'd rather skip than partial-insert."""
+    response = {"data": {"lotSearch": {"pagedResults": {
+        "pageLength": 100, "pageNumber": 1,
+        "totalCount": 3, "filteredCount": 3,
+        "results": [
+            # Valid — yielded.
+            {
+                "id": 1, "itemId": 100, "lotNumber": "1", "lead": "Valid",
+                "pictures": [], "lotState": {"highBid": 0, "isClosed": False},
+                "auction": {
+                    "id": 999, "eventName": "Auction A",
+                    "bidCloseDateTime": "2026-06-01T18:00:00Z",
+                    "eventCity": "Calgary", "eventState": "AB",
+                    "buyerPremiumRate": 0.10,
+                    "auctioneer": {"id": 1, "name": "Test"},
+                },
+            },
+            # Missing auction — skipped.
+            {"id": 2, "itemId": 200, "lead": "no auction", "pictures": []},
+            # Missing itemId — skipped.
+            {
+                "id": 3, "lotNumber": "3", "lead": "no itemId",
+                "pictures": [], "lotState": {"highBid": 0, "isClosed": False},
+                "auction": {"id": 999, "auctioneer": {"id": 1, "name": "Test"}},
+            },
+        ],
+    }}}}
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if url == "https://hibid.com/" or "/auctions/" in url:
+            return httpx.Response(200, text="")
+        return httpx.Response(200, json=response)
+
+    transport = httpx.MockTransport(handler)
+    async with HibidSource(provinces=["AB"], _transport=transport) as src:
+        pairs = [pair async for pair in src.discover_vehicle_lots("AB")]
+    assert len(pairs) == 1
+    assert pairs[0][1].ref.source_lot_id == "100"

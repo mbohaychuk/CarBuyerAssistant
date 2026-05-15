@@ -113,6 +113,59 @@ _AUCTION_DETAILS_QUERY = """query AuctionDetails($id: Int!, $countAsView: Boolea
   }
 }"""
 
+# Cross-auction lot search — distinct from LotSearchLotOnly because the
+# wider LotSearch accepts `state` filter AND we include the parent
+# `auction { ... }` sub-selection so the ingester can hydrate auctions
+# without a second AuctionDetails round-trip.
+_LOT_SEARCH_FULL_QUERY = """query LotSearch(
+    $auctionId: Int = null, $category: CategoryId = null,
+    $searchText: String = null, $state: String = null,
+    $zip: String = null, $miles: Int = null,
+    $countryName: String = null, $shippingOffered: Boolean = false,
+    $status: AuctionLotStatus = null, $sortOrder: EventItemSortOrder = null,
+    $filter: AuctionLotFilter = null, $isArchive: Boolean = false,
+    $dateStart: DateTime, $dateEnd: DateTime,
+    $countAsView: Boolean = true, $hideGoogle: Boolean = false,
+    $eventItemIds: [Int!] = null,
+    $pageNumber: Int!, $pageLength: Int!
+) {
+  lotSearch(
+    input: {
+      auctionId: $auctionId, category: $category, searchText: $searchText,
+      state: $state, zip: $zip, miles: $miles, countryName: $countryName,
+      shippingOffered: $shippingOffered, status: $status, sortOrder: $sortOrder,
+      filter: $filter, isArchive: $isArchive, dateStart: $dateStart,
+      dateEnd: $dateEnd, countAsView: $countAsView, hideGoogle: $hideGoogle,
+      eventItemIds: $eventItemIds
+    }
+    pageNumber: $pageNumber pageLength: $pageLength sortDirection: DESC
+  ) {
+    pagedResults {
+      pageLength pageNumber totalCount filteredCount
+      results {
+        id itemId lotNumber lead description bidAmount pictureCount shippingOffered
+        featuredPicture { fullSizeLocation thumbnailLocation }
+        pictures { fullSizeLocation thumbnailLocation }
+        lotState {
+          highBid minBid bidCount status timeLeft timeLeftSeconds
+          isClosed isLive priceRealized reserveSatisfied
+        }
+        category { id categoryName fullCategory }
+        auction {
+          id eventName bidCloseDateTime bidOpenDateTime
+          eventAddress eventCity eventState eventZip
+          buyerPremiumRate
+          auctioneer { id name }
+        }
+      }
+    }
+  }
+}"""
+
+# HiBid's "Cars & Vehicles" top-level category id, used for the
+# category-filtered cross-auction lot search.
+_VEHICLE_CATEGORY_ID = 700006
+
 _PAGE_SIZE = 100
 
 
@@ -204,10 +257,29 @@ class HibidSource(AuctionSource):
             "content-type": "application/json",
             "origin": "https://hibid.com",
             "referer": "https://hibid.com/",
+            # Mimic the real PWA bundle's identification headers — reduces
+            # Cloudflare heuristic-block risk and makes HiBid's server logs
+            # correlate to us cleanly if they investigate traffic.
+            "apollographql-client-name": "hibid-web",
+            "apollographql-client-version": "1.19.1.1",
         }
         resp = await self._http.post(_GRAPHQL_URL, headers=headers, content=body)
         resp.raise_for_status()
-        return resp.json()
+        # Cloudflare returns an HTML challenge page (status 200 with HTML body)
+        # when it suspects automated traffic. Detect explicitly so callers can
+        # back off instead of crashing on JSONDecodeError.
+        if resp.text.lstrip().startswith("<"):
+            raise _CFChallenge(f"Cloudflare challenge response on {operation}")
+        data: dict[str, Any] = resp.json()
+        # GraphQL allows partial responses (`data` populated AND `errors`
+        # non-empty). Log them — surfacing this in production logs is what
+        # tells us when HiBid renames a field or returns a per-field error.
+        errors = data.get("errors")
+        if errors:
+            _log.warning(
+                "graphql partial errors", operation=operation, errors=errors,
+            )
+        return data
 
     async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
         seen: set[str] = set()
@@ -233,6 +305,63 @@ class HibidSource(AuctionSource):
                 )
             if i < len(self.provinces) - 1:
                 await jittered_sleep()
+
+    async def discover_vehicle_lots(
+        self,
+        province: str,
+        *,
+        category: int = _VEHICLE_CATEGORY_ID,
+        status: str = "OPEN",
+        sort_order: str = "NEWLY_ADDED",
+    ) -> AsyncIterator[tuple[RawAuction, RawLot]]:
+        """Walk cross-auction lot search filtered by (province, category).
+
+        Yields ``(RawAuction, RawLot)`` tuples — the auction is derived from
+        each lot's embedded ``auction { ... }`` sub-selection so the caller
+        can upsert both rows in one transaction without a separate
+        AuctionDetails round-trip.
+
+        This is the canonical ingest path post-SPA: server-side category
+        filtering means we only see vehicle lots; the catalog page's "this
+        auction has 79 lots but only 3 are vehicles" over-fetch is gone.
+        """
+        page = 1
+        while True:
+            data = await self._graphql(
+                "LotSearch",
+                {
+                    "auctionId": None,
+                    "category": category,
+                    "state": province,
+                    "status": status,
+                    "sortOrder": sort_order,
+                    "filter": "ALL",
+                    "isArchive": False,
+                    "countAsView": False,
+                    "hideGoogle": False,
+                    "shippingOffered": False,
+                    "pageNumber": page,
+                    "pageLength": _PAGE_SIZE,
+                },
+                _LOT_SEARCH_FULL_QUERY,
+            )
+            paged = (
+                ((data.get("data") or {}).get("lotSearch") or {})
+                .get("pagedResults", {})
+            )
+            results_raw = paged.get("results") or []
+            filtered = int(paged.get("filteredCount") or 0)
+            results: list[dict[str, Any]] = [
+                r for r in results_raw if isinstance(r, dict)  # type: ignore[reportUnknownVariableType]
+            ]
+            for rec in results:
+                pair = _lot_record_to_raw_pair(rec)
+                if pair is None:
+                    continue
+                yield pair
+            if len(results) < _PAGE_SIZE or page * _PAGE_SIZE >= filtered:
+                break
+            page += 1
 
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
         data = await self._graphql(
@@ -393,6 +522,11 @@ class _LotMissing(Exception):
     """Internal signal: lot not present in GraphQL response."""
 
 
+class _CFChallenge(Exception):
+    """Cloudflare returned an HTML challenge page instead of JSON. Callers
+    should back off (exponential or worker-level) rather than retry tightly."""
+
+
 def _summary_with_caller_fields(
     s: HibidLotSummary, *, ref: LotRef,
 ) -> HibidLotSummary:
@@ -400,6 +534,101 @@ def _summary_with_caller_fields(
     s.auction_external_id = ref.source_auction_id
     s.url = ref.url
     return s
+
+
+def _lot_record_to_raw_pair(
+    rec: dict[str, Any],
+) -> tuple[RawAuction, RawLot] | None:
+    """Convert one cross-auction LotSearch record into (RawAuction, RawLot).
+
+    Returns None if the record is missing the auction sub-selection or the
+    lot itemId — both are required for upsert.
+    """
+    auction_raw = rec.get("auction") or {}
+    if not isinstance(auction_raw, dict) or not auction_raw.get("id"):
+        return None
+    item_id_raw = rec.get("itemId")
+    if not item_id_raw:
+        return None
+    auction_id_str = str(auction_raw["id"])
+    source_lot_id = str(item_id_raw)
+    auctioneer_raw = auction_raw.get("auctioneer") or {}
+    auctioneer: dict[str, Any] = (
+        auctioneer_raw if isinstance(auctioneer_raw, dict) else {}
+    )
+    auction_ref = AuctionRef(
+        source="hibid",
+        source_auction_id=auction_id_str,
+        url=catalog_url(auction_id_str),
+    )
+    raw_auction = RawAuction(
+        ref=auction_ref,
+        title=auction_raw.get("eventName"),
+        description=None,
+        auctioneer_name=auctioneer.get("name"),
+        auctioneer_external_id=(
+            str(auctioneer["id"]) if auctioneer.get("id") else None
+        ),
+        scheduled_start_at=_parse_iso(auction_raw.get("bidOpenDateTime")),
+        scheduled_end_at=_parse_iso(auction_raw.get("bidCloseDateTime")),
+        pickup_address=auction_raw.get("eventAddress"),
+        pickup_city=auction_raw.get("eventCity"),
+        pickup_province=auction_raw.get("eventState"),
+        pickup_window_text=None,
+        buyer_premium_pct=_to_decimal(auction_raw.get("buyerPremiumRate"))
+        or Decimal("0.10"),
+        online_bidding_fee_pct=None,
+        terms_text=None,
+        auction_subtype="estate",
+    )
+    summary = parse_lot_record(rec)
+    summary.auction_external_id = auction_id_str
+    summary.url = lot_url(str(rec.get("id") or item_id_raw))
+    lot_ref = LotRef(
+        source="hibid",
+        source_auction_id=auction_id_str,
+        source_lot_id=source_lot_id,
+        url=summary.url,
+    )
+    raw_lot = RawLot(
+        ref=lot_ref,
+        lot_number=summary.lot_number,
+        title=summary.title,
+        description=summary.description,
+        photos=summary.photos,
+        year=None,
+        make=None,
+        model=None,
+        current_high_bid_cad=summary.current_high_bid_cad,
+        bid_count_visible=summary.bid_count_visible,
+        scheduled_end_at=raw_auction.scheduled_end_at,
+        lot_status="closed" if lot_is_closed(rec) else "open",
+        extra=summary.extra,
+    )
+    return raw_auction, raw_lot
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    s = value.strip().rstrip("Z")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return Decimal(str(value)) if value else None
+    return None
 
 
 # Register at import time so the lot-scraper / discoverer worker / dashboard
