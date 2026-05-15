@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CarBuyer lot-first ingester every 6 hours
+After=carbuyer-postgres.service
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=carbuyer-ingester.service
+
+[Install]
+WantedBy=timers.target

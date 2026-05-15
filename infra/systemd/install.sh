@@ -21,11 +21,17 @@ sudo systemctl daemon-reload
 
 for svc in carbuyer-postgres carbuyer-bot carbuyer-dashboard \
            carbuyer-enricher carbuyer-valuator carbuyer-notifier \
-           carbuyer-lot-scraper carbuyer-bid-poller; do
+           carbuyer-bid-poller; do
   sudo systemctl enable "${svc}.service"
 done
 
-for t in carbuyer-discoverer carbuyer-vision carbuyer-distiller; do
+# carbuyer-lot-scraper is symlinked but NOT auto-enabled — the lot-first
+# ingester replaces it for HiBid (the only currently-working source).
+# Manually enable lot-scraper only when reviving farmauctionguide/mcdougall
+# sources that still use the old discover→scrape pattern.
+# carbuyer-discoverer is likewise symlinked but not enabled — the new
+# ingester is the canonical discovery+scrape worker.
+for t in carbuyer-ingester carbuyer-vision carbuyer-distiller; do
   sudo systemctl enable "${t}.timer"
 done
 
