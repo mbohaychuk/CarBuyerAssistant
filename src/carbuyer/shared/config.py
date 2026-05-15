@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # API key triggers fail-fast at worker startup, not on first call.
     openai_max_retries: int = 5
     openai_request_timeout_s: float = 60.0
+    # Reasoning-token effort for GPT-5 / o-series models. None = SDK default
+    # (medium), which burns hundreds of invisible reasoning tokens per call
+    # even on trivial schemas. Our workload is extraction/classification —
+    # "low" is sufficient and cuts effective output cost 3-5x. Set to None
+    # only when running a non-reasoning model (gpt-4o-mini, etc.).
+    openai_reasoning_effort: str | None = "low"
     # Phase 3 design overlay #12: bounded LLM concurrency per worker. tier-1
     # gpt-5-nano caps at 500 RPM / 200K TPM; 4-way is conservative.
     openai_concurrency: int = 4
