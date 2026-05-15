@@ -44,19 +44,24 @@ See `docs/plans/2026-05-09-auction-mvp-plan.md` for the implementation plan.
 runs `daemon-reload`, and enables continuous services + timers. After
 install, start them in order: `postgres -> bot -> dashboard -> workers`.
 
-| Unit                          | Role                  | Cadence                   |
-| ----------------------------- | --------------------- | ------------------------- |
-| `carbuyer-postgres.service`   | Postgres (Docker)     | continuous (oneshot wrap) |
-| `carbuyer-bot.service`        | Discord bot           | continuous                |
-| `carbuyer-dashboard.service`  | HTTP dashboard        | continuous                |
-| `carbuyer-enricher.service`   | LLM enrichment worker | continuous                |
-| `carbuyer-valuator.service`   | Valuation worker      | continuous                |
-| `carbuyer-notifier.service`   | Discord notifier      | continuous                |
-| `carbuyer-lot-scraper.service`| Lot scraper           | continuous                |
-| `carbuyer-bid-poller.service` | Bid poller            | continuous                |
-| `carbuyer-discoverer.timer`   | Auction discoverer    | every 6h (10min after boot) |
-| `carbuyer-vision.timer`       | Nightly vision batch  | daily 02:00 UTC           |
-| `carbuyer-distiller.timer`    | Nightly distiller     | daily 03:00 UTC           |
+| Unit                          | Role                                  | Cadence                   |
+| ----------------------------- | ------------------------------------- | ------------------------- |
+| `carbuyer-postgres.service`   | Postgres (Docker)                     | continuous (oneshot wrap) |
+| `carbuyer-bot.service`        | Discord bot                           | continuous                |
+| `carbuyer-dashboard.service`  | HTTP dashboard                        | continuous                |
+| `carbuyer-enricher.service`   | LLM enrichment worker                 | continuous                |
+| `carbuyer-valuator.service`   | Valuation worker                      | continuous                |
+| `carbuyer-notifier.service`   | Discord notifier                      | continuous                |
+| `carbuyer-bid-poller.service` | Bid poller                            | continuous                |
+| `carbuyer-ingester.timer`     | HiBid lot-first ingester              | every 6h (10min after boot) |
+| `carbuyer-vision.timer`       | Nightly vision batch                  | daily 02:00 UTC           |
+| `carbuyer-distiller.timer`    | Nightly distiller                     | daily 03:00 UTC           |
+
+The `lot-scraper.service` and `discoverer.timer` unit files ship in
+`infra/systemd/` but are NOT auto-enabled by `install.sh` — they implement
+the legacy auction-then-scrape pattern that's superseded by `ingester` for
+HiBid (the only currently-working source). Enable them manually if you
+ever revive the farmauctionguide/mcdougall plugins (currently 404'd).
 
 `infra/backup.sh` runs daily via crontab and retains 30 days of `pg_dump`s.
 Suggested crontab entry:
