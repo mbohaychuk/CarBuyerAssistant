@@ -1,0 +1,36 @@
+{
+  "data": {
+    "auction": {
+      "id": 741423,
+      "eventName": "May    16th  2026 - Weekly Saturday Vehicle Auction",
+      "description": "This week is our weekly Car Auction - This live webcast auction will begin Saturday at 12:30 PM.  Each vehicle will be sold in numerical order.\r\n\r\n\r\nOur Public Vehicle Auction consists of:\r\n- Cars, Trucks & SUVs from Auto Wholesalers & Private Consignors.\r\n- Trade-ins from Car Dealerships in Calgary.\r\n- Bank Repo Cars.\r\n\r\nLot Summary:\r\nLots 1-150: No Reserve\r\nLots 200-229: Bank Repo\r\nLots 230-299: Fleet, Lease Return and Special Interest\r\nLots 300+: Dealership, Wholesaler and Public Consignment\r\nLots Containing OS - Vehicle is located off-site\r\n\r\n\r\nIf you need any help getting started or have any questions, please don't hesitate to contact us or see our Auction Customer Care resource.",
+      "bidOpenDateTime": "2026-05-11T11:30:00",
+      "bidCloseDateTime": "2026-05-16T17:00:00",
+      "eventAddress": "4321 84 Street N.E.",
+      "eventCity": "Calgary",
+      "eventState": "AB",
+      "eventZip": "T1Y 7H3",
+      "eventDateBegin": "2026-05-16T00:00:00",
+      "eventDateEnd": "2026-05-16T00:00:00",
+      "buyerPremium": "Sliding scale premium as per terms",
+      "buyerPremiumRate": 1,
+      "showBuyerPremium": true,
+      "lotCount": 79,
+      "auctioneer": {
+        "id": 82199,
+        "name": "Graham Auctions",
+        "phone": "403-777-9393",
+        "email": "info@grahamauctions.com",
+        "city": "Calgary",
+        "state": "AB",
+        "country": "Canada",
+        "internetAddress": "grahamauctions.com/"
+      },
+      "auctionState": {
+        "auctionStatus": "OPEN_ABSENTEE",
+        "openLotCount": 79
+      },
+      "sourceType": "AFLEX"
+    }
+  }
+}
