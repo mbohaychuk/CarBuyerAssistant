@@ -60,6 +60,18 @@ _VISION_AGGREGATE_MAX_TOKENS = 1024
 T = TypeVar("T", bound=BaseModel)
 
 
+# Model families that use `max_completion_tokens` instead of `max_tokens` and
+# accept the `reasoning_effort` parameter. Heuristic on model name prefix; a
+# false positive (model accepts old params) errors loudly with 400, which is
+# easy to diagnose. A false negative (we send max_tokens to a reasoning model)
+# is exactly the bug this exists to prevent.
+_REASONING_MODEL_PREFIXES: tuple[str, ...] = ("gpt-5", "o1", "o3", "o4")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return any(model.startswith(p) for p in _REASONING_MODEL_PREFIXES)
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI implementation of `describe` and `vision` (Phase 3 + Phase 8).
 
@@ -120,19 +132,25 @@ class OpenAIProvider(LLMProvider):
         and multimodal (vision) callers share token-usage + duration logging.
         """
         t0 = time.monotonic()
-        # reasoning_effort is only meaningful for GPT-5 / o-series models;
-        # leave it off the call when unset so we stay compatible with older
-        # models (gpt-4o-mini, gpt-4o) that reject the parameter.
-        extra: dict[str, str] = {}
-        if settings.openai_reasoning_effort:
-            extra["reasoning_effort"] = settings.openai_reasoning_effort
+        # GPT-5 / o-series API differences vs gpt-4o-mini:
+        #   • `max_tokens` → `max_completion_tokens`
+        #   • `temperature` must be 1 (only default supported)
+        #   • accepts `reasoning_effort`
+        # Dispatch on model name prefix so a future switch back to gpt-4o-mini
+        # restores the older parameter shape automatically.
+        extra: dict[str, object] = {}
+        if _is_reasoning_model(self.model):
+            extra["max_completion_tokens"] = max_tokens
+            if settings.openai_reasoning_effort:
+                extra["reasoning_effort"] = settings.openai_reasoning_effort
+        else:
+            extra["max_tokens"] = max_tokens
+            extra["temperature"] = 0
         try:
             response = await self.client.chat.completions.parse(
                 model=self.model,
                 messages=messages,
                 response_format=response_format,
-                temperature=0,
-                max_tokens=max_tokens,
                 **extra,  # type: ignore[arg-type]
             )
         except (APIError, RateLimitError):
