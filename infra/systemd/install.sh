@@ -12,9 +12,21 @@ cd "$(dirname "$0")"
 # nowhere by default.
 chmod +x "${REPO_DIR}/infra/backup.sh"
 
-echo "Linking units to ${UNIT_DIR}..."
+echo "Installing units to ${UNIT_DIR}..."
+# `install -m 0644` (not `ln -sf`) so the destination gets the right
+# SELinux context (`systemd_unit_file_t`). Symlinks into `/home` inherit
+# `user_home_t`, which systemctl refuses to read on Fedora/RHEL, surfacing
+# as "Failed to enable unit: Access denied". This means edits in the repo
+# require a re-run of install.sh to take effect — acceptable since unit
+# files change rarely.
 for f in *.service *.timer; do
-  sudo ln -sf "$(realpath "$f")" "${UNIT_DIR}/${f}"
+  # Remove any stale symlink (left over from old `ln -sf`-style installs)
+  # before copying — `install` won't overwrite a symlink without -T, but
+  # we want a clean regular file at the destination either way.
+  if [[ -L "${UNIT_DIR}/${f}" ]]; then
+    sudo rm -f "${UNIT_DIR}/${f}"
+  fi
+  sudo install -m 0644 -T "$f" "${UNIT_DIR}/${f}"
 done
 
 sudo systemctl daemon-reload
