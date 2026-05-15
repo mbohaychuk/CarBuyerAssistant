@@ -1,16 +1,32 @@
+"""HiBid source plugin (post-SPA migration, May 2026).
+
+HiBid moved the catalog to a SPA backed by a GraphQL endpoint. Layout:
+
+  * Province auction list (https://hibid.com/{province}/auctions/700006/...)
+    is still server-rendered HTML — discovery scrapes <a href> patterns.
+  * Single auction catalog (https://hibid.com/{province}/catalog/{id}/...)
+    is empty of lot data; the page issues one GraphQL POST per piece of
+    state (`AuctionDetails`, `LotSearchLotOnly`, `CategorySearch`).
+  * Bid polling uses the same `LotSearchLotOnly` query with
+    `eventItemIds=[id]` to fetch a single lot's current state.
+
+GraphQL POSTs need a Cloudflare-issued `__cf_bm` cookie. We bootstrap by
+hitting any HiBid page once per client lifetime; subsequent POSTs ride
+the same cookie jar.
+"""
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import httpx
 
-from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.sources.base import (
     AuctionRef,
@@ -23,14 +39,16 @@ from carbuyer.sources.base import (
 )
 from carbuyer.sources.hibid.parser import (
     HibidLotSummary,
-    extract_lot_models,
-    parse_lot_summary,
-    raw_lot_id,
+    discover_auction_ids,
+    lot_is_closed,
+    parse_auction_details_response,
+    parse_lot_record,
 )
 from carbuyer.sources.hibid.urls import catalog_url, lot_url, province_vehicles_url
 from carbuyer.sources.http import jittered_sleep, make_client
 from carbuyer.sources.resolver import canonicalize_url
 from carbuyer.sources.retry import RetryTransport
+from carbuyer.shared.config import settings
 
 _log = get_logger("sources.hibid")
 
@@ -38,11 +56,71 @@ _HIBID_CATALOG_URL = re.compile(
     r"^https?://(?:www\.)?hibid\.com/(?:[a-z\-]+/)?catalog/(\d+)",
 )
 
+_GRAPHQL_URL = "https://hibid.com/graphql"
+# Bootstrap URL hit once per client to set the Cloudflare cookie. Any HiBid
+# page works; we use the lightest one we know.
+_BOOTSTRAP_URL = "https://hibid.com/"
+
+_LOT_SEARCH_QUERY = """query LotSearchLotOnly(
+    $auctionId: Int = null,
+    $pageNumber: Int!,
+    $pageLength: Int!,
+    $status: AuctionLotStatus = null,
+    $sortOrder: EventItemSortOrder = null,
+    $filter: AuctionLotFilter = null,
+    $isArchive: Boolean = false,
+    $countAsView: Boolean = true,
+    $hideGoogle: Boolean = false,
+    $eventItemIds: [Int!] = null
+) {
+  lotSearch(
+    input: {
+      auctionId: $auctionId, status: $status, sortOrder: $sortOrder,
+      filter: $filter, isArchive: $isArchive, countAsView: $countAsView,
+      hideGoogle: $hideGoogle, eventItemIds: $eventItemIds
+    }
+    pageNumber: $pageNumber
+    pageLength: $pageLength
+    sortDirection: DESC
+  ) {
+    pagedResults {
+      pageLength pageNumber totalCount filteredCount
+      results {
+        id itemId lotNumber lead description bidAmount pictureCount shippingOffered
+        featuredPicture { fullSizeLocation thumbnailLocation }
+        pictures { fullSizeLocation thumbnailLocation }
+        lotState {
+          highBid minBid bidCount status timeLeft timeLeftSeconds
+          isClosed isLive priceRealized reserveSatisfied
+        }
+        category { id categoryName fullCategory }
+      }
+    }
+  }
+}"""
+
+_AUCTION_DETAILS_QUERY = """query AuctionDetails($id: Int!, $countAsView: Boolean = true) {
+  auction(id: $id, countAsView: $countAsView) {
+    id eventName description
+    bidOpenDateTime bidCloseDateTime
+    eventAddress eventCity eventState eventZip
+    eventDateBegin eventDateEnd
+    buyerPremium buyerPremiumRate showBuyerPremium
+    lotCount
+    auctioneer { id name phone email city state country internetAddress }
+    auctionState { auctionStatus openLotCount }
+    sourceType
+  }
+}"""
+
+_PAGE_SIZE = 100
+
 
 class HibidSource(AuctionSource):
     name: ClassVar[str] = "hibid"
-    # Bump when parse_lot_summary or discover/fetch contracts change.
-    version: ClassVar[str] = "1"
+    # Bump when GraphQL contracts or parser semantics change. 2.0 = post-SPA
+    # migration; previously parsed `var lotModels = [...]` (now defunct).
+    version: ClassVar[str] = "2.0"
 
     @classmethod
     def parse_auction_url(cls, url: str) -> AuctionRef | None:
@@ -63,11 +141,14 @@ class HibidSource(AuctionSource):
         _transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.provinces = provinces
-        # Tests inject a MockTransport; production wires a RetryTransport
-        # around an httpx.AsyncHTTPTransport in __aenter__.
         self._injected_transport = _transport
         self._client_cm: AbstractAsyncContextManager[httpx.AsyncClient] | None = None
         self._client: httpx.AsyncClient | None = None
+        # Per-auction cache populated by fetch_lots; fetch_lot reads here so
+        # we avoid a second GraphQL round-trip per lot. Cleared at the start
+        # of each fetch_lots call to stay tidy across auctions.
+        self._lot_cache: dict[str, dict[str, Any]] = {}
+        self._cf_cookie_set: bool = False
 
     async def __aenter__(self) -> Self:
         transport = self._injected_transport or RetryTransport(
@@ -87,6 +168,7 @@ class HibidSource(AuctionSource):
             await self._client_cm.__aexit__(exc_type, exc, tb)
         self._client_cm = None
         self._client = None
+        self._cf_cookie_set = False
 
     @property
     def _http(self) -> httpx.AsyncClient:
@@ -96,6 +178,37 @@ class HibidSource(AuctionSource):
             )
         return self._client
 
+    async def _bootstrap_cf(self) -> None:
+        """Hit a HiBid page once so Cloudflare sets `__cf_bm` in our cookie
+        jar. Subsequent GraphQL POSTs ride that cookie; without it CF returns
+        a 403 challenge page.
+        """
+        if self._cf_cookie_set:
+            return
+        try:
+            await self._http.get(_BOOTSTRAP_URL)
+        except Exception as exc:
+            _log.warning("hibid CF bootstrap failed", error=str(exc))
+            return
+        self._cf_cookie_set = True
+
+    async def _graphql(
+        self, operation: str, variables: dict[str, Any], query: str,
+    ) -> dict[str, Any]:
+        await self._bootstrap_cf()
+        body = json.dumps(
+            {"operationName": operation, "variables": variables, "query": query},
+        )
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "origin": "https://hibid.com",
+            "referer": "https://hibid.com/",
+        }
+        resp = await self._http.post(_GRAPHQL_URL, headers=headers, content=body)
+        resp.raise_for_status()
+        return resp.json()
+
     async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
         seen: set[str] = set()
         for i, province in enumerate(self.provinces):
@@ -103,19 +216,14 @@ class HibidSource(AuctionSource):
             try:
                 resp = await self._http.get(url)
                 resp.raise_for_status()
-                models = extract_lot_models(resp.text)
             except Exception as exc:
-                # One failing province must NOT abort the whole sweep —
-                # log and continue so the remaining provinces still surface.
                 _log.warning(
                     "discover_auctions province failed",
                     province=province, url=url, error=str(exc),
                 )
                 continue
-            for raw in models:
-                summary = parse_lot_summary(raw)
-                auction_id = summary.auction_external_id
-                if not auction_id or auction_id in seen:
+            for auction_id in discover_auction_ids(resp.text):
+                if auction_id in seen:
                     continue
                 seen.add(auction_id)
                 yield AuctionRef(
@@ -127,77 +235,104 @@ class HibidSource(AuctionSource):
                 await jittered_sleep()
 
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
-        resp = await self._http.get(ref.url)
-        resp.raise_for_status()
-        # The catalog page contains both auction-level metadata (in the page
-        # header) and lotModels. For MVP, we record minimum metadata; richer
-        # extraction (BP, terms_text) is left to a follow-up.
+        data = await self._graphql(
+            "AuctionDetails",
+            {"id": int(ref.source_auction_id), "countAsView": False},
+            _AUCTION_DETAILS_QUERY,
+        )
+        det = parse_auction_details_response(data)
         return RawAuction(
             ref=ref,
-            title=None,
-            description=None,
-            auctioneer_name=None,
-            auctioneer_external_id=None,
-            scheduled_start_at=None,
-            scheduled_end_at=None,
-            pickup_address=None,
-            pickup_city=None,
-            pickup_province=None,
+            title=det.event_name,
+            description=det.description,
+            auctioneer_name=det.auctioneer_name,
+            auctioneer_external_id=det.auctioneer_external_id,
+            scheduled_start_at=det.bid_open_at,
+            scheduled_end_at=det.bid_close_at,
+            pickup_address=det.event_address,
+            pickup_city=det.event_city,
+            pickup_province=det.event_state,
             pickup_window_text=None,
-            buyer_premium_pct=Decimal("0.10"),  # conservative default
+            buyer_premium_pct=det.buyer_premium_pct or Decimal("0.10"),
             online_bidding_fee_pct=None,
             terms_text=None,
             auction_subtype="estate",
         )
 
     async def fetch_lots(self, ref: AuctionRef) -> AsyncIterator[LotRef]:
-        resp = await self._http.get(ref.url)
-        resp.raise_for_status()
-        for raw in extract_lot_models(resp.text):
-            summary = parse_lot_summary(raw)
-            if not summary.source_lot_id:
-                continue
-            yield LotRef(
-                source="hibid",
-                source_auction_id=ref.source_auction_id,
-                source_lot_id=summary.source_lot_id,
-                url=summary.url or lot_url(summary.source_lot_id),
+        self._lot_cache.clear()
+        auction_id = int(ref.source_auction_id)
+        page = 1
+        while True:
+            data = await self._graphql(
+                "LotSearchLotOnly",
+                {
+                    "auctionId": auction_id,
+                    "pageNumber": page,
+                    "pageLength": _PAGE_SIZE,
+                    "status": "ALL",
+                    "sortOrder": "LOT_NUMBER",
+                    "filter": "ALL",
+                    "isArchive": False,
+                    "countAsView": False,
+                    "hideGoogle": False,
+                },
+                _LOT_SEARCH_QUERY,
             )
+            paged = (
+                ((data.get("data") or {}).get("lotSearch") or {})
+                .get("pagedResults", {})
+            )
+            results_raw = paged.get("results") or []
+            total = int(paged.get("totalCount") or 0)
+            results: list[dict[str, Any]] = [
+                r for r in results_raw if isinstance(r, dict)  # type: ignore[reportUnknownVariableType]
+            ]
+            for rec in results:
+                item_id = rec.get("itemId")
+                if not item_id:
+                    continue
+                source_lot_id = str(item_id)
+                self._lot_cache[source_lot_id] = rec
+                yield LotRef(
+                    source="hibid",
+                    source_auction_id=ref.source_auction_id,
+                    source_lot_id=source_lot_id,
+                    url=lot_url(str(rec.get("id") or item_id)),
+                )
+            if len(results) < _PAGE_SIZE or page * _PAGE_SIZE >= total:
+                break
+            page += 1
 
     async def fetch_lot(self, ref: LotRef) -> RawLot:
-        resp = await self._http.get(ref.url)
-        resp.raise_for_status()
-        target = self._find_summary(resp.text, ref.source_lot_id)
-        if target is None:
-            raise ValueError(f"lot {ref.source_lot_id} not found at {ref.url}")
+        rec = self._lot_cache.get(ref.source_lot_id)
+        if rec is None:
+            # Cache miss — single-lot fetch via GraphQL.
+            rec = await self._fetch_one_lot_record(ref)
+        summary = _summary_with_caller_fields(
+            parse_lot_record(rec),
+            ref=ref,
+        )
         return RawLot(
             ref=ref,
-            lot_number=target.lot_number,
-            title=target.title,
-            description=target.description,
-            photos=target.photos,
-            year=target.year,
-            make=target.make,
-            model=target.model,
-            current_high_bid_cad=target.current_high_bid_cad,
-            bid_count_visible=target.bid_count_visible,
-            scheduled_end_at=target.end_at,
-            lot_status="open",
-            extra=target.extra,
+            lot_number=summary.lot_number,
+            title=summary.title,
+            description=summary.description,
+            photos=summary.photos,
+            year=None,
+            make=None,
+            model=None,
+            current_high_bid_cad=summary.current_high_bid_cad,
+            bid_count_visible=summary.bid_count_visible,
+            scheduled_end_at=None,
+            lot_status="closed" if lot_is_closed(rec) else "open",
+            extra=summary.extra,
         )
 
     async def poll_bid(self, ref: LotRef) -> BidObservation:
-        resp = await self._http.get(ref.url)
-        # HiBid serves 404 for closed/removed lot URLs (catalog drops them after
-        # the auction ends). 410 Gone is RFC-defined as permanently removed and
-        # carries the same meaning. Treat both as "missing" — the scheduler then
-        # flips the lot to CLOSED on the next cycle. Without this branch,
-        # raise_for_status() raises, the bid-poller catches and logs, and the
-        # lot stays OPEN forever — every cycle the lot lands in the fast bucket
-        # (negative time-to-close → <=10min branch in scheduler), polled every
-        # 30s indefinitely.
-        lot_gone_status_codes = (404, 410)
-        if resp.status_code in lot_gone_status_codes:
+        try:
+            rec = await self._fetch_one_lot_record(ref)
+        except _LotMissing:
             return BidObservation(
                 ref=ref,
                 observed_at=datetime.now(UTC),
@@ -205,33 +340,68 @@ class HibidSource(AuctionSource):
                 end_time_at_observation=None,
                 status_at_observation="missing",
             )
-        resp.raise_for_status()
-        target = self._find_summary(resp.text, ref.source_lot_id)
-        if target is None:
-            return BidObservation(
-                ref=ref,
-                observed_at=datetime.now(UTC),
-                current_high_bid_cad=None,
-                end_time_at_observation=None,
-                status_at_observation="missing",
-            )
+        lot_state_raw = rec.get("lotState") or {}
+        lot_state: dict[str, Any] = (
+            lot_state_raw if isinstance(lot_state_raw, dict) else {}
+        )
+        high_bid = lot_state.get("highBid")
+        bid_decimal: Decimal | None = None
+        if isinstance(high_bid, (int, float)) and high_bid:
+            bid_decimal = Decimal(str(high_bid))
         return BidObservation(
             ref=ref,
             observed_at=datetime.now(UTC),
-            current_high_bid_cad=target.current_high_bid_cad,
-            end_time_at_observation=target.end_at,
-            status_at_observation="open",
+            current_high_bid_cad=bid_decimal,
+            end_time_at_observation=None,
+            status_at_observation=(
+                "closed" if lot_state.get("isClosed") else "open"
+            ),
         )
 
-    @staticmethod
-    def _find_summary(html: str, source_lot_id: str) -> HibidLotSummary | None:
-        for raw in extract_lot_models(html):
-            if raw_lot_id(raw) == source_lot_id:
-                return parse_lot_summary(raw)
-        return None
+    async def _fetch_one_lot_record(self, ref: LotRef) -> dict[str, Any]:
+        """GraphQL fetch of a single lot by itemId; raises _LotMissing if gone."""
+        data = await self._graphql(
+            "LotSearchLotOnly",
+            {
+                "auctionId": int(ref.source_auction_id),
+                "pageNumber": 1,
+                "pageLength": 1,
+                "eventItemIds": [int(ref.source_lot_id)],
+                "status": "ALL",
+                "sortOrder": "LOT_NUMBER",
+                "filter": "ALL",
+                "isArchive": False,
+                "countAsView": False,
+                "hideGoogle": False,
+            },
+            _LOT_SEARCH_QUERY,
+        )
+        results_raw = (
+            ((data.get("data") or {}).get("lotSearch") or {})
+            .get("pagedResults", {})
+            .get("results", [])
+        )
+        results: list[dict[str, Any]] = [
+            r for r in results_raw if isinstance(r, dict)  # type: ignore[reportUnknownVariableType]
+        ]
+        if not results:
+            raise _LotMissing(ref.source_lot_id)
+        return results[0]
+
+
+class _LotMissing(Exception):
+    """Internal signal: lot not present in GraphQL response."""
+
+
+def _summary_with_caller_fields(
+    s: HibidLotSummary, *, ref: LotRef,
+) -> HibidLotSummary:
+    """Backfill auction_external_id + url from the caller's LotRef."""
+    s.auction_external_id = ref.source_auction_id
+    s.url = ref.url
+    return s
 
 
 # Register at import time so the lot-scraper / discoverer worker / dashboard
 # health view can enumerate covered platforms via SOURCES (Phase 0 design #11).
-# Provinces come from settings.hibid_provinces (override via HIBID_PROVINCES env).
 register(HibidSource(provinces=list(settings.hibid_provinces)))
