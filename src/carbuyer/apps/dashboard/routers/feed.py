@@ -45,7 +45,14 @@ async def feed(  # noqa: PLR0913
     stmt = (
         select(AuctionLot, Auction, blended)
         .join(Auction, Auction.id == AuctionLot.auction_id)
-        .where(AuctionLot.lot_status.in_(OPEN_STATUSES))
+        .where(
+            AuctionLot.lot_status.in_(OPEN_STATUSES),
+            # Non-vehicle accessories (covers, hitches, tires) come through
+            # HiBid's category 700006 too; after enrichment they have no
+            # year/make/model. Hide from the feed. Watched stays unfiltered
+            # — a user who marked Interested wants to see the lot regardless.
+            AuctionLot.year.is_not(None),
+        )
     )
     if province:
         stmt = stmt.where(Auction.pickup_province.in_(province))
