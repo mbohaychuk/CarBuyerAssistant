@@ -117,6 +117,11 @@ class AuctionLot(Base, TimestampMixin):
         index=True,
     )
     source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # HiBid exposes two ids per lot: stable `itemId` (vehicle identity, stored
+    # in source_lot_id, used as upsert key) and a per-listing row `id` (used
+    # by HiBid's eventItemIds filter for single-lot lookups in bid_poller).
+    # Other sources don't need this and leave it NULL.
+    source_lot_row_id: Mapped[int | None] = mapped_column(BigInteger)
     lot_number: Mapped[str | None] = mapped_column(String(64))
     url: Mapped[str] = mapped_column(Text, nullable=False)
     # parser_version: the source plugin's parser version at the time this row

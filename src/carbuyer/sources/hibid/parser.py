@@ -43,6 +43,7 @@ class HibidLotSummary:
     """Parsed shape of a single HiBid Lot record from LotSearchLotOnly."""
 
     source_lot_id: str          # itemId (stable event-item id)
+    source_lot_row_id: int | None  # per-listing row id, used by HiBid eventItemIds filter
     lot_number: str | None       # display number, e.g. "201"
     title: str | None            # `lead`
     description: str | None
@@ -113,6 +114,7 @@ def parse_lot_record(rec: dict[str, Any]) -> HibidLotSummary:
                 photos.append(url_val)
     return HibidLotSummary(
         source_lot_id=str(rec.get("itemId") or ""),
+        source_lot_row_id=_to_int(rec.get("id")),
         lot_number=str(rec.get("lotNumber") or "") or None,
         title=rec.get("lead"),
         description=rec.get("description"),

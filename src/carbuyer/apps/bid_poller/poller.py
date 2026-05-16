@@ -110,7 +110,7 @@ async def _load_open_lot_refs(
                         LotStatus.CLOSING_SOON,
                         LotStatus.EXTENDED,
                     ]
-                )
+                ),
             )
             .order_by(Auction.scheduled_end_at.asc().nulls_last())
             .limit(_BATCH_LIMIT)
@@ -158,6 +158,13 @@ async def _load_open_lot_refs(
                     lot.closed_at = now
                     lot.final_bid_cad = lot.current_high_bid_cad
                     continue
+            # HiBid's eventItemIds filter needs the per-listing row id
+            # (source_lot_row_id). Skip lots that don't have it yet — the
+            # next ingest populates them. We still run the force-close
+            # check above (no source-side I/O needed for that path), just
+            # skip the actual polling.
+            if auction.source == "hibid" and lot.source_lot_row_id is None:
+                continue
             delay = next_poll_delay(
                 scheduled_end=auction.scheduled_end_at,
                 now=now,
@@ -168,6 +175,7 @@ async def _load_open_lot_refs(
                 source_auction_id=auction.source_auction_id,
                 source_lot_id=lot.source_lot_id,
                 url=lot.url,
+                source_lot_row_id=lot.source_lot_row_id,
             )
             if delay.total_seconds() <= _FAST_BUCKET_CUTOFF_SECONDS:
                 fast.append((lot.id, ref))

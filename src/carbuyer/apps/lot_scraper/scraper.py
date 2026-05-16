@@ -65,6 +65,7 @@ async def _upsert_lot(
     insert_values: dict[str, object] = {
         "auction_id": auction_id,
         "source_lot_id": raw.ref.source_lot_id,
+        "source_lot_row_id": raw.source_lot_row_id,
         "lot_number": raw.lot_number,
         "url": raw.ref.url,
         "parser_version": parser_version,
@@ -99,6 +100,10 @@ async def _upsert_lot(
         "url": excluded.url,
         "lot_number": func.coalesce(excluded.lot_number, AuctionLot.lot_number),
         "parser_version": excluded.parser_version,
+        # source_lot_row_id can change when HiBid re-lists the same itemId
+        # in a new auction event. Always take the latest so bid_poller can
+        # look up the current row id.
+        "source_lot_row_id": excluded.source_lot_row_id,
         "updated_at": func.now(),
     }
     for field_name in ("title", "description", "photos"):

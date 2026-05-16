@@ -27,6 +27,10 @@ class LotRef:
     source_auction_id: str
     source_lot_id: str
     url: str
+    # HiBid-specific: the per-listing row id used by HiBid's eventItemIds
+    # filter. Other sources leave this None. See db.models.AuctionLot's
+    # source_lot_row_id column for the full rationale.
+    source_lot_row_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -58,6 +62,9 @@ class RawLot:
     title: str | None
     description: str | None
     photos: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    # See LotRef.source_lot_row_id. Plumbed through so the lot_scraper upsert
+    # populates AuctionLot.source_lot_row_id without going through ref.
+    source_lot_row_id: int | None = None
     year: int | None = None
     make: str | None = None
     model: str | None = None

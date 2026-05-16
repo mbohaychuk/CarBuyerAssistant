@@ -422,12 +422,15 @@ class HibidSource(AuctionSource):
                 if not item_id:
                     continue
                 source_lot_id = str(item_id)
+                row_id = rec.get("id")
+                row_id_int = int(row_id) if isinstance(row_id, (int, str)) and str(row_id).isdigit() else None
                 self._lot_cache[source_lot_id] = rec
                 yield LotRef(
                     source="hibid",
                     source_auction_id=ref.source_auction_id,
                     source_lot_id=source_lot_id,
                     url=lot_url(str(rec.get("id") or item_id)),
+                    source_lot_row_id=row_id_int,
                 )
             if len(results) < _PAGE_SIZE or page * _PAGE_SIZE >= total:
                 break
@@ -455,6 +458,7 @@ class HibidSource(AuctionSource):
             bid_count_visible=summary.bid_count_visible,
             scheduled_end_at=None,
             lot_status="closed" if lot_is_closed(rec) else "open",
+            source_lot_row_id=summary.source_lot_row_id,
             extra=summary.extra,
         )
 
@@ -488,14 +492,27 @@ class HibidSource(AuctionSource):
         )
 
     async def _fetch_one_lot_record(self, ref: LotRef) -> dict[str, Any]:
-        """GraphQL fetch of a single lot by itemId; raises _LotMissing if gone."""
+        """GraphQL fetch of a single lot by row id; raises _LotMissing if gone.
+
+        Uses ``source_lot_row_id`` (HiBid's per-listing row id) for the
+        ``eventItemIds`` filter because that filter matches against the row
+        id, NOT the stable ``itemId``. Callers must not pass refs with
+        ``source_lot_row_id=None`` — the bid_poller's SQL filter excludes
+        them so this branch should be unreachable in normal operation. Raise
+        a defensive _LotMissing if it ever fires; that's safer than passing
+        ``[None]`` to HiBid (returns 0 results, would mass-close lots).
+        """
+        if ref.source_lot_row_id is None:
+            raise _LotMissing(
+                f"{ref.source_lot_id} (no row id — SQL filter bug?)",
+            )
         data = await self._graphql(
             "LotSearchLotOnly",
             {
                 "auctionId": int(ref.source_auction_id),
                 "pageNumber": 1,
                 "pageLength": 1,
-                "eventItemIds": [int(ref.source_lot_id)],
+                "eventItemIds": [ref.source_lot_row_id],
                 "status": "ALL",
                 "sortOrder": "LOT_NUMBER",
                 "filter": "ALL",
@@ -589,6 +606,7 @@ def _lot_record_to_raw_pair(
         source_auction_id=auction_id_str,
         source_lot_id=source_lot_id,
         url=summary.url,
+        source_lot_row_id=summary.source_lot_row_id,
     )
     raw_lot = RawLot(
         ref=lot_ref,
@@ -603,6 +621,7 @@ def _lot_record_to_raw_pair(
         bid_count_visible=summary.bid_count_visible,
         scheduled_end_at=raw_auction.scheduled_end_at,
         lot_status="closed" if lot_is_closed(rec) else "open",
+        source_lot_row_id=summary.source_lot_row_id,
         extra=summary.extra,
     )
     return raw_auction, raw_lot
