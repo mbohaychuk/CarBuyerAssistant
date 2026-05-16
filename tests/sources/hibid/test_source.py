@@ -196,6 +196,7 @@ async def test_fetch_lots_then_fetch_lot_uses_cache() -> None:
         lot_ref = LotRef(
             source="hibid", source_auction_id="740236",
             source_lot_id="4242", url="https://hibid.com/lot/30000001",
+            source_lot_row_id=30000001,
         )
         raw = await src.fetch_lot(lot_ref)
     assert raw.title == "1995 Ford F-150 4x4"
@@ -219,6 +220,7 @@ async def test_fetch_lot_cache_miss_falls_back_to_graphql() -> None:
         lot_ref = LotRef(
             source="hibid", source_auction_id="740236",
             source_lot_id="4242", url="https://hibid.com/lot/30000001",
+            source_lot_row_id=30000001,
         )
         raw = await src.fetch_lot(lot_ref)
     assert raw.title == "1995 Ford F-150 4x4"
@@ -233,6 +235,7 @@ async def test_poll_bid_returns_observation() -> None:
         ref = LotRef(
             source="hibid", source_auction_id="740236",
             source_lot_id="4242", url="https://hibid.com/lot/30000001",
+            source_lot_row_id=30000001,
         )
         obs = await src.poll_bid(ref)
     assert obs.current_high_bid_cad is not None
@@ -251,6 +254,7 @@ async def test_poll_bid_missing_lot_returns_missing_status() -> None:
         ref = LotRef(
             source="hibid", source_auction_id="740236",
             source_lot_id="999999", url="https://hibid.com/lot/999999",
+            source_lot_row_id=999999,
         )
         obs = await src.poll_bid(ref)
     assert obs.status_at_observation == "missing"
@@ -278,6 +282,7 @@ async def test_poll_bid_closed_lot_status() -> None:
         ref = LotRef(
             source="hibid", source_auction_id="740236",
             source_lot_id="4242", url="https://hibid.com/lot/1",
+            source_lot_row_id=1,
         )
         obs = await src.poll_bid(ref)
     assert obs.status_at_observation == "closed"

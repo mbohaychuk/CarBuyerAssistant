@@ -60,6 +60,11 @@ def _seed_lot(
     lot = AuctionLot(
         auction=a,
         source_lot_id="L1",
+        # HiBid lots require source_lot_row_id for the eventItemIds filter
+        # in production; the SQL filter in _load_open_lot_refs skips lots
+        # without it. Seed a non-null value so existing tests exercise the
+        # polling path.
+        source_lot_row_id=12345,
         url="https://hibid.com/catalog/A1",
         title="2010 Toyota Tundra",
         description="runs and drives",
