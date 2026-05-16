@@ -26,7 +26,7 @@
         <a href="/lots/{{ o.lot.id }}"><strong>{{ o.lot.year or "" }} {{ o.lot.make or "" }} {{ o.lot.model or "" }}</strong></a><br>
         <span class="muted">{{ o.lot.mileage_km or "?" }} km · {{ o.auction.pickup_city or "?" }}, {{ o.auction.pickup_province or "?" }}</span><br>
         Current: {{ money(o.lot.current_high_bid_cad) }}<br>
-        Closes: {{ o.auction.scheduled_end_at.strftime("%b %d") if o.auction.scheduled_end_at else "?" }}
+        Closes: {{ o.auction.scheduled_end_at | local_dt("%b %d") }}
       </div>
     {% endfor %}
   </div>
