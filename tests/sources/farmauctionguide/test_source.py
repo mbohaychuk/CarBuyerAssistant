@@ -19,8 +19,33 @@ def test_resolve_platform_routes_hibid() -> None:
 
 
 def test_resolve_platform_routes_mcdougall() -> None:
-    url = "https://www.mcdougallauction.com/auction/12345/regina-summer"
-    assert resolve_platform(url) == ("mcdougall", "12345")
+    url = (
+        "https://www.mcdougallauction.com/auction-event.php"
+        "?arg=BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918"
+    )
+    assert resolve_platform(url) == (
+        "mcdougall", "BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918",
+    )
+
+
+def test_resolve_platform_routes_mcdougall_with_other_query_params() -> None:
+    # arg= is sometimes preceded by other params (sort, filter, etc).
+    url = (
+        "https://www.mcdougallauction.com/auction-event.php"
+        "?source=fag&arg=BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918"
+    )
+    assert resolve_platform(url) == (
+        "mcdougall", "BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918",
+    )
+
+
+def test_resolve_platform_rejects_mcdougall_arg_that_is_not_a_guid() -> None:
+    # Strict GUID-only id pattern fails closed on malformed arg= values, so a
+    # bad URL doesn't slip through as a fake mcdougall auction id.
+    url = "https://www.mcdougallauction.com/auction-event.php?arg=not-a-guid"
+    # Host matches McDougall rule but path/query has no valid id - returns None
+    # (skip), same as nav/footer links.
+    assert resolve_platform(url) is None
 
 
 def test_resolve_platform_falls_back_to_unknown_with_host() -> None:
@@ -92,10 +117,11 @@ def _simple_transport(*, status: int = 200, body: str = "") -> httpx.MockTranspo
 
 # ── discover_auctions — routing ───────────────────────────────────────────────
 
-_FIXTURE_AB = """
+_MCDOUGALL_GUID = "BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918"
+_FIXTURE_AB = f"""
 <html><body>
   <a href="https://terrymcdougall.hibid.com/catalog/111111/spring-sale">Auction 1</a>
-  <a href="https://www.mcdougallauction.com/auction/22222/summer-dispersal">Auction 2</a>
+  <a href="https://www.mcdougallauction.com/auction-event.php?arg={_MCDOUGALL_GUID}">Auction 2</a>
   <a href="https://www.farmauctionguide.com/about/">About us</a>
 </body></html>
 """
@@ -113,7 +139,7 @@ async def test_discover_auctions_routes_known_platforms() -> None:
 
     sources_seen = {(r.source, r.source_auction_id) for r in refs}
     assert ("hibid", "111111") in sources_seen
-    assert ("mcdougall", "22222") in sources_seen
+    assert ("mcdougall", _MCDOUGALL_GUID) in sources_seen
 
 
 @pytest.mark.asyncio
