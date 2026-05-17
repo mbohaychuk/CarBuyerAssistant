@@ -12,8 +12,6 @@ concurrent invocations don't write conflicting upserts.
 """
 from __future__ import annotations
 
-from contextlib import AsyncExitStack
-
 from carbuyer.apps.auction_discoverer.discoverer import upsert_auction
 from carbuyer.apps.lot_scraper.scraper import upsert_lot_with_status_cascade
 from carbuyer.db.notify import notify
@@ -29,11 +27,11 @@ log = get_logger("ingester")
 # Bumped any time the cross-auction LotSearch query shape or parsing
 # semantics change. Surfaces in lot_scraper's parser_version field so
 # stale rows get re-pending'd via the content-cascade.
-_PARSER_VERSION = "hibid/v2.0-cross-auction"
+_HIBID_PARSER_VERSION = "hibid/v2.0-cross-auction"
 
 
-async def _ingest_one_province(source: HibidSource, province: str) -> int:
-    """Walk one province's lot stream end-to-end; return lots ingested."""
+async def _ingest_one_hibid_province(source: HibidSource, province: str) -> int:
+    """Walk one province's HiBid lot stream end-to-end; return lots ingested."""
     count = 0
     async for raw_auction, raw_lot in source.discover_vehicle_lots(province):
         async with get_session() as session, session.begin():
@@ -41,30 +39,39 @@ async def _ingest_one_province(source: HibidSource, province: str) -> int:
                 session, raw_auction, discovered_via="ingester",
             )
             lot = await upsert_lot_with_status_cascade(
-                session, auction.id, raw_lot, parser_version=_PARSER_VERSION,
+                session, auction.id, raw_lot, parser_version=_HIBID_PARSER_VERSION,
             )
             await notify(session, "enrichment_pending", str(lot.id))
             count += 1
     return count
 
 
+async def _run_hibid_lot_first() -> int:
+    """Strategy: HiBid cross-auction GraphQL lot-first ingestion.
+
+    HiBid exposes a cross-auction LotSearch operation that returns every
+    vehicle lot in one round-trip per province -- much more efficient than the
+    generic per-auction page walk other plugins use. Lives in its own strategy
+    function so the multi-source dispatch loop can isolate failures per source.
+    """
+    hibid_source = SOURCES.get(HibidSource.name)
+    if not isinstance(hibid_source, HibidSource):
+        raise RuntimeError("hibid plugin did not self-register")
+    total = 0
+    async with hibid_source:
+        for province in settings.hibid_provinces:
+            log.info("ingest province start", province=province)
+            n = await _ingest_one_hibid_province(hibid_source, province)
+            log.info("ingest province done", province=province, lots=n)
+            total += n
+    log.info("ingest complete", total_lots=total)
+    return total
+
+
 async def main() -> None:
-    """Entry point: acquire lock, walk every configured province, exit."""
+    """Entry point: acquire lock, run each ingestion strategy, exit."""
     lock_conn = await acquire_singleton_lock("ingester")
     try:
-        async with AsyncExitStack() as stack:
-            # HibidSource self-registered via register() at module import; the
-            # plugin singleton owns its httpx client lifetime via async-cm.
-            hibid_source = SOURCES.get(HibidSource.name)
-            if not isinstance(hibid_source, HibidSource):
-                raise RuntimeError("hibid plugin did not self-register")
-            await stack.enter_async_context(hibid_source)
-            total = 0
-            for province in settings.hibid_provinces:
-                log.info("ingest province start", province=province)
-                n = await _ingest_one_province(hibid_source, province)
-                log.info("ingest province done", province=province, lots=n)
-                total += n
-            log.info("ingest complete", total_lots=total)
+        await _run_hibid_lot_first()
     finally:
         await lock_conn.close()
