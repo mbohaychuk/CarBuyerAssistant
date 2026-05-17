@@ -207,7 +207,7 @@ async def test_sweep_does_not_emit_needs_plugin_for_known_source(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Known source (e.g. hibid) — even though no fetcher is registered in this
-    # test (so _minimal_raw_auction is used), the source is NOT unknown:* so
+    # test (so minimal_raw_auction is used), the source is NOT unknown:* so
     # needs_plugin must not fire.
     notified: list[tuple[str, str]] = []
 
