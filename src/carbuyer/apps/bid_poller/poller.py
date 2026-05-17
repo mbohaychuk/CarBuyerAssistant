@@ -250,6 +250,15 @@ async def _poll_one(
     """Poll one lot: HTTP call outside any transaction, then write in a fresh tx."""
     poller = pollers.get(ref.source)
     if poller is None:
+        # Lot exists in the DB but its source has no registered BidPoller.
+        # Today this shouldn't happen -- FAG-routed unknown:* auctions never
+        # get lots, and every fetcher plugin is a BidPoller. If we ever add
+        # a listing-only source (no poll capability) this branch keeps the
+        # worker quiet AND surfaces the lots in journalctl for triage.
+        log.warning(
+            "no bid_poller registered for lot source; skipping",
+            lot_id=lot_id, source=ref.source,
+        )
         return
 
     try:

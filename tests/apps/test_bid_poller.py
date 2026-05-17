@@ -256,7 +256,13 @@ async def test_write_observation_extended_end_time_marks_lot_extended(
 async def test_poll_one_unknown_source_returns_without_writing(
     _patched_get_session: AsyncSession,
 ) -> None:
-    """No poller for this source — silently skip without touching DB."""
+    """No poller for this source — warn + skip without touching DB.
+
+    This is the dispatch fall-through path. Shouldn't fire in production
+    (FAG-routed unknown auctions have no lots; every fetcher is a BidPoller)
+    but if it ever does, the warning surfaces the lot id + source in journal
+    rather than silently dropping the observation.
+    """
     session = _patched_get_session
     _, lot = _seed_lot(session)
     session.add(lot)
