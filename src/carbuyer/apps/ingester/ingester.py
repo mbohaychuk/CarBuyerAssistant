@@ -12,6 +12,8 @@ concurrent invocations don't write conflicting upserts.
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from carbuyer.apps.auction_discoverer.discoverer import upsert_auction
 from carbuyer.apps.lot_scraper.scraper import upsert_lot_with_status_cascade
 from carbuyer.db.notify import notify
@@ -23,6 +25,11 @@ from carbuyer.sources.base import SOURCES
 from carbuyer.sources.hibid.source import HibidSource
 
 log = get_logger("ingester")
+
+# A strategy is an async function that returns lots-ingested count.
+# Registered in STRATEGIES below; dispatched once each per ingester run, with
+# per-strategy try/except so one source failing doesn't abort siblings.
+Strategy = Callable[[], Awaitable[int]]
 
 # Bumped any time the cross-auction LotSearch query shape or parsing
 # semantics change. Surfaces in lot_scraper's parser_version field so
@@ -68,10 +75,40 @@ async def _run_hibid_lot_first() -> int:
     return total
 
 
+# Strategy registration. Each entry's name appears in structured logs so a
+# dropped or hanging source is easy to spot in journalctl. Order matters
+# only for log readability; strategies are independent.
+STRATEGIES: list[tuple[str, Strategy]] = [
+    ("hibid_lot_first", _run_hibid_lot_first),
+]
+
+
+async def _dispatch_strategies() -> dict[str, int | None]:
+    """Run each registered strategy under its own try/except.
+
+    Returns a name -> lots-ingested mapping; None means the strategy raised
+    (already logged at error level). The mapping is for the final summary
+    log so the operator sees per-source counts in one line.
+    """
+    results: dict[str, int | None] = {}
+    for name, strategy in STRATEGIES:
+        log.info("ingest strategy start", strategy=name)
+        try:
+            count = await strategy()
+        except Exception:
+            log.exception("ingest strategy failed", strategy=name)
+            results[name] = None
+            continue
+        log.info("ingest strategy done", strategy=name, lots=count)
+        results[name] = count
+    return results
+
+
 async def main() -> None:
-    """Entry point: acquire lock, run each ingestion strategy, exit."""
+    """Entry point: acquire lock, dispatch all registered strategies, exit."""
     lock_conn = await acquire_singleton_lock("ingester")
     try:
-        await _run_hibid_lot_first()
+        results = await _dispatch_strategies()
+        log.info("ingest run done", **{f"strategy_{n}": c for n, c in results.items()})
     finally:
         await lock_conn.close()
