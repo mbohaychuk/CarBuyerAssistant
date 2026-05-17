@@ -32,8 +32,12 @@ _REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name, _FagSource.name
 log = get_logger("auction_discoverer")
 
 
-def _minimal_raw_auction(ref: AuctionRef) -> RawAuction:
-    """For unknown-platform refs (routers, no fetcher plugin) — record bare metadata."""
+def minimal_raw_auction(ref: AuctionRef) -> RawAuction:
+    """For routed refs without a fetcher plugin -- records bare auction
+    metadata so the row exists for /needs-plugin triage. Also used by the
+    ingester's FAG router strategy where lots come from per-platform
+    strategies and the FAG sweep contributes auction metadata only.
+    """
     return RawAuction(
         ref=ref,
         title=None, description=None,
@@ -163,7 +167,7 @@ async def _sweep_one_discoverer(
                 "unknown platform discovered",
                 router=discoverer.name, source=ref.source, url=ref.url,
             )
-            raw: RawAuction = _minimal_raw_auction(ref)
+            raw: RawAuction = minimal_raw_auction(ref)
         else:
             fetcher = fetchers.get(ref.source)
             if fetcher is None:
@@ -171,7 +175,7 @@ async def _sweep_one_discoverer(
                     "no fetcher for resolved source — recording metadata only",
                     router=discoverer.name, source=ref.source,
                 )
-                raw = _minimal_raw_auction(ref)
+                raw = minimal_raw_auction(ref)
             else:
                 try:
                     raw = await fetcher.fetch_auction(ref)

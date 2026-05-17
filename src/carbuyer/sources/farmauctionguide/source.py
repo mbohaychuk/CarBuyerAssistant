@@ -215,7 +215,7 @@ class FarmAuctionGuideSource(AuctionSource):
     async def fetch_auction(self, ref: AuctionRef) -> RawAuction:
         """No-op — farmauctionguide is a router; per-platform plugins own fetch."""
         # Only reached if a caller invokes this directly; _sweep_one_discoverer
-        # routes known-platform refs to their plugin and uses _minimal_raw_auction
+        # routes known-platform refs to their plugin and uses minimal_raw_auction
         # for unknown: refs — never calls this method in production.
         return RawAuction(
             ref=ref,
