@@ -61,6 +61,11 @@ class Auction(Base, TimestampMixin):
     pickup_province: Mapped[str | None] = mapped_column(String(8))
     pickup_window_text: Mapped[str | None] = mapped_column(Text)
     buyer_premium_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # Cap and floor on the *premium amount* (not the percent). Both nullable.
+    # When NULL, premium is purely linear (pct * bid) -- current HiBid behavior.
+    # McDougall states "15% to a Max $2000, Min $20" so max=2000, min=20.
+    buyer_premium_max_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    buyer_premium_min_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     online_bidding_fee_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     gst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     pst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
