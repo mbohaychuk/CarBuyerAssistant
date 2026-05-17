@@ -36,9 +36,12 @@ _log = get_logger("sources.mcdougall")
 VEHICLES_URL = "https://www.mcdougallauction.com/vehicles"
 _HTTP_NOT_FOUND: int = int(httpx.codes.NOT_FOUND)
 
-# Auction detail pages follow /auction/<numeric-id>[/<slug>].
+# Auction detail pages: auction-event.php?arg=<GUID-8-4-4-4-12>.
+# Lot detail pages:    products-full-view.php?arg=<GUID-8-4-4-4-12>.
+# Cross-auction Vehicles catalog: products.php?category=Vehicles.
+_GUID_RE = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 _MCDOUGALL_AUCTION_URL = re.compile(
-    r"^https?://(?:www\.)?mcdougallauction\.com/auction/(\d+)",
+    rf"^https?://(?:www\.)?mcdougallauction\.com/auction-event\.php\?[^#]*\barg=({_GUID_RE})",
 )
 
 

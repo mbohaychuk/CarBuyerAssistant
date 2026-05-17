@@ -57,7 +57,10 @@ PROVINCE_PAGES: dict[str, str] = {
 _FAG_HOSTS: frozenset[str] = frozenset({"farmauctionguide.com", "www.farmauctionguide.com"})
 
 # Each tuple: (hostname pattern, resolved source name, regex to extract auction id).
-# Patterns are checked in order; first match wins.
+# Patterns are checked in order; first match wins. The id regex is applied to
+# `path?query` (not just path) because some platforms (McDougall) carry the id
+# as a query parameter, not a path segment.
+_GUID_RE = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 PLATFORM_RULES: list[tuple[re.Pattern[str], str, re.Pattern[str]]] = [
     (
         re.compile(r"(^|\.)hibid\.com$", re.I),
@@ -67,7 +70,7 @@ PLATFORM_RULES: list[tuple[re.Pattern[str], str, re.Pattern[str]]] = [
     (
         re.compile(r"(^|\.)mcdougallauction\.com$", re.I),
         "mcdougall",
-        re.compile(r"/auction/(\d+)"),
+        re.compile(rf"/auction-event\.php\?[^#]*\barg=({_GUID_RE})"),
     ),
 ]
 
@@ -75,10 +78,10 @@ PLATFORM_RULES: list[tuple[re.Pattern[str], str, re.Pattern[str]]] = [
 def resolve_platform(url: str) -> tuple[str, str] | None:
     """Map an auction URL to (resolved_source, extracted_auction_id).
 
-    Returns ("hibid"|"mcdougall", "<numeric-id>") for known platforms with a
-    valid auction-id in the URL path, ("unknown:<host>", "<last-path-segment>")
-    for unknown hosts, or None for known hosts whose URL doesn't carry a
-    catalog/auction id (e.g. hibid.com footer links to /help, /about, etc.).
+    Returns ("hibid"|"mcdougall", "<id>") for known platforms with a valid
+    auction id (numeric for HiBid, GUID for McDougall), ("unknown:<host>",
+    "<last-path-segment>") for unknown hosts, or None for known hosts whose
+    URL doesn't carry an auction id (footer / nav / help pages).
 
     The None return tells callers to skip the link entirely — emitting it as
     unknown:<known-host> would trigger a spurious needs_plugin alert for a
@@ -88,12 +91,14 @@ def resolve_platform(url: str) -> tuple[str, str] | None:
     """
     parsed = urlparse(url)
     host = parsed.netloc.lower()
+    # Search path + query so query-string auction ids (?arg=<GUID>) match.
+    path_and_query = parsed.path + ("?" + parsed.query if parsed.query else "")
     for host_pat, source_name, id_pat in PLATFORM_RULES:
         if host_pat.search(host):
-            m = id_pat.search(parsed.path)
+            m = id_pat.search(path_and_query)
             if m:
                 return source_name, m.group(1)
-            # Host matched a known platform but the path doesn't carry an
+            # Host matched a known platform but the URL doesn't carry an
             # auction id — this is a non-auction link (nav, footer, help, etc.).
             # Skip rather than emit as unknown to avoid a needs_plugin alert
             # for a platform we already plug.
