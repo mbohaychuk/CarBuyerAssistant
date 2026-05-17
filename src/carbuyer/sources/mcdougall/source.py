@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
@@ -53,6 +54,24 @@ _GUID_RE = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-F
 _MCDOUGALL_AUCTION_URL = re.compile(
     rf"^https?://(?:www\.)?mcdougallauction\.com/auction-event\.php\?[^#]*\barg=({_GUID_RE})",
 )
+
+# "<addr>, <city>, <prov>" requires the trailing two comma-separated parts to
+# look like city + province; everything before joins as the address. Anything
+# with fewer than three parts is treated as opaque -- whole string goes into
+# pickup_address, city/province None. The catalog format is consistent enough
+# that this works for current McDougall inventory; revisit if multi-yard
+# addresses start appearing with varied shapes.
+_MIN_PICKUP_PARTS = 3
+
+
+def _split_pickup_location(value: str) -> tuple[str | None, str | None, str | None]:
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if len(parts) < _MIN_PICKUP_PARTS:
+        return (value.strip() or None, None, None)
+    province = parts[-1]
+    city = parts[-2]
+    address = ", ".join(parts[:-2])
+    return (address or None, city or None, province or None)
 
 
 class McDougallSource(AuctionSource):
@@ -111,6 +130,85 @@ class McDougallSource(AuctionSource):
                 "McDougallSource used outside `async with` — wrap in context manager",
             )
         return self._client
+
+    async def discover_vehicle_lots(self) -> AsyncIterator[tuple[RawAuction, RawLot]]:
+        """Lot-first cross-auction ingestion: catalog walker -> fetch_lot per
+        entry -> (RawAuction, RawLot) pair. Mirrors HiBid's discover_vehicle_lots
+        interface so the ingester dispatch can wire both sources the same way.
+
+        Auction-level metadata for first-seen GUIDs is built from RawLot.extra
+        (which carries auction_guid + pickup_location + premium terms) -- no
+        separate fetch to auction-event.php in the per-lot loop. Auction title
+        / scheduled_start_at / scheduled_end_at remain None until we ever add
+        an auction-event fetcher; for now the lot's enrichment + valuation
+        signal carries the user-visible value.
+
+        One fetch_lot failure is logged and skipped; sibling lots continue.
+        """
+        async for entry in self.iter_catalog_entries():
+            placeholder_ref = LotRef(
+                source=self.name,
+                source_auction_id="",  # filled below once we have the GUID
+                source_lot_id=entry.lot_guid,
+                url=entry.lot_url,
+            )
+            try:
+                raw_lot = await self.fetch_lot(placeholder_ref)
+            except Exception:
+                _log.exception(
+                    "fetch_lot failed",
+                    lot_guid=entry.lot_guid, url=entry.lot_url,
+                )
+                continue
+            auction_guid = raw_lot.extra.get("auction_guid")
+            if not isinstance(auction_guid, str) or not auction_guid:
+                _log.warning(
+                    "lot has no parent auction GUID; skipping",
+                    lot_guid=entry.lot_guid,
+                )
+                continue
+            resolved_ref = replace(placeholder_ref, source_auction_id=auction_guid)
+            final_lot = replace(raw_lot, ref=resolved_ref)
+            raw_auction = self._build_raw_auction(auction_guid, raw_lot.extra)
+            yield raw_auction, final_lot
+
+    def _build_raw_auction(
+        self, auction_guid: str, lot_extras: dict[str, Any],
+    ) -> RawAuction:
+        """Build a minimum-viable RawAuction from per-lot extras.
+
+        Title and scheduled dates are None because the lot detail page
+        doesn't expose them; they would require fetching auction-event.php
+        per auction. The dashboard surfaces lots with the parent auction's
+        pickup info instead, and the auction title slot gets a stable
+        placeholder operators can recognise.
+        """
+        pickup = lot_extras.get("pickup_location")
+        addr, city, prov = _split_pickup_location(pickup) if pickup else (None, None, None)
+        auction_url = f"https://www.mcdougallauction.com/auction-event.php?arg={auction_guid}"
+        return RawAuction(
+            ref=AuctionRef(
+                source=self.name,
+                source_auction_id=auction_guid,
+                url=canonicalize_url(auction_url),
+            ),
+            title=None,
+            description=None,
+            auctioneer_name="McDougall Auctioneers",
+            auctioneer_external_id=None,
+            scheduled_start_at=None,
+            scheduled_end_at=None,
+            pickup_address=addr,
+            pickup_city=city,
+            pickup_province=prov,
+            pickup_window_text=None,
+            buyer_premium_pct=lot_extras.get("buyer_premium_pct"),
+            online_bidding_fee_pct=None,
+            terms_text=None,
+            auction_subtype="estate",
+            buyer_premium_max_cad=lot_extras.get("buyer_premium_max_cad"),
+            buyer_premium_min_cad=lot_extras.get("buyer_premium_min_cad"),
+        )
 
     async def iter_catalog_entries(
         self,

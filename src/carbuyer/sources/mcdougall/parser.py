@@ -51,12 +51,13 @@ _MILEAGE_RE = re.compile(r"([\d,]+)(?:\.\d+)?\s*km", re.IGNORECASE)
 _BID_COUNT_RE = re.compile(r"(\d+)\s*bids?\b", re.IGNORECASE)
 
 # "15% Buyers Premium to a Max of $2000 per lot and a Minimum of $20 per lot".
-# Captures percent + max + min as integers, all on one line.
+# Captures percent + max + min as integers. DOTALL so the terms paragraph
+# survives arbitrary whitespace / linebreaks between Max and Min in source HTML.
 _BUYER_PREMIUM_RE = re.compile(
     r"(\d+)\s*%\s*Buyers? Premium"
-    r"[^\n]*?Max(?:imum)?\s*(?:of)?\s*\$\s*(\d+)"
-    r"[^\n]*?Min(?:imum)?\s*(?:of)?\s*\$\s*(\d+)",
-    re.IGNORECASE,
+    r".*?Max(?:imum)?\s*(?:of)?\s*\$\s*(\d+)"
+    r".*?Min(?:imum)?\s*(?:of)?\s*\$\s*(\d+)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
