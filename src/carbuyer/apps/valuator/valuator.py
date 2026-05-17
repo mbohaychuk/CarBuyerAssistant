@@ -128,6 +128,8 @@ def _apply_pricing(
     set by the caller to derive ``suspicious_underprice_flag``.
     """
     bp = auction.buyer_premium_pct or DEFAULT_BUYER_PREMIUM_PCT
+    bp_max = auction.buyer_premium_max_cad
+    bp_min = auction.buyer_premium_min_cad
     gst = auction.gst_pct or DEFAULT_GST_PCT
     pst = auction.pst_pct or DEFAULT_PST_PCT
     dest_province = auction.pickup_province or settings.home_province
@@ -143,12 +145,14 @@ def _apply_pricing(
             current_high_bid=current_bid,
             buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
             landed_cost_premium=landed,
+            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
         )
         lot.price_deal_score = price_deal_score(
             current_high_bid=current_bid,
             buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
             landed_cost_premium=landed,
             expected_value=expected_value,
+            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
         )
     else:
         lot.all_in_at_current_bid_cad = None
@@ -163,6 +167,7 @@ def _apply_pricing(
             expected_value=expected_value,
             buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
             landed_cost_premium=landed, flip_margin=margin,
+            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
         )
     else:
         lot.recommended_max_bid_cad = None
