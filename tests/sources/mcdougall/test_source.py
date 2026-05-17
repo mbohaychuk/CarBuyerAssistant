@@ -8,8 +8,8 @@ import httpx
 import pytest
 
 import carbuyer.sources.base
-from carbuyer.sources.base import AuctionRef
-from carbuyer.sources.mcdougall.parser import parse_catalog_page
+from carbuyer.sources.base import AuctionRef, LotRef
+from carbuyer.sources.mcdougall.parser import parse_catalog_page, parse_lot_detail
 from carbuyer.sources.mcdougall.source import McDougallSource  # registers source at import
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -233,6 +233,94 @@ async def test_iter_catalog_entries_walks_pagination_until_empty(
         entries = [e async for e in src.iter_catalog_entries()]
     assert len(entries) == 1
     assert entries[0].lot_guid == "00000000-0000-4000-8000-000000000003"
+
+
+# ── Lot detail parser ────────────────────────────────────────────────────────
+
+
+def test_parse_lot_detail_extracts_all_fields_from_real_fixture() -> None:
+    # Real fixture captured 2026-05-16: 1987 Chevrolet Monte Carlo, lot 4 of
+    # the REGINA MONTHLY AG & INDUSTRIAL EQUIPMENT auction, GUID BD725BF6...
+    html = _load_fixture("lot_detail_monte_carlo.html")
+    d = parse_lot_detail(html, lot_guid="36CEF055-34AB-477E-B0F9-80ACDA6EAA17")
+
+    assert d.title == "1987 Chevrolet Monte Carlo Luxury Sport Car"
+    assert d.auction_guid == "BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918"
+    assert d.vin == "1G1GZ11H7HP127810"
+    assert d.mileage_km == 47800  # noqa: PLR2004
+    assert d.current_high_bid_cad == Decimal("5400")
+    assert d.bid_count_visible == 31  # noqa: PLR2004
+    assert d.scheduled_end_at is not None
+    assert d.scheduled_end_at.year == 2026  # noqa: PLR2004
+    assert d.pickup_location == "800 North Service Road, Emerald Park, SK"
+    # 84 photos is the real captured count; if fixture is refreshed this
+    # assertion intentionally needs an explicit update.
+    assert len(d.photos) == 84  # noqa: PLR2004
+    assert all(p.startswith("https://") for p in d.photos)
+    assert d.description is not None
+    assert "350cu.i" in d.description
+
+    # Buyer premium parsed from page text, not hardcoded.
+    assert d.buyer_premium_pct == Decimal("0.15")
+    assert d.buyer_premium_max_cad == Decimal("2000")
+    assert d.buyer_premium_min_cad == Decimal("20")
+
+    # Extras: secondary fields not yet promoted to canonical RawLot columns.
+    assert d.extras.get("engine") == "5.7L V8 Gas"
+    assert d.extras.get("transmission") == "Automatic"
+    assert d.extras.get("mileage_unverified") is True
+
+
+def test_parse_lot_detail_falls_back_when_buyer_premium_missing() -> None:
+    # Defensive: if McDougall ever changes the terms paragraph, we fail
+    # closed (None/None/None) so downstream all_in_cost uses defaults
+    # rather than silently wrong values.
+    html = "<html><body><div class='full-product-title'><h1>X</h1></div></body></html>"
+    d = parse_lot_detail(html, lot_guid="00000000-0000-4000-8000-000000000000")
+    assert d.buyer_premium_pct is None
+    assert d.buyer_premium_max_cad is None
+    assert d.buyer_premium_min_cad is None
+    assert d.title == "X"
+
+
+# ── fetch_lot integration ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_fetch_lot_returns_raw_lot_from_detail_page() -> None:
+    html = _load_fixture("lot_detail_monte_carlo.html")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    transport = httpx.MockTransport(handler)
+    async with McDougallSource(_transport=transport) as src:
+        ref = LotRef(
+            source="mcdougall",
+            source_auction_id="BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918",
+            source_lot_id="36CEF055-34AB-477E-B0F9-80ACDA6EAA17",
+            url=(
+                "https://www.mcdougallauction.com/products-full-view.php"
+                "?arg=36CEF055-34AB-477E-B0F9-80ACDA6EAA17"
+            ),
+        )
+        raw_lot = await src.fetch_lot(ref)
+
+    # Canonical fields propagated.
+    assert raw_lot.title == "1987 Chevrolet Monte Carlo Luxury Sport Car"
+    assert raw_lot.vin == "1G1GZ11H7HP127810"
+    assert raw_lot.mileage_km == 47800  # noqa: PLR2004
+    assert raw_lot.current_high_bid_cad == Decimal("5400")
+    assert raw_lot.bid_count_visible == 31  # noqa: PLR2004
+    assert raw_lot.scheduled_end_at is not None
+    assert len(raw_lot.photos) == 84  # noqa: PLR2004
+    # Parent-auction GUID + per-auction premium terms ride along in extra
+    # so the ingester can upsert the parent auction in the same pass.
+    assert raw_lot.extra["auction_guid"] == "BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918"
+    assert raw_lot.extra["pickup_location"] == "800 North Service Road, Emerald Park, SK"
+    assert raw_lot.extra["buyer_premium_pct"] == Decimal("0.15")
+    assert raw_lot.extra["buyer_premium_max_cad"] == Decimal("2000")
+    assert raw_lot.extra["buyer_premium_min_cad"] == Decimal("20")
 
 
 @pytest.mark.asyncio
