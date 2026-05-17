@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from datetime import UTC
+from decimal import Decimal
+from pathlib import Path
+
+import httpx
 import pytest
 
 import carbuyer.sources.base
 from carbuyer.sources.base import AuctionRef
+from carbuyer.sources.mcdougall.parser import parse_catalog_page
 from carbuyer.sources.mcdougall.source import McDougallSource  # registers source at import
+
+_FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 # Real McDougall auction-event URL shape:
 #   https://www.mcdougallauction.com/auction-event.php?arg=<GUID-8-4-4-4-12>
@@ -83,6 +91,177 @@ async def test_using_source_outside_context_manager_raises() -> None:
         )
 
 
-# Stub-behaviour tests for discover_auctions / fetch_lots / fetch_lot /
-# poll_bid were removed in this commit. Real fixture-based coverage lands in
-# the upcoming catalog walker / lot-detail / poll_bid commits.
+# ── Catalog parser ───────────────────────────────────────────────────────────
+
+
+def _load_fixture(name: str) -> str:
+    return (_FIXTURE_DIR / name).read_text()
+
+
+def test_parse_catalog_page_extracts_all_lot_cards() -> None:
+    # Real fixture captured 2026-05-16: products.php?category=Vehicles page 1.
+    # The page renders 14 .auction-product-item cards inline.
+    entries = parse_catalog_page(_load_fixture("vehicles_catalog_page1.html"))
+    assert len(entries) == 14  # noqa: PLR2004
+
+
+def test_parse_catalog_page_first_entry_has_expected_shape() -> None:
+    # 1987 Chevrolet Monte Carlo — first card on the captured fixture.
+    # If this snapshot ever drifts the test should fail loudly; the catalog
+    # ordering (closing-asc) is stable enough that a fixture refresh would
+    # be the explicit corrective action, not a tolerant test.
+    entries = parse_catalog_page(_load_fixture("vehicles_catalog_page1.html"))
+    e = entries[0]
+    assert e.lot_guid == "36CEF055-34AB-477E-B0F9-80ACDA6EAA17"
+    assert e.lot_url == (
+        "https://www.mcdougallauction.com/products-full-view.php"
+        "?arg=36CEF055-34AB-477E-B0F9-80ACDA6EAA17"
+    )
+    assert "Chevrolet Monte Carlo" in e.title
+    assert e.location == "800 North Service Road, Emerald Park, SK"
+    assert e.lot_number == "4"
+    assert e.status_raw == "Open"
+    assert e.current_high_bid_cad == Decimal("5400.00")
+    assert e.scheduled_end_at is not None
+    assert e.scheduled_end_at.tzinfo is not None
+    # Stored UTC; the fixture's hidden input has 2026-05-25T18:00:00Z.
+    assert e.scheduled_end_at.year == 2026  # noqa: PLR2004
+    assert e.scheduled_end_at.tzinfo.utcoffset(e.scheduled_end_at) == UTC.utcoffset(
+        e.scheduled_end_at,
+    )
+    assert e.photo_url is not None and e.photo_url.startswith("http")
+
+
+def test_parse_catalog_page_handles_missing_current_bid() -> None:
+    # Synthetic minimal lot card with no .current-bid div. The parser must
+    # surface current_high_bid_cad=None rather than crashing or defaulting
+    # to a phantom number.
+    html = """
+    <html><body>
+      <div class="auction-product-item">
+        <div class="item-img">
+          <a href="products-full-view.php?arg=00000000-0000-4000-8000-000000000001">
+            <img src="https://example.com/img.jpg">
+          </a>
+        </div>
+        <div class="item-title"><div class="blockTextWrap"><div class="blockText">
+          <h4><a href="products-full-view.php?arg=00000000-0000-4000-8000-000000000001">
+            2020 Honda Civic</a></h4>
+        </div></div></div>
+        <div class="item-location"><p><span>Location:</span> Saskatoon, SK</p></div>
+        <div class="lot-status"><p><span>Lot:</span> 1<span class="status">Status:</span> Open</p></div>
+        <div class="close-date">
+          <input type="hidden" id="txtLotEndDate00000000-0000-4000-8000-000000000001"
+                 value="2026-06-01T18:00:00Z"/>
+        </div>
+      </div>
+    </body></html>
+    """  # noqa: E501
+    entries = parse_catalog_page(html)
+    assert len(entries) == 1
+    assert entries[0].current_high_bid_cad is None
+    assert entries[0].status_raw == "Open"
+
+
+def test_parse_catalog_page_skips_card_without_lot_guid() -> None:
+    # Defensive: malformed card (no products-full-view link) must NOT crash
+    # the parse; it's logged and skipped.
+    html = """
+    <html><body>
+      <div class="auction-product-item"><p>broken card with no link</p></div>
+      <div class="auction-product-item">
+        <a href="products-full-view.php?arg=00000000-0000-4000-8000-000000000002">
+          <img src="">
+        </a>
+        <div class="item-title"><h4><a
+          href="products-full-view.php?arg=00000000-0000-4000-8000-000000000002">
+          2019 Ford F-150</a></h4></div>
+      </div>
+    </body></html>
+    """
+    entries = parse_catalog_page(html)
+    assert len(entries) == 1
+    assert entries[0].title == "2019 Ford F-150"
+
+
+def test_parse_catalog_page_returns_empty_when_no_cards() -> None:
+    # The pagination walker uses [] as the "no more pages" sentinel.
+    assert parse_catalog_page("<html><body></body></html>") == []
+
+
+# ── Catalog walker (pagination + HTTP) ───────────────────────────────────────
+
+
+@pytest.fixture
+def _no_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace jittered_sleep (4-8s real wait) with a no-op so multi-page
+    walker tests don't add tens of seconds per test. Real cadence is
+    exercised in integration runs, not unit tests."""
+    async def _noop() -> None:
+        return None
+
+    monkeypatch.setattr("carbuyer.sources.mcdougall.source.jittered_sleep", _noop)
+
+
+@pytest.mark.asyncio
+async def test_iter_catalog_entries_walks_pagination_until_empty(
+    _no_jitter: None,
+) -> None:
+    # Page 1 returns 1 lot, page 2 returns empty (sentinel), walker stops.
+    page1 = """
+    <html><body>
+      <div class="auction-product-item">
+        <a href="products-full-view.php?arg=00000000-0000-4000-8000-000000000003">
+          <img src="">
+        </a>
+        <div class="item-title"><h4><a
+          href="products-full-view.php?arg=00000000-0000-4000-8000-000000000003">
+          Test Lot</a></h4></div>
+      </div>
+    </body></html>
+    """
+    page2_empty = "<html><body></body></html>"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "&p=2" in url:
+            return httpx.Response(200, text=page2_empty)
+        return httpx.Response(200, text=page1)
+
+    transport = httpx.MockTransport(handler)
+    async with McDougallSource(_transport=transport) as src:
+        entries = [e async for e in src.iter_catalog_entries()]
+    assert len(entries) == 1
+    assert entries[0].lot_guid == "00000000-0000-4000-8000-000000000003"
+
+
+@pytest.mark.asyncio
+async def test_iter_catalog_entries_respects_max_pages_safety_cap(
+    _no_jitter: None,
+) -> None:
+    # Defensive: if every page somehow returns content, max_pages keeps us
+    # from looping forever. Walker stops after max_pages iterations even
+    # without seeing an empty page.
+    page = """
+    <html><body>
+      <div class="auction-product-item">
+        <a href="products-full-view.php?arg=00000000-0000-4000-8000-000000000004">
+          <img src="">
+        </a>
+        <div class="item-title"><h4><a
+          href="products-full-view.php?arg=00000000-0000-4000-8000-000000000004">
+          Repeated Lot</a></h4></div>
+      </div>
+    </body></html>
+    """
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=page)
+
+    transport = httpx.MockTransport(handler)
+    async with McDougallSource(_transport=transport) as src:
+        entries = [
+            e async for e in src.iter_catalog_entries(max_pages=3)
+        ]
+    # 3 pages * 1 lot each.
+    assert len(entries) == 3  # noqa: PLR2004

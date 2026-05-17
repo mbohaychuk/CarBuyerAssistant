@@ -28,12 +28,18 @@ from carbuyer.sources.base import (
     register,
 )
 from carbuyer.sources.http import jittered_sleep, make_client
+from carbuyer.sources.mcdougall.parser import CatalogEntry, parse_catalog_page
 from carbuyer.sources.resolver import canonicalize_url
 from carbuyer.sources.retry import RetryTransport
 
 _log = get_logger("sources.mcdougall")
 
 VEHICLES_URL = "https://www.mcdougallauction.com/vehicles"
+CATALOG_URL = "https://www.mcdougallauction.com/products.php?category=Vehicles"
+# Defensive ceiling on pagination — bounds the worst-case ingest length if
+# McDougall ever serves an unbounded duplicate page or our empty-page sentinel
+# fails. 50 pages * ~14 lots/page = 700 lots, well above current ~150 inventory.
+_CATALOG_MAX_PAGES = 50
 _HTTP_NOT_FOUND: int = int(httpx.codes.NOT_FOUND)
 
 # Auction detail pages: auction-event.php?arg=<GUID-8-4-4-4-12>.
@@ -101,6 +107,39 @@ class McDougallSource(AuctionSource):
                 "McDougallSource used outside `async with` — wrap in context manager",
             )
         return self._client
+
+    async def iter_catalog_entries(
+        self,
+        *,
+        max_pages: int = _CATALOG_MAX_PAGES,
+    ) -> AsyncIterator[CatalogEntry]:
+        """Walk every page of products.php?category=Vehicles, yielding one
+        CatalogEntry per lot card. Stops on first empty page (sentinel) or
+        when max_pages is reached.
+
+        Yields summary data only. Parent-auction GUID + lot-detail fields
+        (mileage, VIN, photos) require the detail-page fetcher (commit #6).
+        """
+        for page in range(1, max_pages + 1):
+            url = CATALOG_URL if page == 1 else f"{CATALOG_URL}&p={page}"
+            try:
+                resp = await self._http.get(url)
+                resp.raise_for_status()
+            except Exception as exc:
+                _log.warning(
+                    "catalog page fetch failed",
+                    page=page, url=url, error=str(exc),
+                )
+                # One bad page must not abort the whole walk — return what
+                # we have so far. Distinct from "empty page" semantically.
+                return
+            entries = parse_catalog_page(resp.text)
+            if not entries:
+                return
+            for entry in entries:
+                yield entry
+            if page < max_pages:
+                await jittered_sleep()
 
     async def discover_auctions(self) -> AsyncIterator[AuctionRef]:
         seen: set[str] = set()
