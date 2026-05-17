@@ -12,7 +12,7 @@ from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import ClassVar, Self
+from typing import Any, ClassVar, Self
 
 import httpx
 from selectolax.parser import HTMLParser
@@ -28,7 +28,11 @@ from carbuyer.sources.base import (
     register,
 )
 from carbuyer.sources.http import jittered_sleep, make_client
-from carbuyer.sources.mcdougall.parser import CatalogEntry, parse_catalog_page
+from carbuyer.sources.mcdougall.parser import (
+    CatalogEntry,
+    parse_catalog_page,
+    parse_lot_detail,
+)
 from carbuyer.sources.resolver import canonicalize_url
 from carbuyer.sources.retry import RetryTransport
 
@@ -226,16 +230,37 @@ class McDougallSource(AuctionSource):
         await jittered_sleep()
 
     async def fetch_lot(self, ref: LotRef) -> RawLot:
+        """Fetch one products-full-view.php?arg=<GUID> detail page.
+
+        year/make/model are intentionally left None — extracted later by the
+        enricher's LLM pass against ``title`` + ``description`` (same pattern
+        as HiBid). Parent auction GUID + pickup location come along inside
+        ``extra`` so the ingester (commit #8) can build a RawAuction from
+        the same fetch without a second HTTP round to auction-event.php.
+        """
         resp = await self._http.get(ref.url)
         resp.raise_for_status()
-        # Field-level selectors are placeholders pending fixture capture.
+        detail = parse_lot_detail(resp.text, lot_guid=ref.source_lot_id)
+        extra: dict[str, Any] = {
+            **detail.extras,
+            "pickup_location": detail.pickup_location,
+            "auction_guid": detail.auction_guid,
+            "buyer_premium_pct": detail.buyer_premium_pct,
+            "buyer_premium_max_cad": detail.buyer_premium_max_cad,
+            "buyer_premium_min_cad": detail.buyer_premium_min_cad,
+        }
         return RawLot(
             ref=ref,
             lot_number=None,
-            title=None,
-            description=None,
-            photos=[],
-            lot_status="open",
+            title=detail.title,
+            description=detail.description,
+            photos=detail.photos,
+            mileage_km=detail.mileage_km,
+            vin=detail.vin,
+            current_high_bid_cad=detail.current_high_bid_cad,
+            bid_count_visible=detail.bid_count_visible,
+            scheduled_end_at=detail.scheduled_end_at,
+            extra=extra,
         )
 
     async def poll_bid(self, ref: LotRef) -> BidObservation:
