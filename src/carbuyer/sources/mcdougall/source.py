@@ -264,22 +264,33 @@ class McDougallSource(AuctionSource):
         )
 
     async def poll_bid(self, ref: LotRef) -> BidObservation:
+        """Re-fetch one lot detail page; emit current bid + end_time.
+
+        Status detection v1: HTTP 404 -> "missing" (lot removed). 200 with
+        a parseable end_time -> "open" regardless of whether that time has
+        passed -- the bid_poller's force-close-by-scheduled-end logic owns
+        the OPEN -> CLOSED transition until we capture a closed-lot fixture
+        and find an in-page closed marker. McDougall has soft-close, so a
+        lot can legitimately remain open past its scheduled end while final
+        bids land.
+        """
+        observed = datetime.now(UTC)
         resp = await self._http.get(ref.url)
         if resp.status_code == _HTTP_NOT_FOUND:
             return BidObservation(
                 ref=ref,
-                observed_at=datetime.now(UTC),
+                observed_at=observed,
                 current_high_bid_cad=None,
                 end_time_at_observation=None,
                 status_at_observation="missing",
             )
         resp.raise_for_status()
-        # Bid-state selectors are placeholders pending fixture capture.
+        detail = parse_lot_detail(resp.text, lot_guid=ref.source_lot_id)
         return BidObservation(
             ref=ref,
-            observed_at=datetime.now(UTC),
-            current_high_bid_cad=None,
-            end_time_at_observation=None,
+            observed_at=observed,
+            current_high_bid_cad=detail.current_high_bid_cad,
+            end_time_at_observation=detail.scheduled_end_at,
             status_at_observation="open",
         )
 

@@ -283,6 +283,57 @@ def test_parse_lot_detail_falls_back_when_buyer_premium_missing() -> None:
     assert d.title == "X"
 
 
+# ── poll_bid ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_poll_bid_open_lot_returns_current_bid_and_end_time() -> None:
+    # Real fixture for an open lot — bid 5400, end 2026-05-25T18:00Z.
+    html = _load_fixture("lot_detail_monte_carlo.html")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    async with McDougallSource(_transport=httpx.MockTransport(handler)) as src:
+        ref = LotRef(
+            source="mcdougall",
+            source_auction_id="BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918",
+            source_lot_id="36CEF055-34AB-477E-B0F9-80ACDA6EAA17",
+            url=(
+                "https://www.mcdougallauction.com/products-full-view.php"
+                "?arg=36CEF055-34AB-477E-B0F9-80ACDA6EAA17"
+            ),
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.status_at_observation == "open"
+    assert obs.current_high_bid_cad == Decimal("5400")
+    assert obs.end_time_at_observation is not None
+    assert obs.observed_at.tzinfo is not None  # UTC-aware
+
+
+@pytest.mark.asyncio
+async def test_poll_bid_404_returns_missing() -> None:
+    # Defensive: a deleted lot must not crash the poller, must surface as
+    # the "missing" status so the worker can mark it closed and stop polling.
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    async with McDougallSource(_transport=httpx.MockTransport(handler)) as src:
+        ref = LotRef(
+            source="mcdougall",
+            source_auction_id="BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918",
+            source_lot_id="36CEF055-34AB-477E-B0F9-80ACDA6EAA17",
+            url=(
+                "https://www.mcdougallauction.com/products-full-view.php"
+                "?arg=36CEF055-34AB-477E-B0F9-80ACDA6EAA17"
+            ),
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.status_at_observation == "missing"
+    assert obs.current_high_bid_cad is None
+    assert obs.end_time_at_observation is None
+
+
 # ── fetch_lot integration ───────────────────────────────────────────────────
 
 
