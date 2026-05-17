@@ -271,6 +271,25 @@ def test_parse_lot_detail_extracts_all_fields_from_real_fixture() -> None:
     assert d.extras.get("mileage_unverified") is True
 
 
+def test_parse_lot_detail_handles_multi_item_serial_number() -> None:
+    # Real production crash 2026-05-16: boat-with-trailer lot 6C95BAB0...
+    # had a "Serial Number" field with three labeled IDs. Cramming that into
+    # the 32-char vin column raised StringDataRightTruncation and aborted
+    # the whole McDougall ingestion strategy. The parser must now:
+    # - set vin=None for non-single-VIN values
+    # - preserve the raw text in extras["raw_serial_number"] for inspection
+    html = (
+        "<html><body><p><strong>Serial Number:</strong>"
+        " Trailer: 5KTBS1810LF528753  Boat: BLBX2184J920 Motor: 2B721768</p>"
+        "</body></html>"
+    )
+    d = parse_lot_detail(html, lot_guid="00000000-0000-4000-8000-000000000099")
+    assert d.vin is None
+    assert d.extras.get("raw_serial_number") == (
+        "Trailer: 5KTBS1810LF528753  Boat: BLBX2184J920 Motor: 2B721768"
+    )
+
+
 def test_parse_lot_detail_falls_back_when_buyer_premium_missing() -> None:
     # Defensive: if McDougall ever changes the terms paragraph, we fail
     # closed (None/None/None) so downstream all_in_cost uses defaults
