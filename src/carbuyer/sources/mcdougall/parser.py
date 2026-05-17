@@ -267,20 +267,40 @@ def _parse_mileage_km(value: str | None) -> int | None:
         return None
 
 
-def _parse_vin(tree: HTMLParser) -> str | None:
-    # VIN is "<p><strong>Serial Number:</strong> <VIN></p>".
+# A real VIN is 11-17 chars of A-Z + 0-9, no separators. McDougall's "Serial
+# Number" field reuses this slot for multi-item lots ("Trailer: ABC123  Boat:
+# DEF456  Motor: GHI789") which is not a single VIN and would overflow the
+# 32-char column. Anything that doesn't look like a single VIN goes to None;
+# the raw string is preserved in extras via the caller.
+_VIN_SHAPE_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{11,17}$")
+
+
+def _parse_vin(tree: HTMLParser) -> tuple[str | None, str | None]:
+    """Returns (vin_or_none, raw_serial_or_none).
+
+    The second return value preserves the raw "Serial Number" text for cases
+    where it's a multi-item label ("Trailer: X  Boat: Y  Motor: Z") so it
+    can land in extras for inspection without being mistaken for a VIN.
+    """
     for strong in tree.css("strong"):
-        if strong.text(strip=True).casefold().startswith("serial number"):
-            parent = strong.parent
-            if parent is None:
-                continue
-            full = parent.text(strip=True)
-            # "Serial Number: 1G1GZ11H7HP127810" → strip prefix.
-            colon = full.find(":")
-            if colon == -1:
-                return None
-            return full[colon + 1:].strip() or None
-    return None
+        if not strong.text(strip=True).casefold().startswith("serial number"):
+            continue
+        parent = strong.parent
+        if parent is None:
+            continue
+        full = parent.text(strip=True)
+        colon = full.find(":")
+        if colon == -1:
+            return (None, None)
+        raw = full[colon + 1:].strip()
+        if not raw:
+            return (None, None)
+        # Single-VIN shape: 11-17 of [A-Z0-9] with the I/O/Q exclusions VINs
+        # use. Multi-item strings fail this and surface as raw_serial only.
+        if _VIN_SHAPE_RE.match(raw):
+            return (raw, None)
+        return (None, raw)
+    return (None, None)
 
 
 def _parse_description(tree: HTMLParser) -> str | None:
@@ -404,7 +424,13 @@ def parse_lot_detail(html: str, *, lot_guid: str) -> LotDetail:
 
     pct, max_cad, min_cad = _parse_buyer_premium(html)
 
+    vin, raw_serial = _parse_vin(tree)
     extras: dict[str, Any] = {}
+    if raw_serial is not None:
+        # Multi-item "Serial Number" field (boat + trailer + motor etc.) -- not
+        # a real VIN; preserve raw for human inspection without overflowing
+        # the 32-char VIN column.
+        extras["raw_serial_number"] = raw_serial
     for label, key in (
         ("Engine*:", "engine"),
         ("Transmission Type*:", "transmission"),
@@ -422,7 +448,7 @@ def parse_lot_detail(html: str, *, lot_guid: str) -> LotDetail:
         auction_guid=_parse_auction_guid(html),
         title=title,
         description=_parse_description(tree),
-        vin=_parse_vin(tree),
+        vin=vin,
         mileage_km=mileage_km,
         current_high_bid_cad=_parse_current_bid(tree),
         bid_count_visible=_parse_bid_count(tree),
