@@ -80,6 +80,8 @@ async def upsert_auction(
         "pickup_province": raw.pickup_province,
         "pickup_window_text": raw.pickup_window_text,
         "buyer_premium_pct": raw.buyer_premium_pct,
+        "buyer_premium_max_cad": raw.buyer_premium_max_cad,
+        "buyer_premium_min_cad": raw.buyer_premium_min_cad,
         "online_bidding_fee_pct": raw.online_bidding_fee_pct,
         "status": "upcoming",
         "first_seen_at": now,
@@ -120,6 +122,12 @@ async def upsert_auction(
         ),
         "buyer_premium_pct": func.coalesce(
             excluded.buyer_premium_pct, Auction.buyer_premium_pct,
+        ),
+        "buyer_premium_max_cad": func.coalesce(
+            excluded.buyer_premium_max_cad, Auction.buyer_premium_max_cad,
+        ),
+        "buyer_premium_min_cad": func.coalesce(
+            excluded.buyer_premium_min_cad, Auction.buyer_premium_min_cad,
         ),
         "online_bidding_fee_pct": func.coalesce(
             excluded.online_bidding_fee_pct, Auction.online_bidding_fee_pct,

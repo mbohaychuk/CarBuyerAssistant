@@ -46,6 +46,9 @@ class RawAuction:
     pickup_city: str | None
     pickup_province: str | None
     pickup_window_text: str | None
+    # Linear premium percent. Cap/floor live at end-of-class (see
+    # buyer_premium_max_cad / buyer_premium_min_cad) because dataclass
+    # ordering forbids defaulted fields before non-defaulted ones.
     buyer_premium_pct: Decimal | None
     online_bidding_fee_pct: Decimal | None
     terms_text: str | None
@@ -53,6 +56,11 @@ class RawAuction:
     # Source-specific fields that don't yet warrant a canonical column.
     # Promote to a real field once 2+ sources surface the same key.
     extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+    # Premium-amount cap/floor; NULL = unconstrained (HiBid). McDougall sets
+    # max=2000 min=20 ("15% to a Max $2000, Min $20"). Clamped against the
+    # linear `bid * buyer_premium_pct` in scoring.score.all_in_cost.
+    buyer_premium_max_cad: Decimal | None = None
+    buyer_premium_min_cad: Decimal | None = None
 
 
 @dataclass(slots=True)
