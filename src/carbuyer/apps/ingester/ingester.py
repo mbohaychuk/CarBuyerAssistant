@@ -23,6 +23,7 @@ from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES
 from carbuyer.sources.hibid.source import HibidSource
+from carbuyer.sources.mcdougall.source import McDougallSource
 
 log = get_logger("ingester")
 
@@ -35,6 +36,7 @@ Strategy = Callable[[], Awaitable[int]]
 # semantics change. Surfaces in lot_scraper's parser_version field so
 # stale rows get re-pending'd via the content-cascade.
 _HIBID_PARSER_VERSION = "hibid/v2.0-cross-auction"
+_MCDOUGALL_PARSER_VERSION = "mcdougall/v1.0-catalog-walker"
 
 
 async def _ingest_one_hibid_province(source: HibidSource, province: str) -> int:
@@ -75,11 +77,38 @@ async def _run_hibid_lot_first() -> int:
     return total
 
 
+async def _run_mcdougall_lot_first() -> int:
+    """Strategy: McDougall cross-auction Vehicles catalog lot-first ingestion.
+
+    Walks products.php?category=Vehicles (one page at a time, paginated) and
+    for each lot fetches its products-full-view.php?arg=<GUID> detail page.
+    Each yielded (RawAuction, RawLot) pair is upserted in its own session.
+    """
+    mcdougall = SOURCES.get(McDougallSource.name)
+    if not isinstance(mcdougall, McDougallSource):
+        raise RuntimeError("mcdougall plugin did not self-register")
+    count = 0
+    async with mcdougall:
+        async for raw_auction, raw_lot in mcdougall.discover_vehicle_lots():
+            async with get_session() as session, session.begin():
+                auction = await upsert_auction(
+                    session, raw_auction, discovered_via="ingester",
+                )
+                lot = await upsert_lot_with_status_cascade(
+                    session, auction.id, raw_lot,
+                    parser_version=_MCDOUGALL_PARSER_VERSION,
+                )
+                await notify(session, "enrichment_pending", str(lot.id))
+                count += 1
+    return count
+
+
 # Strategy registration. Each entry's name appears in structured logs so a
 # dropped or hanging source is easy to spot in journalctl. Order matters
 # only for log readability; strategies are independent.
 STRATEGIES: list[tuple[str, Strategy]] = [
     ("hibid_lot_first", _run_hibid_lot_first),
+    ("mcdougall_lot_first", _run_mcdougall_lot_first),
 ]
 
 

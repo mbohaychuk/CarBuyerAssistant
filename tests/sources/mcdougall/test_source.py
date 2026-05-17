@@ -283,6 +283,70 @@ def test_parse_lot_detail_falls_back_when_buyer_premium_missing() -> None:
     assert d.title == "X"
 
 
+# ── discover_vehicle_lots (orchestrator) ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_discover_vehicle_lots_yields_auction_plus_lot_pairs(
+    _no_jitter: None,
+) -> None:
+    # Tiny synthetic catalog with one lot; transport routes catalog page +
+    # lot detail page to two different fixtures so the orchestrator wires
+    # them together correctly. Page 2 returns empty -> walker stops.
+    catalog_html = """
+    <html><body>
+      <div class="auction-product-item">
+        <a href="products-full-view.php?arg=AAAAAAAA-1111-4222-8333-444444444444">
+          <img src="">
+        </a>
+        <div class="item-title"><h4><a
+          href="products-full-view.php?arg=AAAAAAAA-1111-4222-8333-444444444444">
+          Test Lot</a></h4></div>
+      </div>
+    </body></html>
+    """
+    detail_html = """
+    <html><body>
+      <div class="full-product-title"><h1>Test Lot</h1></div>
+      <p><span>Pick up location:</span> 100 Main St, Test City, AB</p>
+      <a href="auction-event.php?arg=BBBBBBBB-2222-4333-8444-555555555555">parent</a>
+      <span id="spnBidPrice">100</span>
+      <input type="hidden" id="txtLotEndDateAAAAAAAA-1111-4222-8333-444444444444"
+             value="2026-12-01T00:00:00Z"/>
+      <p>Subject to <strong>15% Buyers Premium</strong> to a Max of $2000 per lot
+         and a Minimum of $20 per lot.</p>
+    </body></html>
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "products-full-view.php" in url:
+            return httpx.Response(200, text=detail_html)
+        if "&p=2" in url:
+            return httpx.Response(200, text="<html><body></body></html>")
+        return httpx.Response(200, text=catalog_html)
+
+    async with McDougallSource(_transport=httpx.MockTransport(handler)) as src:
+        pairs = [pair async for pair in src.discover_vehicle_lots()]
+
+    assert len(pairs) == 1
+    raw_auction, raw_lot = pairs[0]
+    # Auction resolved from the detail page's auction-event link.
+    assert raw_auction.ref.source == "mcdougall"
+    assert raw_auction.ref.source_auction_id == "BBBBBBBB-2222-4333-8444-555555555555"
+    # Premium terms propagated from lot extras into auction columns.
+    assert raw_auction.buyer_premium_pct == Decimal("0.15")
+    assert raw_auction.buyer_premium_max_cad == Decimal("2000")
+    assert raw_auction.buyer_premium_min_cad == Decimal("20")
+    # Pickup location split: "100 Main St, Test City, AB".
+    assert raw_auction.pickup_address == "100 Main St"
+    assert raw_auction.pickup_city == "Test City"
+    assert raw_auction.pickup_province == "AB"
+    # Lot ref now carries the resolved auction GUID, not the placeholder.
+    assert raw_lot.ref.source_auction_id == "BBBBBBBB-2222-4333-8444-555555555555"
+    assert raw_lot.ref.source_lot_id == "AAAAAAAA-1111-4222-8333-444444444444"
+
+
 # ── poll_bid ─────────────────────────────────────────────────────────────────
 
 
