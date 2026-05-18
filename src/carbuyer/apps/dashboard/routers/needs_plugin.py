@@ -105,8 +105,8 @@ async def retry_routing(
         await session.commit()
     except IntegrityError:
         # Another row already exists with (new_source, new_ext_id) — most
-        # commonly because a direct discoverer (HiBid / McDougall) surfaced the
-        # same auction in parallel. The unknown:* row is now a stale duplicate;
+        # commonly because the ingester surfaced the same auction via a
+        # plugin in parallel. The unknown:* row is now a stale duplicate;
         # we leave it for ops to clean up rather than risk merging lots across
         # a unique-constraint boundary.
         await session.rollback()

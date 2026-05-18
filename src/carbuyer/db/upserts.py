@@ -1,8 +1,15 @@
+"""Postgres UPSERT helpers for Auction + AuctionLot rows.
+
+These wrap `INSERT ... ON CONFLICT DO UPDATE` with the project's coalesce-on-
+update + content-cascade semantics. Originally lived inside the legacy
+`auction_discoverer` and `lot_scraper` worker apps; relocated here once the
+ingester app became the sole caller and the workers were retired.
+"""
 from __future__ import annotations
 
-from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,24 +20,113 @@ from carbuyer.db.enums import (
     VisionStatus,
 )
 from carbuyer.db.models import Auction, AuctionLot
-from carbuyer.db.notify import listen, notify
-from carbuyer.db.session import get_session
-from carbuyer.shared.logging import get_logger
-from carbuyer.shared.singleton import acquire_singleton_lock
-from carbuyer.sources.base import (
-    SOURCES,
-    AuctionFetcher,
-    AuctionRef,
-    RawLot,
-)
-from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # registers plugin
-from carbuyer.sources.mcdougall.source import (
-    McDougallSource as _McDougallSource,  # registers plugin
-)
+from carbuyer.sources.base import RawAuction, RawLot
+from carbuyer.sources.resolver import canonicalize_url
 
-_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name)
 
-log = get_logger("lot_scraper")
+async def upsert_auction(
+    session: AsyncSession,
+    raw: RawAuction,
+    *,
+    discovered_via: str,
+) -> Auction:
+    """Atomic UPSERT keyed on (source, source_auction_id).
+
+    On conflict: refreshes last_seen_at, copies non-None fields from `raw` (never
+    overwrites with None via ``coalesce(EXCLUDED, table)``), and appends
+    `discovered_via` to the array if not already present.
+    """
+    now = datetime.now(UTC)
+    canonical = canonicalize_url(raw.ref.url)
+
+    insert_values: dict[str, object] = {
+        "source": raw.ref.source,
+        "source_auction_id": raw.ref.source_auction_id,
+        "url": raw.ref.url,
+        "canonical_url": canonical,
+        "discovered_via": [discovered_via],
+        "auction_subtype": raw.auction_subtype,
+        "auctioneer_name": raw.auctioneer_name,
+        "auctioneer_external_id": raw.auctioneer_external_id,
+        "title": raw.title,
+        "description": raw.description,
+        "terms_text": raw.terms_text,
+        "scheduled_start_at": raw.scheduled_start_at,
+        "scheduled_end_at": raw.scheduled_end_at,
+        "pickup_address": raw.pickup_address,
+        "pickup_city": raw.pickup_city,
+        "pickup_province": raw.pickup_province,
+        "pickup_window_text": raw.pickup_window_text,
+        "buyer_premium_pct": raw.buyer_premium_pct,
+        "buyer_premium_max_cad": raw.buyer_premium_max_cad,
+        "buyer_premium_min_cad": raw.buyer_premium_min_cad,
+        "online_bidding_fee_pct": raw.online_bidding_fee_pct,
+        "status": "upcoming",
+        "first_seen_at": now,
+        "last_seen_at": now,
+    }
+    stmt = pg_insert(Auction).values(**insert_values)
+    excluded = stmt.excluded
+    update_set: dict[str, object] = {
+        "url": excluded.url,
+        "canonical_url": excluded.canonical_url,
+        "auction_subtype": func.coalesce(
+            excluded.auction_subtype, Auction.auction_subtype,
+        ),
+        "auctioneer_name": func.coalesce(
+            excluded.auctioneer_name, Auction.auctioneer_name,
+        ),
+        "auctioneer_external_id": func.coalesce(
+            excluded.auctioneer_external_id, Auction.auctioneer_external_id,
+        ),
+        "title": func.coalesce(excluded.title, Auction.title),
+        "description": func.coalesce(excluded.description, Auction.description),
+        "terms_text": func.coalesce(excluded.terms_text, Auction.terms_text),
+        "scheduled_start_at": func.coalesce(
+            excluded.scheduled_start_at, Auction.scheduled_start_at,
+        ),
+        "scheduled_end_at": func.coalesce(
+            excluded.scheduled_end_at, Auction.scheduled_end_at,
+        ),
+        "pickup_address": func.coalesce(
+            excluded.pickup_address, Auction.pickup_address,
+        ),
+        "pickup_city": func.coalesce(excluded.pickup_city, Auction.pickup_city),
+        "pickup_province": func.coalesce(
+            excluded.pickup_province, Auction.pickup_province,
+        ),
+        "pickup_window_text": func.coalesce(
+            excluded.pickup_window_text, Auction.pickup_window_text,
+        ),
+        "buyer_premium_pct": func.coalesce(
+            excluded.buyer_premium_pct, Auction.buyer_premium_pct,
+        ),
+        "buyer_premium_max_cad": func.coalesce(
+            excluded.buyer_premium_max_cad, Auction.buyer_premium_max_cad,
+        ),
+        "buyer_premium_min_cad": func.coalesce(
+            excluded.buyer_premium_min_cad, Auction.buyer_premium_min_cad,
+        ),
+        "online_bidding_fee_pct": func.coalesce(
+            excluded.online_bidding_fee_pct, Auction.online_bidding_fee_pct,
+        ),
+        "last_seen_at": excluded.last_seen_at,
+        "updated_at": func.now(),  # ORM onupdate doesn't fire on ON CONFLICT
+        # Atomic dedup-append: array || EXCLUDED.array, then DISTINCT.
+        "discovered_via": text(
+            "ARRAY(SELECT DISTINCT unnest("
+            "auctions.discovered_via || EXCLUDED.discovered_via))",
+        ),
+    }
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["source", "source_auction_id"],
+        set_=update_set,
+    ).returning(Auction)
+    # populate_existing=True so RETURNING overrides any stale instance in the
+    # session's identity map (otherwise an UPSERT update wouldn't refresh the
+    # earlier-loaded ORM object's attributes).
+    result = await session.execute(stmt, execution_options={"populate_existing": True})
+    return result.scalar_one()
 
 
 # Fields that, when changed, invalidate downstream worker output.
@@ -178,100 +274,3 @@ async def upsert_lot_with_status_cascade(
         lot.notification_status = NotificationStatus.PENDING
         await session.flush()
     return lot
-
-
-async def process_auction(
-    auction_id: int,
-    fetchers: dict[str, AuctionFetcher],
-) -> int:
-    """Scrape every lot for one auction. Per-lot transaction; HTTP I/O outside
-    the txn so connection pools and idle_in_transaction timeouts don't suffer.
-    """
-    async with get_session() as s:
-        auction = await s.get(Auction, auction_id)
-    if auction is None:
-        log.warning("auction not found", auction_id=auction_id)
-        return 0
-    if auction.source.startswith("unknown:"):
-        log.info(
-            "skipping unknown-platform auction (no fetcher plugin)",
-            auction_id=auction_id, source=auction.source,
-        )
-        return 0
-    fetcher = fetchers.get(auction.source)
-    if fetcher is None:
-        log.warning(
-            "no fetcher plugin registered",
-            auction_id=auction_id, source=auction.source,
-        )
-        return 0
-    aref = AuctionRef(
-        source=auction.source,
-        source_auction_id=auction.source_auction_id,
-        url=auction.url,
-    )
-    count = 0
-    async for lot_ref in fetcher.fetch_lots(aref):
-        try:
-            raw = await fetcher.fetch_lot(lot_ref)
-        except Exception:
-            log.exception("fetch_lot failed", lot_ref_url=lot_ref.url)
-            continue
-        async with get_session() as session, session.begin():
-            lot = await upsert_lot_with_status_cascade(
-                session, auction.id, raw,
-                parser_version=fetcher.version,
-            )
-            await notify(session, "enrichment_pending", str(lot.id))
-        count += 1
-    return count
-
-
-async def _catchup_sweep(fetchers: dict[str, AuctionFetcher]) -> None:
-    """At startup + reconnect, find auctions whose lots haven't been scraped
-    yet (i.e. nothing in auction_lots for them) and process them. NOTIFYs
-    fired while the worker was down land here.
-    """
-    async with get_session() as s:
-        result = await s.execute(
-            select(Auction.id).where(
-                ~select(AuctionLot.id)
-                .where(AuctionLot.auction_id == Auction.id)
-                .exists(),
-                ~Auction.source.startswith("unknown:"),
-            ),
-        )
-        ids = list(result.scalars().all())
-    for auction_id in ids:
-        log.info("catchup processing", auction_id=auction_id)
-        try:
-            await process_auction(auction_id, fetchers)
-        except Exception:
-            log.exception("catchup process_auction failed", auction_id=auction_id)
-
-
-async def main() -> None:
-    for name in _REGISTERED_PLUGINS:
-        if name not in SOURCES:
-            raise RuntimeError(f"plugin {name!r} failed to self-register at import")
-    lock_conn = await acquire_singleton_lock("lot_scraper")
-    fetchers: dict[str, AuctionFetcher] = {
-        s.name: s for s in SOURCES.values() if isinstance(s, AuctionFetcher)
-    }
-    try:
-        async with AsyncExitStack() as stack:
-            for f in fetchers.values():
-                await stack.enter_async_context(f)
-            await _catchup_sweep(fetchers)
-            async for payload in listen("auction_pending"):
-                try:
-                    auction_id = int(payload)
-                except ValueError:
-                    continue
-                log.info("processing", auction_id=auction_id)
-                try:
-                    await process_auction(auction_id, fetchers)
-                except Exception:
-                    log.exception("process_auction failed", auction_id=auction_id)
-    finally:
-        await lock_conn.close()

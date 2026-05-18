@@ -393,6 +393,6 @@ class McDougallSource(AuctionSource):
         )
 
 
-# Register at import time so the lot-scraper / discoverer worker / dashboard
-# health view can enumerate covered platforms via SOURCES.
+# Register at import time so the ingester / dashboard health view can
+# enumerate covered platforms via SOURCES.
 register(McDougallSource())

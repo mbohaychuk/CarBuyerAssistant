@@ -181,12 +181,12 @@ async def test_retry_routing_409_when_target_source_already_exists(
     _patch_deps: AsyncSession,
 ) -> None:
     """If a row with (new_source, new_ext_id) already exists — typically
-    because a direct discoverer surfaced the same auction in parallel — the
+    because a ingester strategy surfaced the same auction in parallel — the
     UPDATE collides with the unique constraint. The endpoint must return 409
     rather than crash with HTTP 500, and the original unknown:* row must be
     left intact for ops to clean up."""
     session = _patch_deps
-    # Pre-existing canonical row from the direct discoverer.
+    # Pre-existing canonical row from the ingester strategy.
     canonical = Auction(
         source="hibid",
         source_auction_id="800001",

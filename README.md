@@ -19,8 +19,7 @@ cp .env.example .env
 # Fill in OPENAI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_CHANNELS
 
 # 5. Run any worker as a one-off (each is a runnable module)
-uv run python -m carbuyer.apps.auction_discoverer
-uv run python -m carbuyer.apps.lot_scraper
+uv run python -m carbuyer.apps.ingester
 uv run python -m carbuyer.apps.enricher
 uv run python -m carbuyer.apps.valuator
 uv run python -m carbuyer.apps.notifier
@@ -57,12 +56,6 @@ install, start them in order: `postgres -> bot -> dashboard -> workers`.
 | `carbuyer-vision.timer`       | Nightly vision batch                  | daily 02:00 UTC           |
 | `carbuyer-distiller.timer`    | Nightly distiller                     | daily 03:00 UTC           |
 
-The `lot-scraper.service` and `discoverer.timer` unit files ship in
-`infra/systemd/` but are NOT auto-enabled by `install.sh` — they implement
-the legacy auction-then-scrape pattern that's superseded by `ingester` for
-HiBid (the only currently-working source). Enable them manually if you
-ever revive the farmauctionguide/mcdougall plugins (currently 404'd).
-
 `infra/backup.sh` runs daily via crontab and retains 30 days of `pg_dump`s.
 Suggested crontab entry:
 
@@ -72,8 +65,8 @@ Suggested crontab entry:
 
 ### Single-instance enforcement
 
-Each continuous worker (notifier, enricher, valuator, bid_poller,
-lot_scraper) acquires a Postgres advisory lock via `pg_try_advisory_lock`
+Each continuous worker (notifier, enricher, valuator, bid_poller) and the
+one-shot ingester acquire a Postgres advisory lock via `pg_try_advisory_lock`
 at startup, held by a dedicated psycopg connection for the process
 lifetime. If the lock is already taken — typically because an operator
 ran `python -m carbuyer.apps.notifier` from a shell while the systemd

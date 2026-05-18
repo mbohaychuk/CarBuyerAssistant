@@ -1,11 +1,12 @@
 """Process-wide singleton enforcement via Postgres advisory locks.
 
-Each continuous worker (notifier, enricher, valuator, bid_poller, lot_scraper)
-must run as a single instance. They share workload-queue tables and the
-SELECT FOR UPDATE SKIP LOCKED + recover_orphans pattern assumes no concurrent
-claimer exists at startup. An operator running `python -m carbuyer.apps.X`
-from a shell while the systemd unit is also running breaks that assumption
-and can produce duplicate Discord posts or double-processed enrichments.
+Each continuous worker (notifier, enricher, valuator, bid_poller) and the
+one-shot ingester must run as a single instance. They share workload-queue
+tables and the SELECT FOR UPDATE SKIP LOCKED + recover_orphans pattern
+assumes no concurrent claimer exists at startup. An operator running
+`python -m carbuyer.apps.X` from a shell while the systemd unit is also
+running breaks that assumption and can produce duplicate Discord posts
+or double-processed enrichments.
 
 Mechanism:
   - Each worker's main() calls acquire_singleton_lock("<worker_name>") FIRST.
