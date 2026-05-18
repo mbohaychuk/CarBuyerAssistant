@@ -26,7 +26,12 @@ def next_poll_delay(*, scheduled_end: datetime | None, now: datetime, status: st
     """
     if scheduled_end is None:
         return timedelta(minutes=60)
-    if status in {LotStatus.CLOSED, LotStatus.UNSOLD, LotStatus.SOLD}:
+    if status in {
+        LotStatus.CLOSED,
+        LotStatus.UNSOLD,
+        LotStatus.SOLD,
+        LotStatus.FORCE_CLOSED,
+    }:
         return timedelta(hours=24)  # very rare re-check
     delta = scheduled_end - now
     if delta <= timedelta(minutes=10):

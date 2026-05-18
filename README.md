@@ -61,7 +61,7 @@ The cost is that NOTIFY payloads are limited (~8KB), so the messages only carry 
 
 ### Single-instance enforcement via advisory locks
 
-Each continuous worker (notifier, enricher, valuator, bid_poller, lot_scraper) opens a dedicated psycopg connection at startup and runs `pg_try_advisory_lock(hashtext("notifier"))`. The lock is held for the process lifetime; closing the connection releases it.
+Each continuous worker (notifier, enricher, valuator, bid_poller) and the one-shot ingester open a dedicated psycopg connection at startup and run `pg_try_advisory_lock(hashtext("notifier"))`. The lock is held for the process lifetime; closing the connection releases it.
 
 The `SELECT FOR UPDATE SKIP LOCKED` claim pattern and the `recover_orphans` catchup sweep both assume no concurrent claimer exists. A second instance — typically an operator running `python -m carbuyer.apps.notifier` from a shell while the systemd unit is also alive — would produce duplicate Discord posts and double-processed enrichments.
 
@@ -93,7 +93,7 @@ Polling continues past the nominal end time until the source reports `lot_status
 
 ### Lot-first ingest, not auction-then-scrape
 
-The original design had two stages: a discoverer that found new auctions, and a lot-scraper that walked each auction's catalog. After HiBid's SPA migration the cross-auction `LotSearchLotOnly` GraphQL query made one-shot lot ingestion strictly better — fewer requests, fewer parse paths, lots from across all open auctions in a single response. The `lot_scraper.service` and `discoverer.timer` files still ship for the legacy farmauctionguide/McDougall sources but aren't auto-enabled.
+The original design had two stages: a discoverer that found new auctions, and a lot-scraper that walked each auction's catalog. After HiBid's SPA migration the cross-auction `LotSearchLotOnly` GraphQL query made one-shot lot ingestion strictly better — fewer requests, fewer parse paths, lots from across all open auctions in a single response. The McDougall plugin uses the same lot-first pattern via its `products.php?category=Vehicles` catalog. The legacy auction-then-scrape workers were retired entirely; the per-source upsert helpers live in `carbuyer.db.upserts` and the ingester dispatches one strategy per source.
 
 ### SELinux-aware systemd install
 
@@ -167,11 +167,9 @@ uv run python -m carbuyer.apps.dashboard
 | `carbuyer-valuator.service`   | Valuation worker           | continuous                  |
 | `carbuyer-notifier.service`   | Discord notifier           | continuous                  |
 | `carbuyer-bid-poller.service` | Bid poller                 | continuous                  |
-| `carbuyer-ingester.timer`     | HiBid lot-first ingester   | every 6h (10min after boot) |
+| `carbuyer-ingester.timer`     | Multi-source lot ingester  | every 6h (10min after boot) |
 | `carbuyer-vision.timer`       | Nightly vision batch       | daily 02:00 UTC             |
 | `carbuyer-distiller.timer`    | Nightly distiller          | daily 03:00 UTC             |
-
-The `lot-scraper.service` and `discoverer.timer` files ship but aren't auto-enabled. They're the legacy auction-then-scrape pattern, kept for the day the farmauctionguide and McDougall plugins come back.
 
 `infra/backup.sh` runs daily via crontab and retains 30 days of `pg_dump`s:
 
@@ -203,7 +201,7 @@ uv run ruff check .  # linting
 
 ## Honest limitations
 
-- **Source coverage.** HiBid is the only currently-working source. The farmauctionguide and McDougall plugins are dormant (their HTML changed; rewriting is deferred until I'm bored of HiBid). Ritchie Bros and Michener Allen are phase-2 — both are large enough that manual browsing isn't a hardship.
+- **Source coverage.** HiBid and McDougall are the live sources. FarmAuctionGuide was built as a routing aggregator, validated, then removed when its per-province pages went behind Cloudflare and its content shifted toward auctioneer-owned sites rather than platform-hosted catalogs; long-tail auctioneer discovery moved to an operator-driven workflow. Ritchie Bros and Michener Allen are phase-2 — both are large enough that manual browsing isn't a hardship.
 - **Comp data depth.** The `historical_sales` table grows from auction outcomes the system observes. Bootstrapping took a few weeks; valuations on rare vehicles are still noisy until the comp set fills in.
 - **Bid history is reconstructed from polling.** Only what the source exposes publicly — no proxy-bid visibility, no buyer identity.
 - **Desirability and classic-exception taxonomies are small.** Expanded as I encounter sought-after vehicles in real auctions; this is intentionally slow growth.

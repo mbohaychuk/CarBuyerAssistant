@@ -12,8 +12,10 @@ from decimal import Decimal
 from carbuyer.apps.bot.channels import select_channel
 from carbuyer.apps.bot.messages import (
     LotEmbedData,
+    render_closing_soon_text,
     render_early_warning_text,
     render_going_cheap_text,
+    render_lot_extended_text,
 )
 
 
@@ -145,4 +147,57 @@ def test_render_going_cheap_handles_missing_pricing() -> None:
     # Margin line should not appear when pricing is missing.
     assert "Margin" not in text
     # None-valued optional fields must render as "?" rather than the literal "None".
+    assert "None" not in text
+
+
+# ─── Phase 13 H6: closing_soon + lot_extended renderers ─────────────────────
+
+
+def test_render_closing_soon_includes_vehicle_and_url() -> None:
+    d = _early_warning_data(  # reuse Land Cruiser fixture
+        url="https://hibid.com/lot/777",
+        current_high_bid_cad=Decimal("9000"),
+        all_in_cad=Decimal("11500"),
+    )
+    text = render_closing_soon_text(d)
+    assert "Closes in 1h" in text
+    assert "Land Cruiser" in text
+    assert "$9,000" in text
+    assert "$11,500" in text
+    assert text.endswith("https://hibid.com/lot/777")
+
+
+def test_render_closing_soon_handles_no_bid_yet() -> None:
+    d = _early_warning_data(
+        current_high_bid_cad=None,
+        all_in_cad=None,
+        value_low_cad=None,
+        value_high_cad=None,
+    )
+    text = render_closing_soon_text(d)
+    assert "no bid yet" in text
+    assert "uncomped" in text
+    assert "None" not in text
+
+
+def test_render_lot_extended_includes_new_end_time() -> None:
+    d = _early_warning_data(
+        url="https://hibid.com/lot/777",
+        current_high_bid_cad=Decimal("12500"),
+        scheduled_end_at=datetime(2026, 6, 1, 18, 5),
+    )
+    text = render_lot_extended_text(d)
+    assert "Soft-close" in text
+    assert "Jun 01 18:05" in text  # new end-time present
+    assert "$12,500" in text
+    assert text.endswith("https://hibid.com/lot/777")
+
+
+def test_render_lot_extended_handles_no_bid() -> None:
+    d = _early_warning_data(
+        current_high_bid_cad=None,
+        scheduled_end_at=None,
+    )
+    text = render_lot_extended_text(d)
+    assert "no bid" in text
     assert "None" not in text

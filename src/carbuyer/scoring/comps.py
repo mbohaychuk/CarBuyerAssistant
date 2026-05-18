@@ -24,10 +24,23 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from carbuyer.db.enums import LotStatus
 from carbuyer.db.models import AuctionLot, HistoricalSale
+
+# Lot statuses representing a completed auction with a trustworthy
+# `final_bid_cad`. CLOSED is the natural close path; FORCE_CLOSED is set by
+# bid_poller after 24h past scheduled_end with the source still returning OPEN
+# (the same branch writes final_bid_cad from current_high_bid_cad). Filtering
+# CLOSED alone silently drops force-closed lots from the comp set — material
+# in the sparse Western-Canada market the widened mileage band was meant to
+# address.
+_COMP_ELIGIBLE_STATUSES: tuple[str, ...] = (
+    LotStatus.CLOSED.value,
+    LotStatus.FORCE_CLOSED.value,
+)
 
 # Recency window for auction-lot comps. Older lots are out-of-distribution
 # (market moves, seasonality) and the auction-distiller is expected to have
@@ -61,7 +74,7 @@ async def build_comp_set(
     year: int,
     mileage_km: int,
     year_window: int = 1,
-    mileage_pct: float = 0.20,
+    mileage_pct: float = 0.30,
 ) -> list[ComparableSale]:
     """Return historical + recent-auction comps within make/model/year/mileage band.
 
@@ -74,31 +87,48 @@ async def build_comp_set(
     mileage_lo = int(mileage_km * (1 - mileage_pct))
     mileage_hi = int(mileage_km * (1 + mileage_pct))
 
+    # Case-insensitive matching on make/model/trim: the enricher captures
+    # vendor casing as-is (HiBid emits "Ford" / "FORD" / "ford" in different
+    # records; LLM normalization is best-effort). A strict ``==`` here means
+    # one mis-cased comp row is invisible to a candidate, silently shrinking
+    # the comp set and forcing INSUFFICIENT verdicts on lots that actually
+    # have data. UPPER() on both sides aligns with how the value-pending-lots
+    # tool's ``requeue`` already matches.
+    make_u = make.upper()
+    model_u = model.upper()
+    trim_u = trim.upper() if trim else None
+
     hs_stmt = select(HistoricalSale).where(
-        HistoricalSale.make == make,
-        HistoricalSale.model == model,
+        func.upper(HistoricalSale.make) == make_u,
+        func.upper(HistoricalSale.model) == model_u,
         HistoricalSale.year.between(year - year_window, year + year_window),
         HistoricalSale.mileage_km.between(mileage_lo, mileage_hi),
     )
-    if trim:
+    if trim_u:
         hs_stmt = hs_stmt.where(
-            or_(HistoricalSale.trim == trim, HistoricalSale.trim.is_(None)),
+            or_(
+                func.upper(HistoricalSale.trim) == trim_u,
+                HistoricalSale.trim.is_(None),
+            ),
         )
     hs_rows = (await session.execute(hs_stmt)).scalars().all()
 
     cutoff = datetime.now(UTC) - timedelta(days=RECENT_AUCTION_LOTS_DAYS)
     al_stmt = select(AuctionLot).where(
-        AuctionLot.make == make,
-        AuctionLot.model == model,
+        func.upper(AuctionLot.make) == make_u,
+        func.upper(AuctionLot.model) == model_u,
         AuctionLot.year.between(year - year_window, year + year_window),
         AuctionLot.mileage_km.between(mileage_lo, mileage_hi),
-        AuctionLot.lot_status == "closed",
+        AuctionLot.lot_status.in_(_COMP_ELIGIBLE_STATUSES),
         AuctionLot.closed_at >= cutoff,
         AuctionLot.final_bid_cad.is_not(None),
     )
-    if trim:
+    if trim_u:
         al_stmt = al_stmt.where(
-            or_(AuctionLot.trim == trim, AuctionLot.trim.is_(None)),
+            or_(
+                func.upper(AuctionLot.trim) == trim_u,
+                AuctionLot.trim.is_(None),
+            ),
         )
     al_rows = (await session.execute(al_stmt)).scalars().all()
 

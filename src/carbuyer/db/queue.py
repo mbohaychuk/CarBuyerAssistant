@@ -105,6 +105,42 @@ async def claim_pending_lots(
     return lots
 
 
+async def recover_orphans(
+    session: AsyncSession,
+    *,
+    status_field: ClaimableStatusField,
+) -> int:
+    """Flip IN_PROGRESS rows back to PENDING and return the count.
+
+    Phase 13: called from each worker's catchup-sweep before entering LISTEN.
+    Workers are single-instance (Phase 7 overlay #12), so any IN_PROGRESS row
+    in this worker's status column at startup must be from a prior crash
+    between the claim and the terminal status write. Recovery is unconditional
+    (no age threshold) because at startup time there is, by construction, no
+    other claimer holding the row.
+
+    Safe even if a prior watchdog flips concurrently: SKIP LOCKED in
+    claim_pending_ids ensures the next claim's atomicity, and the UPDATE
+    here is idempotent.
+    """
+    column = getattr(AuctionLot, status_field)
+    in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
+    pending_by_field: dict[ClaimableStatusField, str] = {
+        "enrichment_status": EnrichmentStatus.PENDING,
+        "valuation_status": ValuationStatus.PENDING,
+        "vision_status": VisionStatus.PENDING,
+        "notification_status": NotificationStatus.PENDING,
+    }
+    stmt = (
+        update(AuctionLot)
+        .where(column == in_progress_value)
+        .values({status_field: pending_by_field[status_field]})
+    )
+    result = await session.execute(stmt)
+    # CursorResult.rowcount is int on UPDATE under psycopg.
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 async def select_pending_ids(
     session: AsyncSession,
     *,

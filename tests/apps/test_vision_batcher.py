@@ -508,6 +508,99 @@ async def test_process_one_pessimistic_update_high_confidence_large_diff(
 
 
 @pytest.mark.asyncio
+async def test_process_one_no_override_when_vision_sees_better_than_description(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 8 overlay #23 / Phase 13 fix: bucket-diff is absolute, override
+    must be one-sided. Vision seeing the lot as BETTER than the description
+    (e.g. desc=poor, vision=great, confidence=0.85) must NOT flip
+    condition_categorical down, NOT fire description_oversells_condition, NOT
+    reset valuation_status, NOT emit NOTIFY.
+    """
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        condition_categorical="poor",
+        photos=["https://x/p1.jpg"],
+    )
+    lot.valuation_status = ValuationStatus.DONE
+    session.add(lot)
+    await session.flush()
+
+    # bucket-diff = 3, confidence above threshold — but vision_rank > desc_rank.
+    out = _make_vision_output(overall="great", confidence=0.85)
+
+    monkeypatch.setattr(
+        batcher_mod,
+        "download_and_resize",
+        AsyncMock(return_value=["/tmp/fake.jpg"]),
+    )
+    provider = MagicMock()
+    provider.vision = AsyncMock(return_value=out)
+
+    notified: list[tuple[str, str]] = []
+
+    async def fake_notify(_s: object, channel: str, payload: str) -> None:
+        notified.append((channel, payload))
+
+    monkeypatch.setattr(batcher_mod, "notify", fake_notify)
+
+    outcome = await _process_one(lot.id, provider=provider)
+    assert outcome == "done"
+    await session.refresh(lot)
+
+    # No downward flip; no synthetic flag; no rescore trigger.
+    assert lot.condition_categorical == "poor"
+    assert lot.valuation_status == ValuationStatus.DONE
+    flag_names = [f["flag"] for f in (lot.red_flags or [])]
+    assert "description_oversells_condition" not in flag_names
+    assert notified == []
+
+
+@pytest.mark.asyncio
+async def test_process_one_pessimistic_override_is_idempotent(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A content rescrape can reset vision_status=PENDING, re-running vision on
+    a lot that already has description_oversells_condition. The synthetic flag
+    must not duplicate; red_flags would otherwise accumulate copies."""
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        condition_categorical="good",
+        photos=["https://x/p1.jpg"],
+    )
+    # Lot already carries the synthetic flag from a prior nightly run.
+    lot.red_flags = [
+        {"flag": "description_oversells_condition", "evidence": "old", "weight": -2}
+    ]
+    lot.valuation_status = ValuationStatus.DONE
+    session.add(lot)
+    await session.flush()
+
+    out = _make_vision_output(
+        overall="bad", confidence=0.85, contradictions=["new evidence"],
+    )
+
+    monkeypatch.setattr(
+        batcher_mod,
+        "download_and_resize",
+        AsyncMock(return_value=["/tmp/fake.jpg"]),
+    )
+    provider = MagicMock()
+    provider.vision = AsyncMock(return_value=out)
+    monkeypatch.setattr(batcher_mod, "notify", AsyncMock())
+
+    await _process_one(lot.id, provider=provider)
+    await session.refresh(lot)
+
+    flag_names = [f["flag"] for f in lot.red_flags]
+    assert flag_names.count("description_oversells_condition") == 1
+
+
+@pytest.mark.asyncio
 async def test_process_one_no_pessimistic_update_when_diff_too_small(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

@@ -40,7 +40,8 @@ import asyncio
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+import httpx
+from sqlalchemy import func, select
 
 from carbuyer.apps.bid_poller.scheduler import next_poll_delay
 from carbuyer.db.enums import LotStatus, ValuationStatus
@@ -48,16 +49,14 @@ from carbuyer.db.models import Auction, AuctionBidHistory, AuctionLot
 from carbuyer.db.notify import notify
 from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES, BidObservation, BidPoller, LotRef
-from carbuyer.sources.farmauctionguide.source import (
-    FarmAuctionGuideSource as _FagSource,  # registers plugin
-)
 from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # registers plugin
 from carbuyer.sources.mcdougall.source import (
     McDougallSource as _McDougallSource,  # registers plugin
 )
 
-_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name, _FagSource.name)
+_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name)
 
 log = get_logger("bid_poller")
 
@@ -66,6 +65,16 @@ _FAST_BUCKET_CUTOFF_SECONDS = 300
 _FAST_BUCKET_CAP = 20
 _SLOW_BUCKET_CAP = 50
 _CYCLE_SLEEP_SECONDS = 30
+# Hard cap on how long a lot can keep its OPEN/CLOSING_SOON/EXTENDED status past
+# its scheduled end. Beyond this the source is unreachable or buggy; better to
+# stop spending fast-bucket slots on it than to poll forever every 30s. Phase 7
+# overlay #16's "scaling cliff" eats this without the guard.
+_MAX_OPEN_PAST_END_SECONDS = 24 * 3600
+# Clock-skew ceiling: a gap larger than this means either the source pushed
+# bogus end times or our clock has drifted. Force-closing on bad time data could
+# wipe legitimate live auctions, so we refuse to act and let the warning surface
+# in the journal for operator investigation.
+_MAX_FORCE_CLOSE_AGE_SECONDS = 7 * 24 * 3600
 
 
 def _build_pollers() -> dict[str, BidPoller]:
@@ -88,6 +97,13 @@ async def _load_open_lot_refs(
     transaction closes before any HTTP I/O.
     """
     async with get_session() as s, s.begin():
+        # "Effective end time" coalesces auction-level then lot-level. HiBid
+        # populates auction.scheduled_end_at; McDougall leaves that NULL and
+        # carries per-lot end times in lot.scheduled_end_at. Sorting by the
+        # coalesced value keeps the priority queue correct across sources.
+        effective_end = func.coalesce(
+            Auction.scheduled_end_at, AuctionLot.scheduled_end_at,
+        )
         stmt = (
             select(AuctionLot, Auction)
             .join(Auction, Auction.id == AuctionLot.auction_id)
@@ -98,9 +114,9 @@ async def _load_open_lot_refs(
                         LotStatus.CLOSING_SOON,
                         LotStatus.EXTENDED,
                     ]
-                )
+                ),
             )
-            .order_by(Auction.scheduled_end_at.asc().nulls_last())
+            .order_by(effective_end.asc().nulls_last())
             .limit(_BATCH_LIMIT)
         )
         rows = (await s.execute(stmt)).all()
@@ -109,8 +125,54 @@ async def _load_open_lot_refs(
         slow: list[tuple[int, LotRef]] = []
 
         for lot, auction in rows:
+            # Drop lots stuck OPEN/CLOSING_SOON/EXTENDED far past their
+            # scheduled end. The source's poll_bid should have returned
+            # "missing" or "closed" by now; if it hasn't (404 raised before
+            # the missing branch, source returning bogus data, etc.) we'd
+            # poll forever at 30s. Flip to FORCE_CLOSED out-of-band so the
+            # next claim_pending_ids snapshot excludes it.
+            #
+            # Two thresholds bracket the action:
+            #   gap > _MAX_OPEN_PAST_END_SECONDS (24h)   → force-close
+            #   gap > _MAX_FORCE_CLOSE_AGE_SECONDS (7d)  → skip + warn
+            # The ceiling protects against clock drift wiping a whole batch
+            # of live auctions if NTP misbehaves.
+            # Use the same coalesce as the priority query above so per-lot
+            # end times (McDougall) drive the staleness check correctly.
+            end = auction.scheduled_end_at or lot.scheduled_end_at
+            if end is not None:
+                age = (now - end).total_seconds()
+                if age > _MAX_FORCE_CLOSE_AGE_SECONDS:
+                    log.error(
+                        "lot age exceeds clock-skew ceiling; refusing"
+                        " to force-close (clock or source data suspect)",
+                        lot_id=lot.id,
+                        source=auction.source,
+                        scheduled_end_at=end.isoformat(),
+                        age_days=age / 86400,
+                    )
+                    continue
+                if age > _MAX_OPEN_PAST_END_SECONDS:
+                    log.warning(
+                        "lot stale past end; force-closing",
+                        lot_id=lot.id,
+                        source=auction.source,
+                        scheduled_end_at=end.isoformat(),
+                        age_hours=age / 3600,
+                    )
+                    lot.lot_status = LotStatus.FORCE_CLOSED
+                    lot.closed_at = now
+                    lot.final_bid_cad = lot.current_high_bid_cad
+                    continue
+            # HiBid's eventItemIds filter needs the per-listing row id
+            # (source_lot_row_id). Skip lots that don't have it yet — the
+            # next ingest populates them. We still run the force-close
+            # check above (no source-side I/O needed for that path), just
+            # skip the actual polling.
+            if auction.source == "hibid" and lot.source_lot_row_id is None:
+                continue
             delay = next_poll_delay(
-                scheduled_end=auction.scheduled_end_at,
+                scheduled_end=end,
                 now=now,
                 status=lot.lot_status,
             )
@@ -119,6 +181,7 @@ async def _load_open_lot_refs(
                 source_auction_id=auction.source_auction_id,
                 source_lot_id=lot.source_lot_id,
                 url=lot.url,
+                source_lot_row_id=lot.source_lot_row_id,
             )
             if delay.total_seconds() <= _FAST_BUCKET_CUTOFF_SECONDS:
                 fast.append((lot.id, ref))
@@ -193,10 +256,32 @@ async def _poll_one(
     """Poll one lot: HTTP call outside any transaction, then write in a fresh tx."""
     poller = pollers.get(ref.source)
     if poller is None:
+        # Lot exists in the DB but its source has no registered BidPoller.
+        # Today this shouldn't happen -- FAG-routed unknown:* auctions never
+        # get lots, and every fetcher plugin is a BidPoller. If we ever add
+        # a listing-only source (no poll capability) this branch keeps the
+        # worker quiet AND surfaces the lots in journalctl for triage.
+        log.warning(
+            "no bid_poller registered for lot source; skipping",
+            lot_id=lot_id, source=ref.source,
+        )
         return
 
     try:
         obs = await poller.poll_bid(ref)
+    except httpx.HTTPStatusError as exc:
+        # Review fix #4: surface the upstream status code + Retry-After header
+        # so ops can spot WAF rejections / 5xx outages in the journal. Without
+        # this, every upstream error logs as a generic "poll_bid failed" and
+        # an operator has no way to know the lots are being WAF-blocked.
+        log.warning(
+            "poll_bid http error",
+            lot_id=lot_id,
+            status_code=exc.response.status_code,
+            retry_after=exc.response.headers.get("Retry-After"),
+            url=ref.url,
+        )
+        return
     except Exception:
         log.exception("poll_bid failed", lot_id=lot_id)
         return
@@ -216,46 +301,50 @@ async def main() -> None:
         if name not in SOURCES:
             raise RuntimeError(f"plugin {name!r} failed to self-register at import")
 
+    lock_conn = await acquire_singleton_lock("bid_poller")
     pollers = _build_pollers()
-    async with AsyncExitStack() as stack:
-        for p in pollers.values():
-            await stack.enter_async_context(p)
+    try:
+        async with AsyncExitStack() as stack:
+            for p in pollers.values():
+                await stack.enter_async_context(p)
 
-        while True:
-            now = datetime.now(UTC)
-            fast, slow = await _load_open_lot_refs(now)
+            while True:
+                now = datetime.now(UTC)
+                fast, slow = await _load_open_lot_refs(now)
 
-            if len(fast) > _FAST_BUCKET_CAP:
-                log.warning(
-                    "fast bucket capped",
-                    total=len(fast),
-                    cap=_FAST_BUCKET_CAP,
+                if len(fast) > _FAST_BUCKET_CAP:
+                    log.warning(
+                        "fast bucket capped",
+                        total=len(fast),
+                        cap=_FAST_BUCKET_CAP,
+                    )
+                if len(slow) > _SLOW_BUCKET_CAP:
+                    log.warning(
+                        "slow bucket capped",
+                        total=len(slow),
+                        cap=_SLOW_BUCKET_CAP,
+                    )
+
+                # Defensive try/except mirrors enricher/valuator/notifier —
+                # without it any unhandled exception (DB blip, NOTIFY failure,
+                # ...) would propagate out of `while True` and exit the worker.
+                for lot_id, ref in fast[:_FAST_BUCKET_CAP]:
+                    try:
+                        await _poll_one(lot_id, ref, pollers=pollers)
+                    except Exception:
+                        log.exception("poll_one unhandled", lot_id=lot_id)
+
+                for lot_id, ref in slow[:_SLOW_BUCKET_CAP]:
+                    try:
+                        await _poll_one(lot_id, ref, pollers=pollers)
+                    except Exception:
+                        log.exception("poll_one unhandled", lot_id=lot_id)
+
+                log.info(
+                    "cycle complete",
+                    fast=min(len(fast), _FAST_BUCKET_CAP),
+                    slow=min(len(slow), _SLOW_BUCKET_CAP),
                 )
-            if len(slow) > _SLOW_BUCKET_CAP:
-                log.warning(
-                    "slow bucket capped",
-                    total=len(slow),
-                    cap=_SLOW_BUCKET_CAP,
-                )
-
-            # Defensive try/except mirrors enricher/valuator/notifier — without it
-            # any unhandled exception (DB blip, NOTIFY failure, ...) would
-            # propagate out of `while True` and exit the worker process.
-            for lot_id, ref in fast[:_FAST_BUCKET_CAP]:
-                try:
-                    await _poll_one(lot_id, ref, pollers=pollers)
-                except Exception:
-                    log.exception("poll_one unhandled", lot_id=lot_id)
-
-            for lot_id, ref in slow[:_SLOW_BUCKET_CAP]:
-                try:
-                    await _poll_one(lot_id, ref, pollers=pollers)
-                except Exception:
-                    log.exception("poll_one unhandled", lot_id=lot_id)
-
-            log.info(
-                "cycle complete",
-                fast=min(len(fast), _FAST_BUCKET_CAP),
-                slow=min(len(slow), _SLOW_BUCKET_CAP),
-            )
-            await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
+                await asyncio.sleep(_CYCLE_SLEEP_SECONDS)
+    finally:
+        await lock_conn.close()

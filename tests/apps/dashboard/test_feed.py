@@ -240,3 +240,54 @@ async def test_feed_includes_not_interested_when_disabled(_patch_deps: AsyncSess
         r = await client.get("/?exclude_not_interested=false")
     assert r.status_code == 200  # noqa: PLR2004
     assert "DROP" in r.text
+
+
+# ─── score-blend ordering (Phase 13 H8) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_feed_orders_by_score_blend_desc(_patch_deps: AsyncSession) -> None:
+    """Spec §6: rank by 0.5 × rarity + 0.5 × price_deal. Highest blend first.
+    Three lots: BEST (rarity=4, price=0.5 -> 2.25), MID (rarity=2, price=0.2 -> 1.1),
+    WORST (rarity=0, price=0). Worst by id should be NEWEST tie-breaker (id desc).
+    """
+    session = _patch_deps
+    a = _seed_auction(session, source_id="A1", province="AB")
+    _seed_lot(session, a, source_lot_id="WORST", price_deal_score=0.0, rarity_score=0.0)
+    _seed_lot(session, a, source_lot_id="MID", price_deal_score=0.2, rarity_score=2.0)
+    _seed_lot(session, a, source_lot_id="BEST", price_deal_score=0.5, rarity_score=4.0)
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/")
+    body = r.text
+    assert body.index("BEST") < body.index("MID") < body.index("WORST")
+
+
+@pytest.mark.asyncio
+async def test_feed_composite_cursor_walks_scored_lots(_patch_deps: AsyncSession) -> None:
+    """Composite cursor (blended_score, id) preserves order across pages."""
+    session = _patch_deps
+    a = _seed_auction(session, source_id="A1", province="AB")
+    _seed_lot(session, a, source_lot_id="BEST", price_deal_score=0.5, rarity_score=4.0)
+    _seed_lot(session, a, source_lot_id="MID", price_deal_score=0.2, rarity_score=2.0)
+    _seed_lot(session, a, source_lot_id="WORST", price_deal_score=0.0, rarity_score=0.0)
+    await session.commit()
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from carbuyer.db.models import AuctionLot  # noqa: PLC0415
+    mid_id = (await session.execute(
+        select(AuctionLot.id).where(AuctionLot.source_lot_id == "MID"),
+    )).scalar_one()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # MID's blend = 0.5*0.2 + 0.5*2.0 = 1.1. Page after MID.
+        r = await client.get(f"/?cursor={mid_id}&cursor_score=1.1&limit=2")
+    assert r.status_code == 200  # noqa: PLR2004
+    body = r.text
+    assert "BEST" not in body
+    assert "MID" not in body
+    assert "WORST" in body

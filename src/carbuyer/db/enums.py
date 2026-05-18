@@ -39,6 +39,10 @@ class NotificationStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     DONE = "done"
     SKIPPED = "skipped"
+    # Phase 13: all posts failed and attempts exceeded
+    # settings.notification_max_attempts. Mirrors EnrichmentStatus.FAILED so
+    # ops can grep for stuck notifications via a single status value.
+    FAILED = "failed"
 
 
 class LotStatus(StrEnum):
@@ -48,6 +52,11 @@ class LotStatus(StrEnum):
     CLOSED = "closed"
     UNSOLD = "unsold"
     SOLD = "sold"
+    # Phase 13 review fix #3: bid-poller force-closed this lot because its
+    # scheduled_end was >24h in the past with the source still returning
+    # OPEN — distinct from CLOSED so an operator can grep for these and
+    # re-open if the cause was a temporary source outage.
+    FORCE_CLOSED = "force_closed"
 
 
 class AuctionStatus(StrEnum):

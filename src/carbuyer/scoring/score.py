@@ -15,6 +15,29 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from carbuyer.flags.taxonomy import GREEN_FLAG_TAXONOMY, RED_FLAG_TAXONOMY
+from carbuyer.shared.logging import get_logger
+
+_log = get_logger("scoring.score")
+
+# Authoritative flag→weight map built from the taxonomy at module load. The
+# enricher's prompt instructs the LLM to copy weights verbatim, but a
+# hallucinated -5 on a -1 flag (or any drift between schema and prompt) would
+# silently pull lots past the excessive_red_flag_weight cutoff. Look up at
+# score time and ignore whatever weight the LLM put in the JSON blob.
+#
+# `description_oversells_condition` is a vision-pass synthetic flag that
+# intentionally lives outside the description taxonomy (Phase 8 overlay #18);
+# its -2 weight is pinned here so flag_score still scores it.
+_SYNTHETIC_FLAG_WEIGHTS: dict[str, int] = {
+    "description_oversells_condition": -2,
+}
+FLAG_WEIGHT_LOOKUP: dict[str, int] = {
+    **{f["flag"]: f["weight"] for f in RED_FLAG_TAXONOMY},
+    **{f["flag"]: f["weight"] for f in GREEN_FLAG_TAXONOMY},
+    **_SYNTHETIC_FLAG_WEIGHTS,
+}
+
 # Phase 4 overlay #11 constants. When more than this many magnitude-1 RED
 # flags fire, their cumulative contribution is capped at LIGHT_RED_DILUTION_CAP
 # so a typical "out_of_province + winter_tires_only + mileage_unknown +
@@ -49,6 +72,22 @@ class RarityInputs:
     recent_appreciation: float | None
 
 
+def _premium_amount(
+    bid: Decimal,
+    pct: Decimal,
+    cap: Decimal | None,
+    floor: Decimal | None,
+) -> Decimal:
+    """Linear premium clamped against optional cap/floor. Both None gives the
+    prior unconstrained behaviour."""
+    premium = bid * pct
+    if cap is not None and premium > cap:
+        premium = cap
+    if floor is not None and premium < floor:
+        premium = floor
+    return premium
+
+
 def all_in_cost(
     *,
     current_high_bid: Decimal,
@@ -56,12 +95,21 @@ def all_in_cost(
     gst_pct: Decimal,
     pst_pct: Decimal,
     landed_cost_premium: Decimal,
+    buyer_premium_max_cad: Decimal | None = None,
+    buyer_premium_min_cad: Decimal | None = None,
 ) -> Decimal:
-    """bid * (1+BP) * (1+GST+PST) + landed cost. Caller controls all rates."""
-    bp_factor = Decimal("1") + buyer_premium_pct
+    """(bid + clamp(bid*BP, min, max)) * (1+GST+PST) + landed.
+
+    With both cap/floor None this collapses to ``bid * (1+BP) * (1+GST+PST) +
+    landed`` — the prior formula. McDougall ("15% to Max $2000 Min $20") sets
+    both; HiBid leaves both None.
+    """
+    premium = _premium_amount(
+        current_high_bid, buyer_premium_pct,
+        buyer_premium_max_cad, buyer_premium_min_cad,
+    )
     tax_factor = Decimal("1") + gst_pct + pst_pct
-    bid_with_premium = current_high_bid * bp_factor * tax_factor
-    return bid_with_premium + landed_cost_premium
+    return (current_high_bid + premium) * tax_factor + landed_cost_premium
 
 
 def price_deal_score(
@@ -72,6 +120,8 @@ def price_deal_score(
     pst_pct: Decimal,
     landed_cost_premium: Decimal,
     expected_value: Decimal,
+    buyer_premium_max_cad: Decimal | None = None,
+    buyer_premium_min_cad: Decimal | None = None,
 ) -> float:
     """(expected_value - all_in) / expected_value. Returns 0.0 when the
     expected value is non-positive — that means insufficient comps and we
@@ -84,6 +134,8 @@ def price_deal_score(
         gst_pct=gst_pct,
         pst_pct=pst_pct,
         landed_cost_premium=landed_cost_premium,
+        buyer_premium_max_cad=buyer_premium_max_cad,
+        buyer_premium_min_cad=buyer_premium_min_cad,
     )
     return float((expected_value - total) / expected_value)
 
@@ -119,20 +171,59 @@ def recommended_max_bid(
     pst_pct: Decimal,
     landed_cost_premium: Decimal,
     flip_margin: Decimal,
+    buyer_premium_max_cad: Decimal | None = None,
+    buyer_premium_min_cad: Decimal | None = None,
 ) -> Decimal | None:
-    """Inverse of all_in_cost — the bid that would land the lot at
-    ``expected_value - flip_margin``. Returns None when the math goes
-    non-positive (margin >= value, or BP/tax/landed eat the whole thing)."""
+    """Piecewise inverse of all_in_cost — the bid that lands the lot at
+    ``expected_value - flip_margin``. With both cap/floor None this matches
+    the prior linear formula.
+
+    Three regimes — the regime is decided by checking whether the linear
+    candidate's implied premium would violate either bound. The premium is
+    pinned to the violated bound and the bid is back-solved against it.
+    Returns None when the math goes non-positive at any step.
+    """
     target_all_in = expected_value - flip_margin
     if target_all_in <= 0:
         return None
-    bp_tax = (Decimal("1") + buyer_premium_pct) * (Decimal("1") + gst_pct + pst_pct)
-    bid = (target_all_in - landed_cost_premium) / bp_tax
+    tax_factor = Decimal("1") + gst_pct + pst_pct
+    # bid + premium == bid_plus_premium_target after stripping tax+landed.
+    bid_plus_premium_target = (target_all_in - landed_cost_premium) / tax_factor
+    if bid_plus_premium_target <= 0:
+        return None
+
+    # Linear candidate: bid * (1+pct) = target → bid = target / (1+pct).
+    linear_bid = bid_plus_premium_target / (Decimal("1") + buyer_premium_pct)
+    linear_premium = linear_bid * buyer_premium_pct
+
+    if buyer_premium_max_cad is not None and linear_premium > buyer_premium_max_cad:
+        # Capped regime: premium pinned to cap → bid = target - cap.
+        bid = bid_plus_premium_target - buyer_premium_max_cad
+    elif buyer_premium_min_cad is not None and linear_premium < buyer_premium_min_cad:
+        # Floored regime: premium pinned to floor → bid = target - floor.
+        bid = bid_plus_premium_target - buyer_premium_min_cad
+    else:
+        bid = linear_bid
+
     return bid if bid > 0 else None
 
 
 def _weight(f: dict[str, Any]) -> int:
-    return int(f.get("weight", 0))
+    """Authoritative weight from the taxonomy, not from the LLM blob.
+
+    Unknown flag names fall back to 0 with a log line so a typo or drift
+    surfaces without taking the score down. The LLM's `f["weight"]` field is
+    ignored — see FLAG_WEIGHT_LOOKUP module docstring.
+    """
+    flag_name = f.get("flag", "")
+    if flag_name in FLAG_WEIGHT_LOOKUP:
+        return FLAG_WEIGHT_LOOKUP[flag_name]
+    _log.warning(
+        "unknown flag at scoring time; weight=0",
+        flag=flag_name,
+        llm_weight=f.get("weight"),
+    )
+    return 0
 
 
 def _sum_weights(flags: Iterable[dict[str, Any]]) -> int:

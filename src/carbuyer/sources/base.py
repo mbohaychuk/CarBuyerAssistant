@@ -27,6 +27,10 @@ class LotRef:
     source_auction_id: str
     source_lot_id: str
     url: str
+    # HiBid-specific: the per-listing row id used by HiBid's eventItemIds
+    # filter. Other sources leave this None. See db.models.AuctionLot's
+    # source_lot_row_id column for the full rationale.
+    source_lot_row_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -42,6 +46,9 @@ class RawAuction:
     pickup_city: str | None
     pickup_province: str | None
     pickup_window_text: str | None
+    # Linear premium percent. Cap/floor live at end-of-class (see
+    # buyer_premium_max_cad / buyer_premium_min_cad) because dataclass
+    # ordering forbids defaulted fields before non-defaulted ones.
     buyer_premium_pct: Decimal | None
     online_bidding_fee_pct: Decimal | None
     terms_text: str | None
@@ -49,6 +56,11 @@ class RawAuction:
     # Source-specific fields that don't yet warrant a canonical column.
     # Promote to a real field once 2+ sources surface the same key.
     extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+    # Premium-amount cap/floor; NULL = unconstrained (HiBid). McDougall sets
+    # max=2000 min=20 ("15% to a Max $2000, Min $20"). Clamped against the
+    # linear `bid * buyer_premium_pct` in scoring.score.all_in_cost.
+    buyer_premium_max_cad: Decimal | None = None
+    buyer_premium_min_cad: Decimal | None = None
 
 
 @dataclass(slots=True)
@@ -58,6 +70,9 @@ class RawLot:
     title: str | None
     description: str | None
     photos: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    # See LotRef.source_lot_row_id. Plumbed through so the upsert helper
+    # populates AuctionLot.source_lot_row_id without going through ref.
+    source_lot_row_id: int | None = None
     year: int | None = None
     make: str | None = None
     model: str | None = None
@@ -163,9 +178,9 @@ class AuctionSource(AuctionDiscoverer, AuctionFetcher, BidPoller):
 
 
 # ── Registry ────────────────────────────────────────────────────────────────
-# Plugins call `register(self)` at module import time; the lot-scraper /
-# discoverer / dashboard read SOURCES to enumerate covered platforms (used by
-# the Phase-10 "needs-plugin" alerting and the dashboard health view).
+# Plugins call `register(self)` at module import time; the ingester / dashboard
+# read SOURCES to enumerate covered platforms (used by the "needs-plugin"
+# alerting and the dashboard health view).
 
 SOURCES: dict[str, Source] = {}
 

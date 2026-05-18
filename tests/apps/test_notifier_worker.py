@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -164,15 +164,13 @@ async def test_process_one_fires_going_cheap(
 
 
 @pytest.mark.asyncio
-async def test_process_one_post_failure_still_marks_done(
+async def test_process_one_post_failure_keeps_pending_and_increments_attempts(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When post_message returns False, status goes to DONE but no timestamp set.
-
-    We don't retry notification posts — the lot has been evaluated and the
-    status moves to DONE so it won't be reclaimed. A missed post is logged
-    but not a retryable failure.
+    """Phase 13 C2: when every post_message returns False (Discord blip),
+    status returns to PENDING with notification_attempts incremented. Locks
+    in the fix for 'lot looked DONE in the DB but no Discord message landed'.
     """
     session = _patched_get_session
     _, lot = _seed_lot(
@@ -198,24 +196,64 @@ async def test_process_one_post_failure_still_marks_done(
 
     http = MagicMock()
     outcome = await _process_one(lot.id, http_session=http)
-    assert outcome == "done"
+    assert outcome == "transient"
 
     await session.refresh(lot)
-    assert lot.notification_status == NotificationStatus.DONE
-    # No timestamp set because the post failed.
-    assert lot.cheap_notified_at is None
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 1
+    assert lot.last_notification_error is not None
+    assert lot.cheap_notified_at is None  # no stamp on failure
 
 
 @pytest.mark.asyncio
-async def test_process_one_unconfigured_channel_skips_post(
+async def test_process_one_post_failure_flips_failed_at_max_attempts(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When settings.discord_channels is empty, triggers fire but no post is made.
+    """After settings.notification_max_attempts unsuccessful attempts, the
+    lot stops re-queueing and lands FAILED for ops to investigate."""
+    from carbuyer.shared.config import settings as cfg
 
-    Status goes to DONE (triggers were evaluated), no timestamp stamped,
-    no post_message called.
-    """
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.30,
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        notification_status="in_progress",
+    )
+    # Simulate cfg.notification_max_attempts - 1 prior failed attempts.
+    lot.notification_attempts = cfg.notification_max_attempts - 1
+    await session.flush()
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "failed"
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.FAILED
+    assert lot.notification_attempts == cfg.notification_max_attempts
+
+
+@pytest.mark.asyncio
+async def test_process_one_unconfigured_channel_marks_skipped(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every trigger lands on a missing channel — ops config gap, retrying
+    won't help. SKIPPED with last_notification_error recorded."""
     session = _patched_get_session
     _, lot = _seed_lot(
         session,
@@ -242,12 +280,61 @@ async def test_process_one_unconfigured_channel_skips_post(
 
     http = MagicMock()
     outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "skipped"
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.SKIPPED
+    assert lot.last_notification_error is not None
+    assert not posted_calls
+    # Phase 13 review fix #2: no-channel SKIPPED isn't a delivery failure, so
+    # the retry counter must not be polluted. Otherwise if ops fixes the
+    # channel config and re-queues the lot, it starts closer to FAILED.
+    assert lot.notification_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_process_one_partial_success_marks_done(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two triggers, first succeeds, second fails. Outcome is DONE — at least
+    one message landed, so the lot is notified. Phase 13 contract: 'done'
+    means user got SOMETHING about this lot, not 'every trigger succeeded'."""
+    session = _patched_get_session
+    far_end = datetime(2026, 6, 10, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        rarity_score=3.0,  # early_warning fires
+        price_deal_score=0.30,  # going_cheap also fires
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        early_warning_notified_at=None,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    call_count = {"n": 0}
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        call_count["n"] += 1
+        return call_count["n"] == 1  # first succeeds, rest fail
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"early_warning": 1, "hot_deals": 2, "watchlist": 3},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
     assert outcome == "done"
 
     await session.refresh(lot)
     assert lot.notification_status == NotificationStatus.DONE
-    assert lot.cheap_notified_at is None
-    assert not posted_calls
 
 
 @pytest.mark.asyncio
@@ -490,3 +577,267 @@ async def test_embed_data_green_flags_fallback_when_desirability_signals_empty(
 
     data = _embed_data(lot, auction)
     assert data.top_green_flags == ("sport-tuned suspension",)
+
+
+# ─── quiet hours (Phase 13 H7) ─────────────────────────────────────────────
+
+
+def test_in_quiet_hours_wraparound_window() -> None:
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+
+    # Window 22..08 (wraparound at midnight)
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=22), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=23), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=2), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=7), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=8), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=12), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=21), 22, 8) is False
+
+
+def test_in_quiet_hours_non_wraparound() -> None:
+    """Window 9..17 (intuitive non-midnight-crossing case): inclusive start,
+    exclusive end."""
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=9), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=16), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=17), 9, 17) is False
+    assert _in_quiet_hours(base.replace(hour=8), 9, 17) is False
+
+
+@pytest.mark.asyncio
+async def test_process_one_defers_during_quiet_hours_for_low_score_going_cheap(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §6e: a going_cheap with price_deal_score below
+    quiet_hours_override_score is suppressed until morning. Outcome =
+    'deferred', status stays PENDING, attempts NOT incremented."""
+    from carbuyer.apps.notifier import notifier as notifier_mod_local
+
+    session = _patched_get_session
+    # Far-out scheduled_end so closing-T-1h doesn't override.
+    far_end = datetime(2099, 1, 1, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.20,  # >= notify_threshold 0.15, < override 0.30
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    # Force "in quiet hours" regardless of current wall-clock.
+    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+
+    posted: list[object] = []
+
+    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "deferred"
+    assert not posted
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 0  # NOT incremented — deferral isn't failure
+
+
+@pytest.mark.asyncio
+async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """price_deal_score >= quiet_hours_override_score (0.30) overrides quiet
+    hours — the post fires immediately."""
+    from carbuyer.apps.notifier import notifier as notifier_mod_local
+
+    session = _patched_get_session
+    far_end = datetime(2099, 1, 1, tzinfo=UTC)
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.40,  # >= override threshold
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+
+    posted: list[object] = []
+
+    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "done"
+    assert posted  # post DID fire
+
+
+# ─── Phase 13 review: missing-import + uncovered-path regression ────────────
+
+
+def test_notifier_module_imports_runtime_names() -> None:
+    """Both `notify` and `recover_orphans` are referenced inside async
+    functions that earlier tests never reached. Python's lazy name resolution
+    let them slip through. This module-level attr check is the cheapest gate
+    against a recurrence — fails at test-discovery if either import is
+    deleted in a future refactor.
+    """
+    from carbuyer.apps.notifier import notifier as nm  # noqa: PLC0415
+
+    assert callable(nm.notify), "notifier.py must import `notify`"
+    assert callable(nm.recover_orphans), "notifier.py must import `recover_orphans`"
+
+
+@pytest.mark.asyncio
+async def test_process_pending_self_notifies_on_transient_failure(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When at least one lot ends `transient`, process_pending must reach the
+    self-NOTIFY branch without raising. Historically a NameError lurked there
+    because tests only seeded successful posts. The mere absence of an
+    exception here is the regression signal — see the smoke test above for
+    why we can't monkey-track `notify` directly without masking the bug.
+    """
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.30,  # going_cheap fires
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        notification_status="pending",
+    )
+    await session.flush()
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        return False  # every post fails → transient → self-NOTIFY branch
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    count = await process_pending(http_session=http)
+    assert count == 1
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_catchup_sweep_recovers_orphaned_in_progress(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker crash between SELECT FOR UPDATE SKIP LOCKED and the terminal
+    status write leaves the row stuck IN_PROGRESS. _catchup_sweep must flip
+    these back to PENDING at startup so they're claimable again. Historically
+    `recover_orphans` was called without being imported — this exercises the
+    call site so the NameError can't hide.
+    """
+    from carbuyer.apps.notifier.notifier import (  # noqa: PLC0415
+        _catchup_sweep,
+    )
+
+    session = _patched_get_session
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.05,  # no triggers → SKIPPED post-recovery
+        notification_status="in_progress",  # the orphaned state
+    )
+    await session.flush()
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002},
+    )
+
+    http = MagicMock()
+    await _catchup_sweep(http_session=http)
+
+    await session.refresh(lot)
+    # Recovery + downstream processing both ran; the lot is no longer stuck.
+    assert lot.notification_status != NotificationStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_process_one_quiet_hours_override_fires_closing_in_1h(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lot closing within 1h fires regardless of quiet hours (T-1h spec)."""
+    from carbuyer.apps.notifier import notifier as notifier_mod_local
+
+    session = _patched_get_session
+    soon_end = datetime.now(UTC) + timedelta(minutes=30)
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.20,  # below override
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=soon_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+
+    posted: list[object] = []
+
+    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels",
+        {"hot_deals": 9001, "watchlist": 9002, "auction_closing": 1234},
+    )
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "done"
+    assert posted  # T-1h fires through quiet hours
