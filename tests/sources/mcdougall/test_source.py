@@ -418,6 +418,32 @@ async def test_poll_bid_404_returns_missing() -> None:
     assert obs.end_time_at_observation is None
 
 
+@pytest.mark.asyncio
+async def test_poll_bid_410_returns_missing() -> None:
+    # 410 Gone is RFC-defined permanent removal; same operational meaning as
+    # 404 for our purposes. If McDougall ever switches to (or adds) 410, the
+    # poller must not raise_for_status and burn 30s polling slots until the
+    # 24h force-close guard fires. Mirrors the HiBid 410 dispatch in
+    # commit 24ddef1.
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(410, text="gone")
+
+    async with McDougallSource(_transport=httpx.MockTransport(handler)) as src:
+        ref = LotRef(
+            source="mcdougall",
+            source_auction_id="BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918",
+            source_lot_id="36CEF055-34AB-477E-B0F9-80ACDA6EAA17",
+            url=(
+                "https://www.mcdougallauction.com/products-full-view.php"
+                "?arg=36CEF055-34AB-477E-B0F9-80ACDA6EAA17"
+            ),
+        )
+        obs = await src.poll_bid(ref)
+    assert obs.status_at_observation == "missing"
+    assert obs.current_high_bid_cad is None
+    assert obs.end_time_at_observation is None
+
+
 # ── fetch_lot integration ───────────────────────────────────────────────────
 
 
