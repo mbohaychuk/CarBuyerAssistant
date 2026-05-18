@@ -172,7 +172,7 @@ Pass criteria: ≥1 row each in mcdougall + at least one `unknown:<host>` source
 
 ## Open follow-ups (post this PR)
 
-- **bid_poller doesn't poll McDougall lots.** Production check (2026-05-18) showed `with_bid=0/147` for McDougall vs 76/321 for HiBid. Root cause: `_build_raw_auction` leaves `auctions.scheduled_end_at` NULL because the lot-detail page doesn't expose auction-level dates. `_load_open_lot_refs` orders by `auction.scheduled_end_at ASC NULLS LAST` and caps at 200; HiBid's 321 non-NULL-dated lots fill the batch and McDougall never gets polled. Fix candidates: (a) change poller to use `coalesce(auction.scheduled_end_at, lot.scheduled_end_at)` (cleaner — admits that "the lot is what we poll"); (b) accumulate `max(lot.scheduled_end_at)` per-auction-GUID in McDougall's `discover_vehicle_lots` and set it on the auction. Tracked as a separate work item.
+- ~~**bid_poller doesn't poll McDougall lots.**~~ Resolved 2026-05-18 in commit `e496610` (`bid_poller: per-lot scheduled_end_at unblocks McDougall polling`). Fix candidate (a) won: `_load_open_lot_refs` now orders by `coalesce(auction.scheduled_end_at, lot.scheduled_end_at) ASC NULLS LAST`, so McDougall lots — which have NULL at the auction level but non-NULL at the lot level — sort into the same batch as HiBid lots.
 - Per-source poll cadence tuning if rate-limits or stale-data bite.
 - McDougall closed-lot fixture + OPEN→CLOSED detector (commit #7 deferred this; today the bid_poller's force-close-by-scheduled-end guard handles transitions).
 - McDougall live (in-room) auctions if those ever overlap our interest.
