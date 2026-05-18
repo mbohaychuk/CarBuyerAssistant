@@ -14,10 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from carbuyer.apps.auction_discoverer.discoverer import (
-    minimal_raw_auction,
-    upsert_auction,
-)
+from carbuyer.apps.auction_discoverer.discoverer import upsert_auction
 from carbuyer.apps.lot_scraper.scraper import upsert_lot_with_status_cascade
 from carbuyer.db.notify import notify
 from carbuyer.db.session import get_session
@@ -25,7 +22,6 @@ from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES
-from carbuyer.sources.farmauctionguide.source import FarmAuctionGuideSource
 from carbuyer.sources.hibid.source import HibidSource
 from carbuyer.sources.mcdougall.source import McDougallSource
 
@@ -107,52 +103,23 @@ async def _run_mcdougall_lot_first() -> int:
     return count
 
 
-async def _run_fag_router() -> int:
-    """Strategy: walk farmauctionguide.com province pages; upsert auction
-    rows for every routed ref. **No lots scraped here**.
-
-    For "hibid"/"mcdougall" refs the auction row already exists (or will be
-    written by the per-platform lot-first strategies) -- this is a metadata
-    refresh, dedup'd via (source, source_auction_id). For "unknown:<host>"
-    refs, the auction row appears in /needs-plugin so the operator can
-    decide whether to write a plugin. The notifier emits a needs_plugin
-    Discord ping on first appearance.
-
-    Total return is the count of UPSERTed rows (creates + dedup-touches).
-    Per-platform counts go into a structured by_platform log line so the
-    operator sees the funnel breakdown without grepping JSON.
-    """
-    fag = SOURCES.get(FarmAuctionGuideSource.name)
-    if not isinstance(fag, FarmAuctionGuideSource):
-        raise RuntimeError("farmauctionguide plugin did not self-register")
-    by_platform: dict[str, int] = {}
-    total = 0
-    async with fag:
-        async for ref in fag.discover_auctions():
-            raw = minimal_raw_auction(ref)
-            async with get_session() as session, session.begin():
-                auction = await upsert_auction(
-                    session, raw, discovered_via="fag",
-                )
-                # /needs-plugin pings only on first sight of an unknown host.
-                if (
-                    ref.source.startswith("unknown:")
-                    and auction.needs_plugin_notified_at is None
-                ):
-                    await notify(session, "needs_plugin", str(auction.id))
-            by_platform[ref.source] = by_platform.get(ref.source, 0) + 1
-            total += 1
-    log.info("fag router by_platform", **by_platform)
-    return total
-
-
 # Strategy registration. Each entry's name appears in structured logs so a
 # dropped or hanging source is easy to spot in journalctl. Order matters
 # only for log readability; strategies are independent.
+#
+# FAG (farmauctionguide.com) was originally a third strategy but is no
+# longer in the automated ingestion loop. Production validation 2026-05-16
+# found their per-province pages now sit behind a Cloudflare bot challenge
+# (httpx-unreachable) and the accessible pages link to small-auctioneer
+# websites, not to platform aggregators -- the discovery shape no longer
+# fits an automated router. Long-tail auctioneer discovery moved to a
+# Claude Code skill (.claude/skills/discover-auctioneers) that produces a
+# markdown report for human review. FarmAuctionGuideSource stays in tree
+# (still self-registers via the discoverer worker's import) so the skill
+# can reuse parsing helpers if useful.
 STRATEGIES: list[tuple[str, Strategy]] = [
     ("hibid_lot_first", _run_hibid_lot_first),
     ("mcdougall_lot_first", _run_mcdougall_lot_first),
-    ("fag_router", _run_fag_router),
 ]
 
 

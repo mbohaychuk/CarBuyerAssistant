@@ -1,6 +1,6 @@
 # Multi-source ingestion via farmauctionguide.com + McDougall
 
-> **Status:** Draft v2 (2026-05-16) — awaiting approval before implementation.
+> **Status:** Shipped 2026-05-16. **FAG strategy dropped post-validation** — see Appendix A.
 > **Scope:** (A) Wire `FarmAuctionGuideSource` into the ingester so we discover auctions across every platform FAG indexes, route known platforms to their plugins, and record unknown platforms for `/needs-plugin` triage. (B) Replace the McDougall stub with a real lot-first implementation (catalog walker + detail parser + bid poll). (C) Wire bid-poller dispatch for McDougall.
 > **Recon (2026-05-16):** McDougall is server-rendered with a cross-auction Vehicles catalog at `products.php?category=Vehicles` (147 lots paginated). Lot detail (`products-full-view.php?arg=<GUID>`) exposes year/make/model/mileage/VIN/end-time/current-bid/photos without login. URL pattern is `?arg=<GUID>`, not `/auction/<id>` as the stub assumes.
 
@@ -173,6 +173,61 @@ Pass criteria: ≥1 row each in mcdougall + at least one `unknown:<host>` source
 ## Open follow-ups (post this PR)
 
 - Per-source poll cadence tuning if rate-limits or stale-data bite.
-- Generic shallow fetch for unknown platforms (rejected for v1; revisit if `/needs-plugin` shows persistent high-quality long tail).
-- Drift alerting on per-province FAG yield (zero today, non-zero yesterday → alert).
+- McDougall closed-lot fixture + OPEN→CLOSED detector (commit #7 deferred this; today the bid_poller's force-close-by-scheduled-end guard handles transitions).
 - McDougall live (in-room) auctions if those ever overlap our interest.
+
+## Appendix A — FAG strategy dropped post-validation (2026-05-16)
+
+The first production ingest after shipping commits #1-11 surfaced two
+distinct failure modes on `fag_router`:
+
+**1. URL structure changed.** The historical `/canada/<province>/` per-
+province aggregator pages now 404. Their replacements live at
+`/<province>-auctions` (e.g. `/alberta-auctions`).
+
+**2. Cloudflare bot challenge on the new endpoints.** A `curl`/`httpx`
+GET against `/alberta-auctions` returns a Cloudflare "Just a moment..."
+interactive challenge page, not real HTML. Solving it requires a real
+browser (Playwright/headless Chrome). The homepage and individual
+auction detail pages still serve directly to httpx — only the per-
+province browse pages are gated.
+
+**3. Even past Cloudflare, the role has changed.** Old FAG: per-province
+pages aggregated outbound links to platform sites (`hibid.com/.../catalog/X`,
+`mcdougallauction.com/auction/X`). The router's premise was extracting
+those platform URLs and routing them. New FAG: each auction is hosted
+natively at `/<province>-auctions/<slug>.html` and links out to the
+*auctioneer's own website* (e.g. `allenolsonauction.com`), not a
+platform. So most outbound links would be `unknown:<auctioneer-host>`
+even with full access — small custom sites we don't have plugins for.
+
+**Decision.** Long-tail auctioneer discovery is fundamentally a human-in-
+the-loop concern (the value is *"which auctioneers should I plug?"*, not
+*"give me more lots automatically"*). Moved to a Claude Code skill
+(`.claude/skills/discover-auctioneers`) that walks FAG + sister sites
+periodically and emits a markdown report of newly-seen auctioneer hosts
+cross-referenced against the registered plugin list. Operator reviews
+the report and decides which auctioneers warrant a new plugin
+(McDougall-style). The skill tolerates site redesigns gracefully: when
+FAG changes their HTML, the skill just describes the new structure to
+the operator; an automated parser silently breaks.
+
+`_run_fag_router` was deleted from the ingester. `FarmAuctionGuideSource`
+stays in tree (still self-registers via the discoverer worker's import)
+so the skill can reuse parsing helpers if useful.
+
+## Appendix B — McDougall VIN parsing fix (2026-05-16)
+
+First production run crashed on lot `6C95BAB0-9274-4320-B779-466296D3CD14`
+(boat with trailer + motor). Its "Serial Number" field contained three
+labeled IDs (`"Trailer: 5KTBS1810LF528753  Boat: BLBX2184J920 Motor:
+2B721768"`, 59 chars). Cramming that into `auction_lots.vin`
+(varchar(32)) raised `StringDataRightTruncation` and the dispatch
+try/except correctly contained it to the McDougall strategy — HiBid's
+111 lots still ingested cleanly.
+
+Fix: `_parse_vin` now applies a single-VIN shape filter
+(11-17 chars of `[A-HJ-NPR-Z0-9]`, the VIN-standard alphabet that
+excludes I/O/Q). Non-VIN-shaped values go to `extras["raw_serial_number"]`
+for human inspection, `vin` stays `None`. A regression test pins the
+exact production-crash string.
