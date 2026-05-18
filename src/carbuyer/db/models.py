@@ -141,6 +141,13 @@ class AuctionLot(Base, TimestampMixin):
         server_default=text("'{}'::text[]"),
         nullable=False,
     )
+    # Per-lot end time. NULL for HiBid (auction.scheduled_end_at covers the
+    # whole event); populated for McDougall where each lot in an auction-event
+    # has its own close time. bid_poller coalesces auction-then-lot when
+    # priority-sorting and force-close-checking.
+    scheduled_end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True,
+    )
 
     # ── Owned by: lot-scraper (initial), description-enricher (LLM normalization) ──
     year: Mapped[int | None] = mapped_column(Integer)

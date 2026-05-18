@@ -76,6 +76,7 @@ async def _upsert_lot(
         "mileage_km": raw.mileage_km,
         "vin": raw.vin,
         "lot_status": raw.lot_status,
+        "scheduled_end_at": raw.scheduled_end_at,
     }
     stmt = pg_insert(AuctionLot).values(**insert_values)
     excluded = stmt.excluded
@@ -101,6 +102,14 @@ async def _upsert_lot(
         # in a new auction event. Always take the latest so bid_poller can
         # look up the current row id.
         "source_lot_row_id": excluded.source_lot_row_id,
+        # scheduled_end_at refreshes on rescrape so soft-close-style end-time
+        # updates (McDougall sometimes nudges per-lot close times when the
+        # auction-event reshuffles) propagate to bid_poller's priority queue.
+        # Coalesce so a transient NULL on rescrape doesn't clobber a known
+        # end time.
+        "scheduled_end_at": func.coalesce(
+            excluded.scheduled_end_at, AuctionLot.scheduled_end_at,
+        ),
         "updated_at": func.now(),
     }
     for field_name in ("title", "description", "photos"):
