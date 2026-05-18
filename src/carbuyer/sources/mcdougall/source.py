@@ -45,7 +45,15 @@ CATALOG_URL = "https://www.mcdougallauction.com/products.php?category=Vehicles"
 # McDougall ever serves an unbounded duplicate page or our empty-page sentinel
 # fails. 50 pages * ~14 lots/page = 700 lots, well above current ~150 inventory.
 _CATALOG_MAX_PAGES = 50
-_HTTP_NOT_FOUND: int = int(httpx.codes.NOT_FOUND)
+# 404 and 410 both mean "this lot URL is no longer served" — the poller must
+# surface "missing" so the scheduler advances the lot to CLOSED. Without 410
+# in this set, a McDougall switch to RFC-compliant permanent-removal status
+# would burn 30s polling slots per lot until the 24h force-close guard fires
+# (same bug class HiBid was patched for in commit 24ddef1).
+_LOT_GONE_STATUS_CODES: tuple[int, ...] = (
+    int(httpx.codes.NOT_FOUND),
+    int(httpx.codes.GONE),
+)
 
 # Auction detail pages: auction-event.php?arg=<GUID-8-4-4-4-12>.
 # Lot detail pages:    products-full-view.php?arg=<GUID-8-4-4-4-12>.
@@ -364,7 +372,7 @@ class McDougallSource(AuctionSource):
     async def poll_bid(self, ref: LotRef) -> BidObservation:
         """Re-fetch one lot detail page; emit current bid + end_time.
 
-        Status detection v1: HTTP 404 -> "missing" (lot removed). 200 with
+        Status detection v1: HTTP 404 or 410 -> "missing" (lot removed). 200 with
         a parseable end_time -> "open" regardless of whether that time has
         passed -- the bid_poller's force-close-by-scheduled-end logic owns
         the OPEN -> CLOSED transition until we capture a closed-lot fixture
@@ -374,7 +382,7 @@ class McDougallSource(AuctionSource):
         """
         observed = datetime.now(UTC)
         resp = await self._http.get(ref.url)
-        if resp.status_code == _HTTP_NOT_FOUND:
+        if resp.status_code in _LOT_GONE_STATUS_CODES:
             return BidObservation(
                 ref=ref,
                 observed_at=observed,
