@@ -53,7 +53,12 @@ from carbuyer.shared.config import settings
 _log = get_logger("sources.hibid")
 
 _HIBID_CATALOG_URL = re.compile(
-    r"^https?://(?:www\.)?hibid\.com/(?:[a-z\-]+/)?catalog/(\d+)",
+    # Match bare hibid.com, www.hibid.com, and <auctioneer>.hibid.com -- the
+    # latter is the per-auctioneer subdomain pattern (e.g.
+    # terrymcdougall.hibid.com). Previously the (now-removed) FAG router
+    # carried a duplicate subdomain-aware regex; consolidating into the
+    # plugin's own parse_auction_url is the right home for it.
+    r"^https?://(?:[a-z0-9\-]+\.)?hibid\.com/(?:[a-z\-]+/)?catalog/(\d+)",
 )
 
 _GRAPHQL_URL = "https://hibid.com/graphql"

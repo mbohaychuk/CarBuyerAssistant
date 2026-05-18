@@ -198,7 +198,7 @@ async def test_retry_routing_409_when_target_source_already_exists(
         auctioneer_name="HiBid Direct",
     )
     session.add(canonical)
-    # Unknown:* duplicate from the farmauctionguide router.
+    # Unknown:* duplicate left over from a now-removed upstream router.
     duplicate = _seed_unknown_auction(
         session,
         source="unknown:terrymcdougall.hibid.com",

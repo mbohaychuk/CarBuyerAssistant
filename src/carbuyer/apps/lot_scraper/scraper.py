@@ -23,15 +23,12 @@ from carbuyer.sources.base import (
     AuctionRef,
     RawLot,
 )
-from carbuyer.sources.farmauctionguide.source import (
-    FarmAuctionGuideSource as _FagSource,  # registers plugin
-)
 from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # registers plugin
 from carbuyer.sources.mcdougall.source import (
     McDougallSource as _McDougallSource,  # registers plugin
 )
 
-_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name, _FagSource.name)
+_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name)
 
 log = get_logger("lot_scraper")
 
