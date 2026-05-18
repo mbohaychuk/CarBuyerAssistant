@@ -41,7 +41,7 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from carbuyer.apps.bid_poller.scheduler import next_poll_delay
 from carbuyer.db.enums import LotStatus, ValuationStatus
@@ -97,6 +97,13 @@ async def _load_open_lot_refs(
     transaction closes before any HTTP I/O.
     """
     async with get_session() as s, s.begin():
+        # "Effective end time" coalesces auction-level then lot-level. HiBid
+        # populates auction.scheduled_end_at; McDougall leaves that NULL and
+        # carries per-lot end times in lot.scheduled_end_at. Sorting by the
+        # coalesced value keeps the priority queue correct across sources.
+        effective_end = func.coalesce(
+            Auction.scheduled_end_at, AuctionLot.scheduled_end_at,
+        )
         stmt = (
             select(AuctionLot, Auction)
             .join(Auction, Auction.id == AuctionLot.auction_id)
@@ -109,7 +116,7 @@ async def _load_open_lot_refs(
                     ]
                 ),
             )
-            .order_by(Auction.scheduled_end_at.asc().nulls_last())
+            .order_by(effective_end.asc().nulls_last())
             .limit(_BATCH_LIMIT)
         )
         rows = (await s.execute(stmt)).all()
@@ -130,7 +137,9 @@ async def _load_open_lot_refs(
             #   gap > _MAX_FORCE_CLOSE_AGE_SECONDS (7d)  → skip + warn
             # The ceiling protects against clock drift wiping a whole batch
             # of live auctions if NTP misbehaves.
-            end = auction.scheduled_end_at
+            # Use the same coalesce as the priority query above so per-lot
+            # end times (McDougall) drive the staleness check correctly.
+            end = auction.scheduled_end_at or lot.scheduled_end_at
             if end is not None:
                 age = (now - end).total_seconds()
                 if age > _MAX_FORCE_CLOSE_AGE_SECONDS:
@@ -163,7 +172,7 @@ async def _load_open_lot_refs(
             if auction.source == "hibid" and lot.source_lot_row_id is None:
                 continue
             delay = next_poll_delay(
-                scheduled_end=auction.scheduled_end_at,
+                scheduled_end=end,
                 now=now,
                 status=lot.lot_status,
             )

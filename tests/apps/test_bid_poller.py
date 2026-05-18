@@ -458,3 +458,82 @@ async def test_load_open_lot_refs_keeps_null_end_lot(
     assert (lot_id in [lid for lid, _ in fast]) or (lot_id in [lid for lid, _ in slow])
     await session.refresh(lot)
     assert lot.lot_status == LotStatus.OPEN
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_uses_lot_end_when_auction_end_null(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """McDougall shape: auction.scheduled_end_at is NULL (the per-lot end
+    times don't aggregate to an auction-level value) but lot.scheduled_end_at
+    is populated. The poller must coalesce both for priority sorting AND
+    staleness checking so these lots make it into the batch.
+
+    Without coalesce, a McDougall lot whose lot.scheduled_end_at is 48h+ in
+    the past would skip the force-close path (auction.scheduled_end_at=NULL,
+    end becomes None, age check skipped) -- and stay OPEN forever.
+    Confirming the coalesced staleness check fires.
+    """
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    long_ago = now - timedelta(hours=48)
+    _, lot = _seed_lot(
+        session, lot_status="open",
+        current_high_bid_cad=Decimal("1500.00"),
+    )
+    # McDougall shape: auction.scheduled_end_at IS NULL,
+    # lot.scheduled_end_at carries the actual close time.
+    lot.auction.scheduled_end_at = None
+    lot.scheduled_end_at = long_ago
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    # 48h past -> force-closed via coalesced staleness check.
+    assert lot_id not in [lid for lid, _ in fast]
+    assert lot_id not in [lid for lid, _ in slow]
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.FORCE_CLOSED
+    assert lot.closed_at is not None
+    assert lot.final_bid_cad == Decimal("1500.00")
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_polls_mcdougall_shape_in_active_window(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """McDougall shape with a future lot.scheduled_end_at: the lot must
+    end up in fast or slow bucket (not dropped). This is the primary
+    case the McDougall ingestion needs to work end-to-end."""
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    future = now + timedelta(days=3)
+    _, lot = _seed_lot(session, lot_status="open")
+    # McDougall shape: auction.scheduled_end_at NULL, lot has it.
+    lot.auction.scheduled_end_at = None
+    lot.scheduled_end_at = future
+    # McDougall lots don't have HiBid's source_lot_row_id quirk.
+    lot.source_lot_row_id = None
+    lot.auction.source = "mcdougall"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    assert (
+        lot_id in [lid for lid, _ in fast]
+        or lot_id in [lid for lid, _ in slow]
+    )
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.OPEN
