@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -8,6 +10,22 @@ from fastapi.templating import Jinja2Templates
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# All scheduled_end_at values in the DB are UTC. The dashboard renders for a
+# single operator (Alberta), so localizing at the template layer is simpler
+# than threading tz through every router. Rendering UTC verbatim surprises
+# users who read "21:00" as 9pm local; this filter applies the conversion
+# in one place. Swap to per-request lookup if the dashboard ever multi-tenants.
+_DISPLAY_TZ = ZoneInfo("America/Edmonton")
+
+
+def _local_dt(dt: datetime | None, fmt: str = "%b %d %H:%M") -> str:
+    if dt is None:
+        return "?"
+    return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
+
+
+templates.env.filters["local_dt"] = _local_dt
 
 
 def create_app() -> FastAPI:

@@ -42,7 +42,11 @@ from carbuyer.apps._runner import run_worker
 from carbuyer.db.enums import NotificationStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 from carbuyer.db.notify import listen, notify
-from carbuyer.db.queue import claim_pending_ids, select_pending_ids
+from carbuyer.db.queue import (
+    claim_pending_ids,
+    recover_orphans,
+    select_pending_ids,
+)
 from carbuyer.db.session import get_session, get_session_maker
 from carbuyer.scoring.comps import build_comp_set
 from carbuyer.scoring.fair_value import ConfidenceBucket, compute_fair_value
@@ -58,6 +62,7 @@ from carbuyer.scoring.score import (
 )
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 
 log = get_logger("valuator")
 
@@ -123,6 +128,8 @@ def _apply_pricing(
     set by the caller to derive ``suspicious_underprice_flag``.
     """
     bp = auction.buyer_premium_pct or DEFAULT_BUYER_PREMIUM_PCT
+    bp_max = auction.buyer_premium_max_cad
+    bp_min = auction.buyer_premium_min_cad
     gst = auction.gst_pct or DEFAULT_GST_PCT
     pst = auction.pst_pct or DEFAULT_PST_PCT
     dest_province = auction.pickup_province or settings.home_province
@@ -138,12 +145,14 @@ def _apply_pricing(
             current_high_bid=current_bid,
             buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
             landed_cost_premium=landed,
+            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
         )
         lot.price_deal_score = price_deal_score(
             current_high_bid=current_bid,
             buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
             landed_cost_premium=landed,
             expected_value=expected_value,
+            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
         )
     else:
         lot.all_in_at_current_bid_cad = None
@@ -158,6 +167,7 @@ def _apply_pricing(
             expected_value=expected_value,
             buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
             landed_cost_premium=landed, flip_margin=margin,
+            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
         )
     else:
         lot.recommended_max_bid_cad = None
@@ -318,8 +328,16 @@ async def _catchup_sweep() -> None:
 
     Phase 2 design overlay #12 / Phase 3 overlay #3: every continuous worker
     must do this before entering ``LISTEN`` to recover NOTIFYs missed during
-    downtime. Same idiom as the enricher.
+    downtime. Phase 13: prepend orphan recovery to handle prior-crash
+    IN_PROGRESS rows.
     """
+    async with get_session() as s, s.begin():
+        recovered = await recover_orphans(s, status_field="valuation_status")
+    if recovered > 0:
+        log.warning(
+            "recovered orphaned IN_PROGRESS lots at startup",
+            count=recovered,
+        )
     async with get_session() as s:
         ids = await select_pending_ids(
             s, status_field="valuation_status", limit=10_000,
@@ -337,13 +355,17 @@ async def _catchup_sweep() -> None:
 
 
 async def main() -> None:
-    await _catchup_sweep()
-    async for _payload in listen("valuation_pending"):
-        try:
-            await process_pending()
-        except Exception:
-            log.exception("batch failed; sleeping before next NOTIFY")
-            await asyncio.sleep(5)
+    lock_conn = await acquire_singleton_lock("valuator")
+    try:
+        await _catchup_sweep()
+        async for _payload in listen("valuation_pending"):
+            try:
+                await process_pending()
+            except Exception:
+                log.exception("batch failed; sleeping before next NOTIFY")
+                await asyncio.sleep(5)
+    finally:
+        await lock_conn.close()
 
 
 if __name__ == "__main__":

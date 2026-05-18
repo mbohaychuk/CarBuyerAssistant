@@ -45,7 +45,11 @@ from carbuyer.apps._runner import run_worker
 from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.db.notify import listen, notify
-from carbuyer.db.queue import claim_pending_ids, select_pending_ids
+from carbuyer.db.queue import (
+    claim_pending_ids,
+    recover_orphans,
+    select_pending_ids,
+)
 from carbuyer.db.session import get_session, get_session_maker
 from carbuyer.llm.base import DescribeInput
 from carbuyer.llm.carfax import (
@@ -58,6 +62,7 @@ from carbuyer.llm.openai_provider import OpenAIProvider
 from carbuyer.llm.schemas import CarfaxFindings, EnrichmentOutput
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
+from carbuyer.shared.singleton import acquire_singleton_lock
 
 log = get_logger("enricher")
 
@@ -66,6 +71,14 @@ log = get_logger("enricher")
 # condition_inferred_from_sparse_listing=True so Phase 4 can apply a
 # sparse-listing pessimism penalty separately.
 SPARSE_LISTING_CONFIDENCE_THRESHOLD = 0.5
+
+# Phase 13 review: LLM-supplied numerics must be sanity-checked before write.
+# Pydantic accepts any int; a hallucinated -50000 or a mi→km unit-swap (e.g.
+# 250000 stored as km when listing said 155k miles) silently poisons the comp
+# set and flips price-deal alerts. Cheap reject + log.
+_MILEAGE_KM_MIN = 0
+_MILEAGE_KM_MAX = 1_500_000
+_YEAR_MIN = 1900
 
 # Below this many bytes of description, we override the LLM's
 # description_quality to "thin" regardless of what the model said. Matches the
@@ -212,7 +225,14 @@ def _apply_to_lot(
     """
     out = result.output
     nv = out.normalized_vehicle
-    lot.year = nv.year or lot.year
+    year_cap = datetime.now(UTC).year + 1
+    if nv.year is not None and not (_YEAR_MIN <= nv.year <= year_cap):
+        log.warning(
+            "rejecting out-of-range year from LLM",
+            lot_id=lot.id, llm_year=nv.year,
+        )
+    else:
+        lot.year = nv.year or lot.year
     lot.make = nv.make or lot.make
     lot.model = nv.model or lot.model
     lot.trim = nv.trim or lot.trim
@@ -222,7 +242,15 @@ def _apply_to_lot(
         lot.transmission = nv.transmission
     if nv.drivetrain != "unknown":
         lot.drivetrain = nv.drivetrain
-    lot.mileage_km = nv.mileage_km or lot.mileage_km
+    if nv.mileage_km is not None and not (
+        _MILEAGE_KM_MIN <= nv.mileage_km <= _MILEAGE_KM_MAX
+    ):
+        log.warning(
+            "rejecting out-of-range mileage from LLM",
+            lot_id=lot.id, llm_mileage_km=nv.mileage_km,
+        )
+    else:
+        lot.mileage_km = nv.mileage_km or lot.mileage_km
     lot.vin = nv.vin or lot.vin
     if out.title_status != "UNKNOWN":
         lot.title_status = out.title_status
@@ -398,8 +426,20 @@ async def _catchup_sweep(provider: OpenAIProvider) -> None:
 
     Phase 2 design overlay #12 + Phase 3 overlay #3: every continuous worker
     must do this before entering ``LISTEN`` to recover NOTIFYs missed during
-    downtime.
+    downtime. Phase 13: prepend orphan recovery — flip IN_PROGRESS rows from
+    a prior crash back to PENDING so claim_pending_ids picks them up.
+    Without this, a SIGKILL between claim and write-completion strands the
+    row forever (Phase 2.5 watchdog is referenced in queue.py:64 but isn't
+    actually implemented yet).
     """
+    async with get_session() as s, s.begin():
+        recovered = await recover_orphans(s, status_field="enrichment_status")
+    if recovered > 0:
+        log.warning(
+            "recovered orphaned IN_PROGRESS lots at startup",
+            count=recovered,
+            note="prior worker crash; rows reset to pending",
+        )
     async with get_session() as s:
         ids = await select_pending_ids(
             s, status_field="enrichment_status", limit=10_000,
@@ -421,14 +461,18 @@ async def main() -> None:
         # Phase 3 design overlay #16: fail at startup, not on first lot.
         log.error("OPENAI_API_KEY not configured")
         sys.exit("OPENAI_API_KEY not configured")
-    async with OpenAIProvider() as provider:
-        await _catchup_sweep(provider)
-        async for _payload in listen("enrichment_pending"):
-            try:
-                await process_pending(provider)
-            except Exception:
-                log.exception("batch failed; sleeping before next NOTIFY")
-                await asyncio.sleep(5)
+    lock_conn = await acquire_singleton_lock("enricher")
+    try:
+        async with OpenAIProvider() as provider:
+            await _catchup_sweep(provider)
+            async for _payload in listen("enrichment_pending"):
+                try:
+                    await process_pending(provider)
+                except Exception:
+                    log.exception("batch failed; sleeping before next NOTIFY")
+                    await asyncio.sleep(5)
+    finally:
+        await lock_conn.close()
 
 
 if __name__ == "__main__":

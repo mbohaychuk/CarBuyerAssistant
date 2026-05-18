@@ -1,135 +1,198 @@
+"""HiBid response parsers (post-SPA migration, May 2026).
+
+HiBid migrated from server-rendered HTML+lotModels to a SPA backed by a
+single GraphQL endpoint at /graphql. Three response shapes matter:
+
+  1. SSR'd auction LIST page   -> regex auction_id from <a href> patterns
+  2. AuctionDetails GraphQL    -> auction metadata (auctioneer, dates, BP)
+  3. LotSearchLotOnly GraphQL  -> paginated lots within an auction
+
+The catalog page HTML is now empty of lot data; do not parse it for lots.
+"""
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-_LOT_MODELS_START = re.compile(r"var\s+lotModels\s*=\s*\[")
-
-# Heuristic: any timestamp larger than this many seconds is treated as
-# milliseconds. 1e11 seconds = March 1973; HiBid emits both seconds-since-epoch
-# (recent dates) and milliseconds.
-_MS_THRESHOLD = 1e11
-
-
-def extract_lot_models(html: str) -> list[dict[str, Any]]:
-    """Extract the embedded `var lotModels = [...];` array from a HiBid page.
-
-    Uses a string-aware balanced-bracket scan rather than a non-greedy regex,
-    because lot objects embed nested arrays (images, categories) which a
-    simple `\\[.*?\\]` regex would truncate at the first inner `]`.
-    """
-    m = _LOT_MODELS_START.search(html)
-    if not m:
-        return []
-    start = m.end() - 1  # index of the opening `[`
-    depth = 0
-    in_str = False
-    escape = False
-    quote = ""
-    for i in range(start, len(html)):
-        c = html[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == quote:
-                in_str = False
-            continue
-        if c in ('"', "'"):
-            in_str = True
-            quote = c
-            continue
-        if c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                blob = html[start : i + 1]
-                try:
-                    parsed: object = json.loads(blob)
-                except json.JSONDecodeError:
-                    return []
-                if not isinstance(parsed, list):
-                    return []
-                # Narrow each element to dict; drop anything else.
-                return [item for item in parsed if isinstance(item, dict)]  # type: ignore[reportUnknownVariableType]
-    return []
-
-
-# Keys we copy from raw lotModels entries into RawLot.extra so the valuator and
-# soft-close detector can use them without re-scraping.
-_EXTRA_KEYS = (
-    "bidIncrement",
-    "reserveStatus",
-    "buyNowPrice",
-    "lotState",
-    "saleType",
-    "shippingOffered",
-    "auctionCity",
-    "auctionState",
-    "companyName",
+# Discovery list page links: <a href="/{province-slug}/auction/{id}/{slug}">.
+# The SSR list page mixes auction cards with category links; we filter on
+# the `/auction/{id}/` path segment so category nav doesn't sneak in.
+_AUCTION_HREF = re.compile(
+    r'href="/[a-z-]+/auction/(?P<id>\d+)/(?P<slug>[^"]+)"',
 )
+
+
+def discover_auction_ids(html: str) -> list[str]:
+    """Extract unique auction IDs from a HiBid province list page."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _AUCTION_HREF.finditer(html):
+        aid = m.group("id")
+        if aid in seen:
+            continue
+        seen.add(aid)
+        out.append(aid)
+    return out
 
 
 @dataclass(slots=True)
 class HibidLotSummary:
-    source_lot_id: str
-    lot_number: str | None
-    title: str | None
+    """Parsed shape of a single HiBid Lot record from LotSearchLotOnly."""
+
+    source_lot_id: str          # itemId (stable event-item id)
+    source_lot_row_id: int | None  # per-listing row id, used by HiBid eventItemIds filter
+    lot_number: str | None       # display number, e.g. "201"
+    title: str | None            # `lead`
     description: str | None
-    # year/make/model are NOT separate fields in HiBid lotModels; the description
-    # enricher (Phase 3) parses them out of the title text.
+    # year/make/model are NOT separate fields in HiBid's API; the description
+    # enricher (Phase 3) parses them out of the title text downstream.
     year: int | None
     make: str | None
     model: str | None
     current_high_bid_cad: Decimal | None
     bid_count_visible: int | None
     photos: list[str]
+    # Lot-level end times are not exposed by HiBid's lot query; the auction-
+    # level bidCloseDateTime drives lot scheduling. Left as None here so
+    # callers can backfill from AuctionDetails.
     end_at: datetime | None
-    auction_external_id: str | None
-    url: str | None
+    auction_external_id: str | None  # populated by source.py from caller scope
+    url: str | None                   # populated by source.py via lot_url(id)
     extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
 
 
-def _get(obj: dict[str, Any], *keys: str) -> Any:
-    for k in keys:
-        if k in obj and obj[k] is not None:
-            return obj[k]
-    return None
+@dataclass(slots=True)
+class HibidAuctionDetails:
+    """Parsed shape of the AuctionDetails GraphQL response."""
+
+    auction_id: str
+    event_name: str | None
+    description: str | None
+    bid_open_at: datetime | None
+    bid_close_at: datetime | None
+    event_address: str | None
+    event_city: str | None
+    event_state: str | None       # province code in CA
+    buyer_premium_pct: Decimal | None
+    auctioneer_name: str | None
+    auctioneer_external_id: str | None
 
 
-def raw_lot_id(raw: dict[str, Any]) -> str | None:
-    """Return the lot id from a raw lotModels entry, falling through key variants."""
-    value = _get(raw, "eventItemId", "lotId", "lotID", "id")
-    if value is None or value == "":
-        return None
-    return str(value)
+def parse_lot_search_response(data: dict[str, Any]) -> list[HibidLotSummary]:
+    """Parse a LotSearchLotOnly GraphQL response into HibidLotSummary entries."""
+    results = (
+        ((data.get("data") or {}).get("lotSearch") or {})
+        .get("pagedResults", {})
+        .get("results", [])
+    )
+    out: list[HibidLotSummary] = []
+    for rec in results:
+        if not isinstance(rec, dict):
+            continue
+        if not rec.get("itemId"):
+            continue
+        out.append(parse_lot_record(rec))  # type: ignore[reportUnknownArgumentType]
+    return out
 
 
-def _to_decimal(v: Any) -> Decimal | None:  # noqa: PLR0911
+def parse_lot_record(rec: dict[str, Any]) -> HibidLotSummary:
+    """Parse one Lot record from the GraphQL response."""
+    lot_state_raw = rec.get("lotState") or {}
+    lot_state: dict[str, Any] = lot_state_raw if isinstance(lot_state_raw, dict) else {}
+    pictures_raw = rec.get("pictures") or []
+    photos: list[str] = []
+    if isinstance(pictures_raw, list):
+        for p in pictures_raw:  # type: ignore[reportUnknownVariableType]
+            if not isinstance(p, dict):
+                continue
+            entry: dict[str, Any] = p  # type: ignore[reportUnknownVariableType]
+            url_val = entry.get("fullSizeLocation")
+            if isinstance(url_val, str) and url_val:
+                photos.append(url_val)
+    return HibidLotSummary(
+        source_lot_id=str(rec.get("itemId") or ""),
+        source_lot_row_id=_to_int(rec.get("id")),
+        lot_number=str(rec.get("lotNumber") or "") or None,
+        title=rec.get("lead"),
+        description=rec.get("description"),
+        year=None,
+        make=None,
+        model=None,
+        current_high_bid_cad=_to_decimal(lot_state.get("highBid")),
+        bid_count_visible=_to_int(lot_state.get("bidCount")),
+        photos=photos,
+        end_at=None,
+        auction_external_id=None,
+        url=None,
+        extra={
+            "lotState": lot_state,
+            "shippingOffered": rec.get("shippingOffered"),
+            "category": rec.get("category"),
+            "pictureCount": rec.get("pictureCount"),
+            # HiBid emits two ids: row-level `id` and stable `itemId`. Keep
+            # `lotId` (the row id) for log/debug correlation.
+            "lotId": rec.get("id"),
+        },
+    )
+
+
+def lot_is_closed(rec: dict[str, Any]) -> bool:
+    """Whether a Lot record reports its bidding closed."""
+    lot_state_raw = rec.get("lotState") or {}
+    if not isinstance(lot_state_raw, dict):
+        return False
+    return bool(lot_state_raw.get("isClosed"))
+
+
+def parse_auction_details_response(data: dict[str, Any]) -> HibidAuctionDetails:
+    """Parse the AuctionDetails GraphQL response."""
+    a_raw = (data.get("data") or {}).get("auction") or {}
+    a: dict[str, Any] = a_raw if isinstance(a_raw, dict) else {}
+    auctioneer_raw = a.get("auctioneer") or {}
+    auctioneer: dict[str, Any] = (
+        auctioneer_raw if isinstance(auctioneer_raw, dict) else {}
+    )
+    return HibidAuctionDetails(
+        auction_id=str(a.get("id") or ""),
+        event_name=a.get("eventName"),
+        description=a.get("description"),
+        bid_open_at=_parse_dt(a.get("bidOpenDateTime")),
+        bid_close_at=_parse_dt(a.get("bidCloseDateTime")),
+        event_address=a.get("eventAddress"),
+        event_city=a.get("eventCity"),
+        event_state=a.get("eventState"),
+        buyer_premium_pct=_to_decimal(a.get("buyerPremiumRate")),
+        auctioneer_name=auctioneer.get("name"),
+        auctioneer_external_id=str(auctioneer.get("id") or "") or None,
+    )
+
+
+def _to_decimal(v: Any) -> Decimal | None:
     if v is None:
         return None
     if isinstance(v, Decimal):
         return v
+    if isinstance(v, bool):  # before int — bool subtypes int
+        return None
     if isinstance(v, (int, float)):
-        return Decimal(str(v))
+        # Treat literal 0 as "no bid yet" so downstream doesn't show $0 bids.
+        return Decimal(str(v)) if v != 0 else None
     if isinstance(v, str):
         cleaned = re.sub(r"[^\d.\-]", "", v)
         if not cleaned or cleaned in {"-", "."}:
             return None
         try:
-            return Decimal(cleaned)
+            d = Decimal(cleaned)
         except InvalidOperation:
             return None
+        return d if d != 0 else None
     return None
 
 
-def _to_int(v: Any) -> int | None:  # noqa: PLR0911
+def _to_int(v: Any) -> int | None:
     if v is None:
         return None
     if isinstance(v, bool):
@@ -147,72 +210,20 @@ def _to_int(v: Any) -> int | None:  # noqa: PLR0911
 
 
 def _parse_dt(value: Any) -> datetime | None:
-    """Parse the various date shapes HiBid emits, always returning UTC-aware."""
+    """HiBid GraphQL emits ISO 8601; older paths sometimes emit ms-epoch."""
     if value is None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, (int, float)):
-        seconds = value / 1000 if value > _MS_THRESHOLD else value
+        # ms-epoch heuristic (any timestamp larger than this is in ms).
+        seconds = value / 1000 if value > 1e11 else value
         return datetime.fromtimestamp(seconds, tz=UTC)
     if isinstance(value, str):
-        for fmt in (
-            "%Y-%m-%dT%H:%M:%S.%fZ",
-            "%Y-%m-%dT%H:%M:%SZ",
-            "%Y-%m-%d %H:%M:%S",
-        ):
-            try:
-                dt = datetime.strptime(value, fmt)
-            except ValueError:
-                continue
-            return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+        s = value.strip().rstrip("Z")
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
     return None
-
-
-def _extract_photos(raw: dict[str, Any]) -> list[str]:
-    photos_raw = _get(raw, "lotImages", "images")
-    if not isinstance(photos_raw, list):
-        return []
-    items: list[Any] = photos_raw  # type: ignore[reportUnknownVariableType]
-    photos: list[str] = []
-    for p in items:
-        if isinstance(p, str):
-            photos.append(p)
-        elif isinstance(p, dict):
-            entry: dict[str, Any] = p  # type: ignore[reportUnknownVariableType]
-            url = entry.get("url") or entry.get("imageUrl") or entry.get("largeUrl")
-            if isinstance(url, str):
-                photos.append(url)
-    return photos
-
-
-def parse_lot_summary(raw: dict[str, Any]) -> HibidLotSummary:
-    lot_status_raw = raw.get("lotStatus")
-    if isinstance(lot_status_raw, dict):
-        lot_status: dict[str, Any] = lot_status_raw  # type: ignore[reportUnknownVariableType]
-    else:
-        lot_status = {}
-    bid = _get(lot_status, "highBid", "currentBid") if lot_status else None
-    if bid is None:
-        bid = _get(raw, "highBid", "currentBid", "bidAmount")
-    bid_count = _get(lot_status, "bidCount") if lot_status else None
-    end = _get(raw, "auctionEnd", "saleEnd", "endTime", "scheduledEnd")
-    extra: dict[str, Any] = {
-        k: raw[k] for k in _EXTRA_KEYS if k in raw and raw[k] is not None
-    }
-    return HibidLotSummary(
-        source_lot_id=raw_lot_id(raw) or "",
-        lot_number=str(_get(raw, "lotNumber", "lotNum") or "") or None,
-        title=_get(raw, "lead", "title", "lotTitle"),
-        description=_get(raw, "description", "longDescription"),
-        year=None,
-        make=None,
-        model=None,
-        current_high_bid_cad=_to_decimal(bid),
-        bid_count_visible=_to_int(bid_count),
-        photos=_extract_photos(raw),
-        end_at=_parse_dt(end),
-        auction_external_id=str(_get(raw, "auctionId", "auctionID") or "") or None,
-        url=_get(raw, "lotUrl", "url"),
-        extra=extra,
-    )

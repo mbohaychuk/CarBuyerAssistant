@@ -60,6 +60,11 @@ def _seed_lot(
     lot = AuctionLot(
         auction=a,
         source_lot_id="L1",
+        # HiBid lots require source_lot_row_id for the eventItemIds filter
+        # in production; the SQL filter in _load_open_lot_refs skips lots
+        # without it. Seed a non-null value so existing tests exercise the
+        # polling path.
+        source_lot_row_id=12345,
         url="https://hibid.com/catalog/A1",
         title="2010 Toyota Tundra",
         description="runs and drives",
@@ -251,7 +256,13 @@ async def test_write_observation_extended_end_time_marks_lot_extended(
 async def test_poll_one_unknown_source_returns_without_writing(
     _patched_get_session: AsyncSession,
 ) -> None:
-    """No poller for this source — silently skip without touching DB."""
+    """No poller for this source — warn + skip without touching DB.
+
+    This is the dispatch fall-through path. Shouldn't fire in production
+    (FAG-routed unknown auctions have no lots; every fetcher is a BidPoller)
+    but if it ever does, the warning surfaces the lot id + source in journal
+    rather than silently dropping the observation.
+    """
     session = _patched_get_session
     _, lot = _seed_lot(session)
     session.add(lot)
@@ -321,3 +332,208 @@ async def test_poll_one_happy_path_writes_observation(
     assert rows[0].status_at_observation == "open"
 
     assert notified == [("valuation_pending", str(lot_id))]
+
+
+# ── stale-lot guard ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_force_closes_stale_lot_past_end(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Phase 13: a lot whose scheduled_end is >24h in the past but lot_status
+    is still OPEN is unreachable or the source is buggy. Force-close it so the
+    bid-poller's fast bucket doesn't burn 30s slots on it forever.
+
+    Review fix #3: the force-close path must (a) distinguish itself from
+    naturally-closed lots via FORCE_CLOSED, (b) stamp closed_at so downstream
+    consumers don't see CLOSED-with-null-closed_at, and (c) preserve the last
+    observed bid as final_bid_cad.
+    """
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    long_ago = now - timedelta(hours=48)
+    _, lot = _seed_lot(
+        session, lot_status="open", scheduled_end_at=long_ago,
+        current_high_bid_cad=Decimal("1250.00"),
+    )
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    assert lot_id not in [lid for lid, _ in fast]
+    assert lot_id not in [lid for lid, _ in slow]
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.FORCE_CLOSED
+    assert lot.closed_at is not None
+    assert lot.final_bid_cad == Decimal("1250.00")
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_clock_skew_guard_skips_force_close(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Review fix #3 ceiling: if the gap between now and scheduled_end_at
+    exceeds the clock-skew threshold (default 7 days), the data is
+    untrustworthy — either the source pushed bogus end times or our clock has
+    drifted. Refuse to act: don't force-close, but also don't keep polling.
+    Operator sees a clear warning and can investigate.
+    """
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    way_too_long_ago = now - timedelta(days=10)
+    _, lot = _seed_lot(
+        session, lot_status="open", scheduled_end_at=way_too_long_ago,
+    )
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    # Excluded from polling rotation (no point burning slots on bad data).
+    assert lot_id not in [lid for lid, _ in fast]
+    assert lot_id not in [lid for lid, _ in slow]
+    # BUT NOT force-closed — clock can't be trusted, so don't mutate state.
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.OPEN
+    assert lot.closed_at is None
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_keeps_recently_past_end_lot(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Recently-past-end OPEN lots are normal (soft-close window, polling
+    catch-up); must NOT be force-closed."""
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    just_past = now - timedelta(minutes=30)
+    _, lot = _seed_lot(
+        session, lot_status="open", scheduled_end_at=just_past,
+    )
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, _ = await _load_open_lot_refs(now)
+    assert lot_id in [lid for lid, _ in fast]
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.OPEN
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_keeps_null_end_lot(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """auction.scheduled_end_at IS NULL → no basis for the stale check;
+    keep the lot in the polling rotation."""
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    _, lot = _seed_lot(session, lot_status="open")
+    lot.auction.scheduled_end_at = None
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+    assert (lot_id in [lid for lid, _ in fast]) or (lot_id in [lid for lid, _ in slow])
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.OPEN
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_uses_lot_end_when_auction_end_null(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """McDougall shape: auction.scheduled_end_at is NULL (the per-lot end
+    times don't aggregate to an auction-level value) but lot.scheduled_end_at
+    is populated. The poller must coalesce both for priority sorting AND
+    staleness checking so these lots make it into the batch.
+
+    Without coalesce, a McDougall lot whose lot.scheduled_end_at is 48h+ in
+    the past would skip the force-close path (auction.scheduled_end_at=NULL,
+    end becomes None, age check skipped) -- and stay OPEN forever.
+    Confirming the coalesced staleness check fires.
+    """
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    long_ago = now - timedelta(hours=48)
+    _, lot = _seed_lot(
+        session, lot_status="open",
+        current_high_bid_cad=Decimal("1500.00"),
+    )
+    # McDougall shape: auction.scheduled_end_at IS NULL,
+    # lot.scheduled_end_at carries the actual close time.
+    lot.auction.scheduled_end_at = None
+    lot.scheduled_end_at = long_ago
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    # 48h past -> force-closed via coalesced staleness check.
+    assert lot_id not in [lid for lid, _ in fast]
+    assert lot_id not in [lid for lid, _ in slow]
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.FORCE_CLOSED
+    assert lot.closed_at is not None
+    assert lot.final_bid_cad == Decimal("1500.00")
+
+
+@pytest.mark.asyncio
+async def test_load_open_lot_refs_polls_mcdougall_shape_in_active_window(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """McDougall shape with a future lot.scheduled_end_at: the lot must
+    end up in fast or slow bucket (not dropped). This is the primary
+    case the McDougall ingestion needs to work end-to-end."""
+    from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
+        _load_open_lot_refs,
+    )
+
+    session = _patched_get_session
+    now = datetime.now(UTC)
+    future = now + timedelta(days=3)
+    _, lot = _seed_lot(session, lot_status="open")
+    # McDougall shape: auction.scheduled_end_at NULL, lot has it.
+    lot.auction.scheduled_end_at = None
+    lot.scheduled_end_at = future
+    # McDougall lots don't have HiBid's source_lot_row_id quirk.
+    lot.source_lot_row_id = None
+    lot.auction.source = "mcdougall"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    fast, slow = await _load_open_lot_refs(now)
+
+    assert (
+        lot_id in [lid for lid, _ in fast]
+        or lot_id in [lid for lid, _ in slow]
+    )
+    await session.refresh(lot)
+    assert lot.lot_status == LotStatus.OPEN

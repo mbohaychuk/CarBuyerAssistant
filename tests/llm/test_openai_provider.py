@@ -89,12 +89,30 @@ async def test_describe_calls_ga_path_not_beta() -> None:
 
 
 @pytest.mark.asyncio
-async def test_describe_passes_max_tokens_3000() -> None:
-    """Phase 3 design overlay #10."""
+async def test_describe_passes_max_completion_tokens_for_reasoning_model() -> None:
+    """GPT-5 family renamed `max_tokens` → `max_completion_tokens`. Default
+    model is gpt-5-nano (reasoning), so the new param name must appear and
+    the legacy one must NOT (sending both 400s the API)."""
     provider = _provider_with_mock(_enrichment_fixture())
     await provider.describe(_describe_input())
     call_kwargs = provider.client.chat.completions.parse.await_args.kwargs
+    assert call_kwargs["max_completion_tokens"] == DESCRIBE_MAX_TOKENS
+    assert "max_tokens" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_describe_uses_legacy_max_tokens_for_gpt_4o_mini() -> None:
+    """gpt-4o-mini still uses the legacy `max_tokens` + `temperature=0`.
+    Dispatch must restore the old shape when the model name doesn't match
+    a reasoning-family prefix."""
+    provider = _provider_with_mock(_enrichment_fixture())
+    provider.model = "gpt-4o-mini"
+    await provider.describe(_describe_input())
+    call_kwargs = provider.client.chat.completions.parse.await_args.kwargs
     assert call_kwargs["max_tokens"] == DESCRIBE_MAX_TOKENS
+    assert call_kwargs["temperature"] == 0
+    assert "max_completion_tokens" not in call_kwargs
+    assert "reasoning_effort" not in call_kwargs
 
 
 @pytest.mark.asyncio
@@ -123,11 +141,13 @@ async def test_describe_user_prompt_includes_title_and_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_describe_uses_temperature_zero() -> None:
+async def test_describe_omits_temperature_for_reasoning_model() -> None:
+    """GPT-5 family rejects temperature=0 (only temperature=1 supported).
+    Dispatch must omit the parameter so the SDK uses the model's default."""
     provider = _provider_with_mock(_enrichment_fixture())
     await provider.describe(_describe_input())
     call_kwargs = provider.client.chat.completions.parse.await_args.kwargs
-    assert call_kwargs["temperature"] == 0
+    assert "temperature" not in call_kwargs
 
 
 @pytest.mark.asyncio

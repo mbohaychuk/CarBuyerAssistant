@@ -117,7 +117,14 @@ async def main(now: datetime | None = None) -> None:
     # excluded here in SQL to avoid fetching rows we'll immediately skip.
     async with get_session() as session:
         stmt = select(AuctionLot.id, AuctionLot.auction_id).where(
-            AuctionLot.lot_status.in_([LotStatus.CLOSED, LotStatus.SOLD, LotStatus.UNSOLD]),
+            AuctionLot.lot_status.in_(
+                [
+                    LotStatus.CLOSED,
+                    LotStatus.SOLD,
+                    LotStatus.UNSOLD,
+                    LotStatus.FORCE_CLOSED,
+                ],
+            ),
             AuctionLot.closed_at.is_not(None),
             AuctionLot.closed_at <= cutoff,
             AuctionLot.was_purchased_by_us.is_(False),

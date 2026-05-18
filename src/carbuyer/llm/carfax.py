@@ -141,6 +141,16 @@ async def extract_carfax_findings(
     text = re.sub(r"\s+", " ", text)[:CARFAX_HTML_TRUNCATE]
     use_model = model or settings.openai_model
     try:
+        from carbuyer.llm.openai_provider import _is_reasoning_model  # noqa: PLC0415
+
+        extra: dict[str, object] = {}
+        if _is_reasoning_model(use_model):
+            extra["max_completion_tokens"] = CARFAX_MAX_TOKENS
+            if settings.openai_reasoning_effort:
+                extra["reasoning_effort"] = settings.openai_reasoning_effort
+        else:
+            extra["max_tokens"] = CARFAX_MAX_TOKENS
+            extra["temperature"] = 0
         response = await client.chat.completions.parse(
             model=use_model,
             messages=[
@@ -152,8 +162,7 @@ async def extract_carfax_findings(
                 {"role": "user", "content": text},
             ],
             response_format=CarfaxFindings,
-            temperature=0,
-            max_tokens=CARFAX_MAX_TOKENS,
+            **extra,  # type: ignore[arg-type]
         )
     except Exception:
         log.exception("carfax extract failed")

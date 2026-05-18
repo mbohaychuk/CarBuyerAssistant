@@ -61,6 +61,11 @@ class Auction(Base, TimestampMixin):
     pickup_province: Mapped[str | None] = mapped_column(String(8))
     pickup_window_text: Mapped[str | None] = mapped_column(Text)
     buyer_premium_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    # Cap and floor on the *premium amount* (not the percent). Both nullable.
+    # When NULL, premium is purely linear (pct * bid) -- current HiBid behavior.
+    # McDougall states "15% to a Max $2000, Min $20" so max=2000, min=20.
+    buyer_premium_max_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    buyer_premium_min_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     online_bidding_fee_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     gst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     pst_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
@@ -117,6 +122,11 @@ class AuctionLot(Base, TimestampMixin):
         index=True,
     )
     source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # HiBid exposes two ids per lot: stable `itemId` (vehicle identity, stored
+    # in source_lot_id, used as upsert key) and a per-listing row `id` (used
+    # by HiBid's eventItemIds filter for single-lot lookups in bid_poller).
+    # Other sources don't need this and leave it NULL.
+    source_lot_row_id: Mapped[int | None] = mapped_column(BigInteger)
     lot_number: Mapped[str | None] = mapped_column(String(64))
     url: Mapped[str] = mapped_column(Text, nullable=False)
     # parser_version: the source plugin's parser version at the time this row
@@ -130,6 +140,13 @@ class AuctionLot(Base, TimestampMixin):
         default=list,
         server_default=text("'{}'::text[]"),
         nullable=False,
+    )
+    # Per-lot end time. NULL for HiBid (auction.scheduled_end_at covers the
+    # whole event); populated for McDougall where each lot in an auction-event
+    # has its own close time. bid_poller coalesces auction-then-lot when
+    # priority-sorting and force-close-checking.
+    scheduled_end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True,
     )
 
     # ── Owned by: lot-scraper (initial), description-enricher (LLM normalization) ──
@@ -307,6 +324,19 @@ class AuctionLot(Base, TimestampMixin):
         nullable=False,
     )
     last_valuation_error: Mapped[str | None] = mapped_column(Text)
+    # Phase 13 (review fix): retry counter for the notifier. Mirrors
+    # enrichment_attempts / valuation_attempts. A Discord POST that returns
+    # False (429-after-retry, 4xx, network blip, missing channel) increments
+    # this and leaves notification_status at PENDING for re-claim until
+    # attempts >= settings.notification_max_attempts, at which point the
+    # status is flipped to FAILED. Without this, every transient Discord blip
+    # silently lost the notification (lot looked DONE in the DB; no message).
+    notification_attempts: Mapped[int] = mapped_column(
+        Integer,
+        server_default=text("0"),
+        nullable=False,
+    )
+    last_notification_error: Mapped[str | None] = mapped_column(Text)
     # Inferred-from-sparse-listing flag: when condition_confidence < 0.5 the
     # enricher coerces condition_categorical to "decent" but sets this True so
     # Phase 4 valuation can apply a separate sparse-listing pessimism penalty

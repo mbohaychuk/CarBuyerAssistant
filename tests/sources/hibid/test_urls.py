@@ -7,7 +7,7 @@ from carbuyer.sources.hibid.urls import (
 
 
 def test_province_vehicles_url() -> None:
-    # Catalogs/events view — used by auction-discoverer to enumerate auctions.
+    # Catalogs/events view — used by the ingester to enumerate auctions.
     assert (
         province_vehicles_url("AB")
         == "https://hibid.com/alberta/auctions/700006/cars-and-vehicles?status=open"

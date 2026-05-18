@@ -60,6 +60,18 @@ _VISION_AGGREGATE_MAX_TOKENS = 1024
 T = TypeVar("T", bound=BaseModel)
 
 
+# Model families that use `max_completion_tokens` instead of `max_tokens` and
+# accept the `reasoning_effort` parameter. Heuristic on model name prefix; a
+# false positive (model accepts old params) errors loudly with 400, which is
+# easy to diagnose. A false negative (we send max_tokens to a reasoning model)
+# is exactly the bug this exists to prevent.
+_REASONING_MODEL_PREFIXES: tuple[str, ...] = ("gpt-5", "o1", "o3", "o4")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return any(model.startswith(p) for p in _REASONING_MODEL_PREFIXES)
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI implementation of `describe` and `vision` (Phase 3 + Phase 8).
 
@@ -120,13 +132,26 @@ class OpenAIProvider(LLMProvider):
         and multimodal (vision) callers share token-usage + duration logging.
         """
         t0 = time.monotonic()
+        # GPT-5 / o-series API differences vs gpt-4o-mini:
+        #   • `max_tokens` → `max_completion_tokens`
+        #   • `temperature` must be 1 (only default supported)
+        #   • accepts `reasoning_effort`
+        # Dispatch on model name prefix so a future switch back to gpt-4o-mini
+        # restores the older parameter shape automatically.
+        extra: dict[str, object] = {}
+        if _is_reasoning_model(self.model):
+            extra["max_completion_tokens"] = max_tokens
+            if settings.openai_reasoning_effort:
+                extra["reasoning_effort"] = settings.openai_reasoning_effort
+        else:
+            extra["max_tokens"] = max_tokens
+            extra["temperature"] = 0
         try:
             response = await self.client.chat.completions.parse(
                 model=self.model,
                 messages=messages,
                 response_format=response_format,
-                temperature=0,
-                max_tokens=max_tokens,
+                **extra,  # type: ignore[arg-type]
             )
         except (APIError, RateLimitError):
             log.exception(
@@ -207,7 +232,12 @@ class OpenAIProvider(LLMProvider):
                         f"Description red flags: {red_flags_str}. "
                         f"Description green flags: {green_flags_str}."
                     )},
-                    {"type": "image_url", "image_url": {"url": data_url}},
+                    # detail="low" — ~85 input tokens per image vs ~1100 at
+                    # "high" (which is what "auto" routes 1024×1024 to). For
+                    # rust/dent/panel-gap detection on a downscaled 1024px
+                    # JPEG, low detail is more than sufficient; saves ~$3.70
+                    # of every $4 of monthly vision-input spend.
+                    {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
                 ]},
             ]
             try:

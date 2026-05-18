@@ -29,6 +29,70 @@ def test_all_in_cost_applies_bp_then_tax_then_landed() -> None:
     assert cost == Decimal("12050.00")
 
 
+def test_all_in_cost_caps_premium_when_max_active() -> None:
+    # McDougall regime: 15% would be 3000 on a 20k bid; cap pins it at 2000.
+    cost = all_in_cost(
+        current_high_bid=Decimal("20000"),
+        buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("0"),
+        buyer_premium_max_cad=Decimal("2000"),
+        buyer_premium_min_cad=Decimal("20"),
+    )
+    # (20000 + 2000) * 1.05 = 23100.
+    assert cost == Decimal("23100.00")
+
+
+def test_all_in_cost_floors_premium_when_min_active() -> None:
+    # 15% of 100 = 15; floor pins it at 20.
+    cost = all_in_cost(
+        current_high_bid=Decimal("100"),
+        buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("0"),
+        buyer_premium_max_cad=Decimal("2000"),
+        buyer_premium_min_cad=Decimal("20"),
+    )
+    # (100 + 20) * 1.05 = 126.
+    assert cost == Decimal("126.00")
+
+
+def test_all_in_cost_linear_when_inside_cap_and_floor() -> None:
+    # 15% of 10000 = 1500; comfortably between 20 floor and 2000 cap.
+    cost = all_in_cost(
+        current_high_bid=Decimal("10000"),
+        buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("0"),
+        buyer_premium_max_cad=Decimal("2000"),
+        buyer_premium_min_cad=Decimal("20"),
+    )
+    # (10000 + 1500) * 1.05 = 12075.
+    assert cost == Decimal("12075.00")
+
+
+def test_all_in_cost_at_cap_boundary_uses_linear() -> None:
+    # Bid exactly hits the cap-boundary: 13333.33... * 0.15 = 2000 exact.
+    # The clamp's `>` means equality stays linear; results match either way.
+    bid = Decimal("13333.33")
+    cost_capped = all_in_cost(
+        current_high_bid=bid, buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0"), pst_pct=Decimal("0"),
+        landed_cost_premium=Decimal("0"),
+        buyer_premium_max_cad=Decimal("2000"),
+    )
+    cost_linear = all_in_cost(
+        current_high_bid=bid, buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0"), pst_pct=Decimal("0"),
+        landed_cost_premium=Decimal("0"),
+    )
+    # 13333.33 * 0.15 = 1999.9995 → just under 2000 cap → linear path.
+    assert cost_capped == cost_linear
+
+
 # ─── price_deal_score ───
 
 
@@ -136,6 +200,66 @@ def test_recommended_max_bid_returns_none_when_margin_exceeds_value() -> None:
     assert bid is None
 
 
+def test_recommended_max_bid_in_capped_regime_pins_premium() -> None:
+    # High-value lot: linear answer would imply a premium past the $2000 cap.
+    # Expected behaviour: solver picks the capped-regime bid where premium=cap.
+    bid = recommended_max_bid(
+        expected_value=Decimal("50000"),
+        buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0"),
+        pst_pct=Decimal("0"),
+        landed_cost_premium=Decimal("0"),
+        flip_margin=Decimal("2000"),
+        buyer_premium_max_cad=Decimal("2000"),
+        buyer_premium_min_cad=Decimal("20"),
+    )
+    # target_all_in = 48000; bid+premium=48000; cap pins premium=2000; bid=46000.
+    # Sanity: 46000 * 0.15 = 6900 > 2000 cap, so cap regime is correct.
+    assert bid == Decimal("46000")
+
+
+def test_recommended_max_bid_in_floored_regime_pins_premium() -> None:
+    # Very low-value lot: linear premium would be below the $20 floor.
+    bid = recommended_max_bid(
+        expected_value=Decimal("100"),
+        buyer_premium_pct=Decimal("0.15"),
+        gst_pct=Decimal("0"),
+        pst_pct=Decimal("0"),
+        landed_cost_premium=Decimal("0"),
+        flip_margin=Decimal("0"),
+        buyer_premium_max_cad=Decimal("2000"),
+        buyer_premium_min_cad=Decimal("20"),
+    )
+    # target_all_in = 100; bid+premium=100; floor pins premium=20; bid=80.
+    # Sanity: 80 * 0.15 = 12 < 20 floor, so floor regime is correct.
+    assert bid == Decimal("80")
+
+
+def test_recommended_max_bid_in_linear_regime_with_bounds_present() -> None:
+    # Mid-range bid: linear premium stays between floor and cap → linear answer.
+    # Identical to the no-cap/no-floor test, confirming the bounds don't
+    # perturb the answer when they aren't binding.
+    bid_with_bounds = recommended_max_bid(
+        expected_value=Decimal("20000"),
+        buyer_premium_pct=Decimal("0.10"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("500"),
+        flip_margin=Decimal("2000"),
+        buyer_premium_max_cad=Decimal("2000"),
+        buyer_premium_min_cad=Decimal("20"),
+    )
+    bid_no_bounds = recommended_max_bid(
+        expected_value=Decimal("20000"),
+        buyer_premium_pct=Decimal("0.10"),
+        gst_pct=Decimal("0.05"),
+        pst_pct=Decimal("0.00"),
+        landed_cost_premium=Decimal("500"),
+        flip_margin=Decimal("2000"),
+    )
+    assert bid_with_bounds == bid_no_bounds
+
+
 # ─── flag_score: overlay #10 (thin floor) + overlay #11 (dilution cap) ───
 
 
@@ -215,8 +339,17 @@ def test_flag_score_heavy_reds_still_count_with_dilution_cap() -> None:
 
 def test_flag_score_dilution_cap_with_offsetting_greens() -> None:
     # 5 light reds (cap -2) + 3 light greens (+3) → +1.
-    red = [{"flag": f"light_{i}", "weight": -1} for i in range(5)]
-    green = [{"flag": f"good_{i}", "weight": 1} for i in range(3)]
+    red = [
+        {"flag": name, "weight": -1}
+        for name in (
+            "out_of_province", "winter_tires_only", "mileage_unknown",
+            "no_service_records", "smoker_owned",
+        )
+    ]
+    green = [
+        {"flag": name, "weight": 1}
+        for name in ("single_owner", "garage_kept", "non_smoker")
+    ]
     assert flag_score(red, green) == 1
 
 
@@ -224,3 +357,28 @@ def test_flag_score_constants_are_consistent() -> None:
     assert LIGHT_RED_DILUTION_THRESHOLD == 3  # noqa: PLR2004
     assert LIGHT_RED_DILUTION_CAP == -2  # noqa: PLR2004
     assert THIN_DESCRIPTION_FLAG_FLOOR == -2  # noqa: PLR2004
+
+
+def test_flag_score_ignores_hallucinated_llm_weight() -> None:
+    """The LLM's weight field is advisory only; the authoritative weight comes
+    from RED_FLAG_TAXONOMY. A hallucinated weight=-5 on a -1 flag must NOT
+    cascade into the score (otherwise one hallucination could pull a lot past
+    the excessive_red_flag_weight cutoff)."""
+    # rust_mentioned is -1 in the taxonomy; the LLM here invented -5.
+    red = [{"flag": "rust_mentioned", "weight": -5}]
+    assert flag_score(red, []) == -1
+
+
+def test_flag_score_unknown_flag_contributes_zero() -> None:
+    """A flag name that doesn't appear in the taxonomy (typo, drift, future
+    addition without taxonomy update) must NOT contribute its LLM weight."""
+    red = [{"flag": "made_up_flag_name", "weight": -3}]
+    assert flag_score(red, []) == 0
+
+
+def test_flag_score_synthetic_vision_flag_carries_minus_two() -> None:
+    """description_oversells_condition is intentionally outside the description
+    taxonomy (Phase 8 overlay #18); its weight is pinned in
+    _SYNTHETIC_FLAG_WEIGHTS so flag_score still recognizes it."""
+    red = [{"flag": "description_oversells_condition", "evidence": "x", "weight": 999}]
+    assert flag_score(red, []) == -2  # noqa: PLR2004

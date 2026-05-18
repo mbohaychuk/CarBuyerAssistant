@@ -1,13 +1,18 @@
 {% from "_macros.html" import money %}
 {% set lot = item.lot %}
 {% set auction = item.auction %}
+{# Heading: prefer normalized year/make/model/trim when available, else the
+   raw scraped title. Final fallback to "Lot #id" so the card is never an
+   anchor with no text (accessibility + click-target). #}
+{% set ymm = (lot.year or "") ~ " " ~ (lot.make or "") ~ " " ~ (lot.model or "") ~ " " ~ (lot.trim or "") %}
+{% set heading = ymm.strip() or lot.title or ("Lot #" ~ lot.id) %}
 <div class="card">
   <h3>
-    <a href="/lots/{{ lot.id }}">{{ lot.year or "" }} {{ lot.make or "" }} {{ lot.model or "" }} {{ lot.trim or "" }}</a>
+    <a href="/lots/{{ lot.id }}">{{ heading }}</a>
   </h3>
   <p class="muted">
     {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
-    closes {{ auction.scheduled_end_at.strftime("%b %d %H:%M") if auction.scheduled_end_at else "?" }}
+    closes {{ auction.scheduled_end_at | local_dt }}
   </p>
   <p>
     Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong>

@@ -3,11 +3,11 @@
 {% block content %}
   <h1>Auctions needing a plugin</h1>
   <p class="muted">
-    farmauctionguide.com surfaced these auctions but their underlying platform
-    isn't covered by any of our scraper plugins yet. Add a plugin under
-    <code>src/carbuyer/sources/&lt;name&gt;/</code> and register it in the
-    discoverer + lot-scraper + bid-poller registries, then click
-    <strong>Retry routing</strong> below to reprocess.
+    These auctions surfaced from an upstream discovery source but their
+    underlying platform isn't covered by any of our scraper plugins yet.
+    Add a plugin under <code>src/carbuyer/sources/&lt;name&gt;/</code> and
+    register it in the discoverer + lot-scraper + bid-poller registries,
+    then click <strong>Retry routing</strong> below to reprocess.
   </p>
   {% if not rows %}
     <p class="muted">Nothing waiting. New unknown-platform auctions will appear here as they're discovered.</p>

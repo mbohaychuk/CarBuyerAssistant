@@ -26,13 +26,19 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="postgresql+psycopg://carbuyer:local@localhost:5433/carbuyer")
     openai_api_key: str = Field(default="")
-    openai_model: str = Field(default="gpt-4o-mini")
+    openai_model: str = Field(default="gpt-5-nano")
     # Phase 3 design overlay #9: SDK-managed retries + per-call timeout. Empty
     # API key triggers fail-fast at worker startup, not on first call.
     openai_max_retries: int = 5
     openai_request_timeout_s: float = 60.0
+    # Reasoning-token effort for GPT-5 / o-series models. None = SDK default
+    # (medium), which burns hundreds of invisible reasoning tokens per call
+    # even on trivial schemas. Our workload is extraction/classification —
+    # "low" is sufficient and cuts effective output cost 3-5x. Set to None
+    # only when running a non-reasoning model (gpt-4o-mini, etc.).
+    openai_reasoning_effort: str | None = "low"
     # Phase 3 design overlay #12: bounded LLM concurrency per worker. tier-1
-    # gpt-4o-mini handles 500 RPM comfortably; 4-way is conservative.
+    # gpt-5-nano caps at 500 RPM / 200K TPM; 4-way is conservative.
     openai_concurrency: int = 4
     enrichment_batch_size: int = 20
     # Phase 3 design overlay #4 + #26: enrichment retry counter. Transient
@@ -45,7 +51,9 @@ class Settings(BaseSettings):
     enrichment_version: str = "v1"
     discord_bot_token: str = Field(default="")
     discord_guild_id: int | None = None
-    discord_channels: dict[str, int] = Field(default_factory=dict)
+    # Values can be int channel IDs OR string channel names. Names are
+    # resolved via channel_resolver.resolve_channels() at notifier startup.
+    discord_channels: dict[str, int | str] = Field(default_factory=dict)
     home_province: Province = "AB"
 
     notify_threshold: float = 0.15
@@ -64,6 +72,13 @@ class Settings(BaseSettings):
     # valuator does no LLM I/O, so it can drain larger batches.
     valuation_batch_size: int = 30
     valuation_max_attempts: int = 3
+    # Phase 13: notifier retry cap. A Discord POST returning False
+    # (429-after-retry, 4xx, network blip, missing channel) leaves
+    # notification_status=PENDING and increments notification_attempts;
+    # once attempts >= this, the worker flips to FAILED. Mirrors the
+    # enrichment/valuation retry semantics.
+    notification_max_attempts: int = 3
+    notification_batch_size: int = 50
     # Phase 4 overlay #12: lots whose RAW cumulative red-flag weight (pre-clip,
     # pre-dilution-cap) is at or below this are excluded from notifications
     # regardless of price-deal score. Heuristic; revisit after first 100 lots.
@@ -90,16 +105,25 @@ class Settings(BaseSettings):
 
     @field_validator("discord_channels", mode="before")
     @classmethod
-    def _parse_discord_channels(cls, value: Any) -> dict[str, int]:
+    def _parse_discord_channels(cls, value: Any) -> dict[str, int | str]:
         if value is None or value == "":
             return {}
         if isinstance(value, str):
             value = json.loads(value)
         if not isinstance(value, dict):
-            raise ValueError("DISCORD_CHANNELS must be a JSON object of name→channel_id")
-        result: dict[str, int] = {}
+            raise ValueError(
+                "DISCORD_CHANNELS must be a JSON object of key→(channel_id or name)",
+            )
+        result: dict[str, int | str] = {}
         for k, v in value.items():  # type: ignore[reportUnknownVariableType]
-            result[str(k)] = int(v)  # type: ignore[reportUnknownArgumentType]
+            key = str(k)  # type: ignore[reportUnknownArgumentType]
+            if isinstance(v, int):
+                result[key] = v
+            elif isinstance(v, str) and v.lstrip("#").isdigit():
+                # Numeric-string IDs ("12345") are normalized to int up front.
+                result[key] = int(v.lstrip("#"))
+            else:
+                result[key] = str(v)  # type: ignore[reportUnknownArgumentType]
         return result
 
 

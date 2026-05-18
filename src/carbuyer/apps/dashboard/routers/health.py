@@ -8,12 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
-from carbuyer.apps.dashboard.deps import (
-    OPEN_STATUSES,
-    CurrentUser,
-    current_user,
-    get_session,
-)
+from carbuyer.apps.dashboard.deps import OPEN_STATUSES, get_session
 from carbuyer.db.enums import (
     EnrichmentStatus,
     NotificationStatus,
@@ -28,10 +23,9 @@ router = APIRouter()
 async def health(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
-    # Auth seam exercised here so it doesn't rot. Real auth replaces the
-    # current_user body without touching this signature.
-    _user: Annotated[CurrentUser, Depends(current_user)],
 ) -> HTMLResponse:
+    # /health is intentionally unauthenticated — it's the readiness probe for
+    # monitoring tools. Mutating endpoints exercise the current_user seam.
     auction_count = (await session.execute(
         select(func.count()).select_from(Auction),
     )).scalar_one()
