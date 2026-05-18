@@ -175,3 +175,60 @@ async def test_build_comp_set_skips_rows_with_no_price(
         year=2015, mileage_km=150000,
     )
     assert len(comps) == 0
+
+
+@pytest.mark.asyncio
+async def test_build_comp_set_includes_force_closed_lots(
+    session: AsyncSession,
+) -> None:
+    """bid_poller force-closes lots stuck OPEN past scheduled_end+24h and
+    writes final_bid_cad from current_high_bid_cad in the same branch. Those
+    are real completed sales — filtering `lot_status == 'closed'` alone
+    silently drops them and shrinks an already-sparse Western-Canada comp set.
+    """
+    a = Auction(
+        source="hibid", source_auction_id="A1", url="x", canonical_url="x",
+        auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    await session.flush()
+    force_closed = AuctionLot(
+        auction_id=a.id, source_lot_id="L1", url="https://x/lot/1",
+        title="2015 Toyota Tacoma TRD Off-Road",
+        year=2015, make="Toyota", model="Tacoma", trim="TRD Off-Road",
+        mileage_km=150000,
+        lot_status="force_closed",
+        closed_at=datetime.now(UTC) - timedelta(days=3),
+        final_bid_cad=Decimal("19500"),
+    )
+    session.add(force_closed)
+    await session.commit()
+
+    comps = await build_comp_set(
+        session, make="Toyota", model="Tacoma", trim="TRD Off-Road",
+        year=2015, mileage_km=150000,
+    )
+    auction_comps = [c for c in comps if c.source == "auction_lots"]
+    assert len(auction_comps) == 1
+    assert auction_comps[0].price_cad == Decimal("19500")
+
+
+@pytest.mark.asyncio
+async def test_build_comp_set_make_model_lookup_is_case_insensitive(
+    session: AsyncSession,
+) -> None:
+    """Enricher writes the LLM's casing; historical_sales seeded from
+    external research carries whatever casing the researcher used. The
+    comp filter upper-cases both sides so the lookup can't collapse to
+    zero on a cosmetic mismatch."""
+    session.add_all([
+        _historical(make="toyota", model="tacoma"),
+        _historical(make="TOYOTA", model="TACOMA"),
+    ])
+    await session.commit()
+    comps = await build_comp_set(
+        session, make="Toyota", model="Tacoma", trim="TRD Off-Road",
+        year=2015, mileage_km=150000,
+    )
+    assert len(comps) == 2  # noqa: PLR2004
