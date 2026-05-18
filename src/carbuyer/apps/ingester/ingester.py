@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from carbuyer.apps.auction_discoverer.discoverer import upsert_auction
-from carbuyer.apps.lot_scraper.scraper import upsert_lot_with_status_cascade
 from carbuyer.db.notify import notify
+from carbuyer.db.upserts import upsert_auction, upsert_lot_with_status_cascade
 from carbuyer.db.session import get_session
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
@@ -33,8 +32,8 @@ log = get_logger("ingester")
 Strategy = Callable[[], Awaitable[int]]
 
 # Bumped any time the cross-auction LotSearch query shape or parsing
-# semantics change. Surfaces in lot_scraper's parser_version field so
-# stale rows get re-pending'd via the content-cascade.
+# semantics change. Surfaces in AuctionLot.parser_version so stale rows
+# get re-pending'd via the content-cascade in upsert_lot_with_status_cascade.
 _HIBID_PARSER_VERSION = "hibid/v2.0-cross-auction"
 _MCDOUGALL_PARSER_VERSION = "mcdougall/v1.0-catalog-walker"
 

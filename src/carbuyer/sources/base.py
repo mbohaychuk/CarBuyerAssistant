@@ -70,7 +70,7 @@ class RawLot:
     title: str | None
     description: str | None
     photos: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-    # See LotRef.source_lot_row_id. Plumbed through so the lot_scraper upsert
+    # See LotRef.source_lot_row_id. Plumbed through so the upsert helper
     # populates AuctionLot.source_lot_row_id without going through ref.
     source_lot_row_id: int | None = None
     year: int | None = None
@@ -178,9 +178,9 @@ class AuctionSource(AuctionDiscoverer, AuctionFetcher, BidPoller):
 
 
 # ── Registry ────────────────────────────────────────────────────────────────
-# Plugins call `register(self)` at module import time; the lot-scraper /
-# discoverer / dashboard read SOURCES to enumerate covered platforms (used by
-# the Phase-10 "needs-plugin" alerting and the dashboard health view).
+# Plugins call `register(self)` at module import time; the ingester / dashboard
+# read SOURCES to enumerate covered platforms (used by the "needs-plugin"
+# alerting and the dashboard health view).
 
 SOURCES: dict[str, Source] = {}
 

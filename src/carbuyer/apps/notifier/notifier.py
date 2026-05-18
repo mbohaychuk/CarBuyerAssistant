@@ -401,9 +401,9 @@ async def _catchup_sweep(*, http_session: aiohttp.ClientSession) -> None:
 async def _process_needs_plugin(
     auction_id: int, *, http_session: aiohttp.ClientSession,
 ) -> None:
-    # Catchup is implicit: the auction-discoverer re-fires this NOTIFY on every
-    # sweep while needs_plugin_notified_at is NULL, so a missed NOTIFY recovers
-    # on the next discovery pass (typically every few minutes / hours).
+    # No new needs_plugin rows are produced today (the only producer was the
+    # FAG router strategy, which was removed). This handler exists to drain
+    # any historical NULL-`needs_plugin_notified_at` rows on retry.
     async with get_session() as session:
         auction = await session.get(Auction, auction_id)
         if auction is None:

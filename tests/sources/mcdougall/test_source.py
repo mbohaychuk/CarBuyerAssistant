@@ -71,7 +71,8 @@ def test_source_self_registers_on_import() -> None:
 
 def test_source_version_set() -> None:
     # Version is bumped when the discovery/fetch contract changes; checked
-    # against the lot_scraper's parser_version cascade so stale rows re-pend.
+    # against AuctionLot.parser_version in the upsert cascade so stale rows
+    # re-pend (see carbuyer.db.upserts.upsert_lot_with_status_cascade).
     assert McDougallSource.version == "1"
 
 

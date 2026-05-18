@@ -655,6 +655,6 @@ def _to_decimal(value: Any) -> Decimal | None:
     return None
 
 
-# Register at import time so the lot-scraper / discoverer worker / dashboard
-# health view can enumerate covered platforms via SOURCES (Phase 0 design #11).
+# Register at import time so the ingester / dashboard health view can
+# enumerate covered platforms via SOURCES (Phase 0 design #11).
 register(HibidSource(provinces=list(settings.hibid_provinces)))
