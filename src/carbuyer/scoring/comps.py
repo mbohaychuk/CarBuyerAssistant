@@ -27,7 +27,20 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from carbuyer.db.enums import LotStatus
 from carbuyer.db.models import AuctionLot, HistoricalSale
+
+# Lot statuses representing a completed auction with a trustworthy
+# `final_bid_cad`. CLOSED is the natural close path; FORCE_CLOSED is set by
+# bid_poller after 24h past scheduled_end with the source still returning OPEN
+# (the same branch writes final_bid_cad from current_high_bid_cad). Filtering
+# CLOSED alone silently drops force-closed lots from the comp set — material
+# in the sparse Western-Canada market the widened mileage band was meant to
+# address.
+_COMP_ELIGIBLE_STATUSES: tuple[str, ...] = (
+    LotStatus.CLOSED.value,
+    LotStatus.FORCE_CLOSED.value,
+)
 
 # Recency window for auction-lot comps. Older lots are out-of-distribution
 # (market moves, seasonality) and the auction-distiller is expected to have
@@ -106,7 +119,7 @@ async def build_comp_set(
         func.upper(AuctionLot.model) == model_u,
         AuctionLot.year.between(year - year_window, year + year_window),
         AuctionLot.mileage_km.between(mileage_lo, mileage_hi),
-        AuctionLot.lot_status == "closed",
+        AuctionLot.lot_status.in_(_COMP_ELIGIBLE_STATUSES),
         AuctionLot.closed_at >= cutoff,
         AuctionLot.final_bid_cad.is_not(None),
     )
