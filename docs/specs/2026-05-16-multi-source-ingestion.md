@@ -214,8 +214,13 @@ FAG changes their HTML, the skill just describes the new structure to
 the operator; an automated parser silently breaks.
 
 `_run_fag_router` was deleted from the ingester. `FarmAuctionGuideSource`
-stays in tree (still self-registers via the discoverer worker's import)
-so the skill can reuse parsing helpers if useful.
+and its tests were subsequently removed entirely (the skill walks FAG via
+WebFetch and doesn't need the Python plugin; keeping dead source code for
+a hypothetical reuse violated the "don't keep code for future requirements"
+principle). The `/admin/auctions/{id}/retry_routing` endpoint now routes
+via `carbuyer.sources.resolver.resolve_auction_url`, which asks each
+registered plugin's `parse_auction_url` directly -- cleaner than FAG's
+parallel `resolve_platform` + `PLATFORM_RULES` implementation.
 
 ## Appendix B — McDougall VIN parsing fix (2026-05-16)
 

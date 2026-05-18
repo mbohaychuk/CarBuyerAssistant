@@ -62,9 +62,9 @@ async def test_upsert_auction_dedupes_discovered_via(session: AsyncSession) -> N
     await session.flush()
     await upsert_auction(session, _raw(), discovered_via="hibid")  # duplicate
     await session.flush()
-    a = await upsert_auction(session, _raw(), discovered_via="farmauctionguide")
+    a = await upsert_auction(session, _raw(), discovered_via="discoverer")
     await session.flush()
-    assert sorted(a.discovered_via) == ["farmauctionguide", "hibid"]
+    assert sorted(a.discovered_via) == ["discoverer", "hibid"]
 
 
 @pytest.mark.asyncio

@@ -107,16 +107,11 @@ async def _run_mcdougall_lot_first() -> int:
 # dropped or hanging source is easy to spot in journalctl. Order matters
 # only for log readability; strategies are independent.
 #
-# FAG (farmauctionguide.com) was originally a third strategy but is no
-# longer in the automated ingestion loop. Production validation 2026-05-16
-# found their per-province pages now sit behind a Cloudflare bot challenge
-# (httpx-unreachable) and the accessible pages link to small-auctioneer
-# websites, not to platform aggregators -- the discovery shape no longer
-# fits an automated router. Long-tail auctioneer discovery moved to a
-# Claude Code skill (.claude/skills/discover-auctioneers) that produces a
-# markdown report for human review. FarmAuctionGuideSource stays in tree
-# (still self-registers via the discoverer worker's import) so the skill
-# can reuse parsing helpers if useful.
+# Long-tail auctioneer discovery (smaller sites we don't yet plug) is
+# handled out-of-band by the .claude/skills/discover-auctioneers skill,
+# which walks aggregator sites + emits a markdown report for human review.
+# See docs/specs/2026-05-16-multi-source-ingestion.md Appendix A for the
+# history of why automated long-tail ingestion was rejected.
 STRATEGIES: list[tuple[str, Strategy]] = [
     ("hibid_lot_first", _run_hibid_lot_first),
     ("mcdougall_lot_first", _run_mcdougall_lot_first),
