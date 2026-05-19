@@ -429,11 +429,13 @@ async def _catchup_sweep(provider: OpenAIProvider) -> None:
 
     Phase 2 design overlay #12 + Phase 3 overlay #3: every continuous worker
     must do this before entering ``LISTEN`` to recover NOTIFYs missed during
-    downtime. Phase 13: prepend orphan recovery — flip IN_PROGRESS rows from
-    a prior crash back to PENDING so claim_pending_ids picks them up.
-    Without this, a SIGKILL between claim and write-completion strands the
-    row forever (Phase 2.5 watchdog is referenced in queue.py:64 but isn't
-    actually implemented yet).
+    downtime. Three steps run before the pending drain, in order: re-pend
+    lots whose enrichment_version is stale (a version bump re-enriches the
+    corpus); then orphan recovery — flip IN_PROGRESS rows from a prior crash
+    back to PENDING so claim_pending_ids picks them up. Without that recovery,
+    a SIGKILL between claim and write-completion strands the row forever
+    (Phase 2.5 watchdog is referenced in queue.py:64 but isn't actually
+    implemented yet).
     """
     async with get_session() as s, s.begin():
         repended = await repend_stale_enrichment_version(
