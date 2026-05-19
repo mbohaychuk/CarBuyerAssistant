@@ -1,9 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Feed — CarBuyer{% endblock %}
+{% block title %}Today — CarBuyer{% endblock %}
+{% block nav %}today{% endblock %}
 {% block content %}
+<div class="stack stack--md">
   <h1>Auction feed</h1>
   {% include "partials/feed_filters.html" %}
-  <div id="lot-list">
+  <div id="lot-list" class="grid-cards">
     {% include "partials/lot_list.html" %}
   </div>
+</div>
 {% endblock %}

@@ -1,0 +1,91 @@
+/* Reset + body defaults + element typography.
+ *
+ * Tokens are imported before this file. Anything here either resets a
+ * browser default or sets the project-wide default for a bare HTML element.
+ * Class-based component styles live in components/.
+ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font: var(--fw-reg) var(--fs-base) / var(--lh-base) var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  /* Tabular numerics on by default so all rendered numbers align. The
+     handful of places where proportional digits look better (running text)
+     can opt out with .t-proportional. */
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-weight: var(--fw-sbd);
+  line-height: var(--lh-tight);
+  color: var(--color-text);
+}
+
+h1 { font-size: var(--fs-xl); }
+h2 { font-size: var(--fs-lg); }
+h3 { font-size: var(--fs-md); }
+h4 { font-size: var(--fs-base); }
+
+p { margin: 0; line-height: var(--lh-base); }
+
+a {
+  color: var(--color-info);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+img { max-width: 100%; display: block; }
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  min-height: var(--tap-target);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  font-weight: var(--fw-med);
+  transition: background 120ms ease;
+}
+button:hover { background: var(--color-surface-sunk); }
+button[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+/* Primary action variant for hx-post mutations the user thinks of as
+   commits (Bid, Mark interested). Use sparingly — one primary per view. */
+button.btn--primary {
+  background: var(--color-info);
+  color: var(--color-text-inverse);
+  border-color: var(--color-info);
+}
+button.btn--primary:hover { background: #194d87; }
+
+button.btn--danger {
+  color: var(--color-bad);
+  border-color: var(--color-bad);
+}
+
+/* Native form controls — at least readable */
+input, select, textarea {
+  min-height: var(--tap-target);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--color-info);
+  outline-offset: 1px;
+}
+
+/* Selection */
+::selection { background: var(--color-info-bg); color: var(--color-text); }

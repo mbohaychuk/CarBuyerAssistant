@@ -1,0 +1,45 @@
+/* CountdownChip — closing-in-Xh visual.
+ *
+ * Urgency tier (data-urgency) is set server-side from minutes-to-close.
+ * Pure CSS — no JavaScript ticker. The chip updates only when the page
+ * (or its enclosing HTMX target) re-renders, which is fine for the
+ * "closing in 6h" precision the user actually cares about. Sub-minute
+ * countdowns live in the Bid Console with a real ticker.
+ */
+
+.countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--fw-med);
+  font-size: var(--fs-sm);
+  background: var(--color-surface-sunk);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.countdown[data-urgency="med"] {
+  color: var(--urgency-med);
+  background: var(--color-warn-bg);
+}
+.countdown[data-urgency="high"] {
+  color: var(--urgency-high);
+  background: var(--color-bad-bg);
+}
+.countdown[data-urgency="now"] {
+  color: var(--color-text-inverse);
+  background: var(--urgency-now);
+  animation: countdown-pulse 2s ease-in-out infinite;
+}
+.countdown[data-urgency="closed"] {
+  color: var(--color-text-muted);
+  background: transparent;
+  font-style: italic;
+}
+
+@keyframes countdown-pulse {
+  50% { box-shadow: 0 0 0 4px rgba(122, 15, 10, 0.18); }
+}
