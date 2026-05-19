@@ -1,13 +1,34 @@
 {% extends "base.html" %}
-{% block title %}Watched — CarBuyer{% endblock %}
+{% block nav %}watchlist{% endblock %}
+{% block title %}Watchlist — CarBuyer{% endblock %}
+
 {% block content %}
-  <h1>Watched lots</h1>
-  <p>
-    <a href="/watched?tier=interested" class="tag {{ 'deal' if tier == 'interested' else '' }}">Interested</a>
-    <a href="/watched?tier=maybe" class="tag {{ 'rare' if tier == 'maybe' else '' }}">Maybe</a>
-  </p>
-  {% if not items %}<p class="muted">No lots in this tier.</p>{% endif %}
-  {% for item in items %}
-    {% include "partials/lot_card.html" %}
+<section class="watched">
+  <h1>Watchlist</h1>
+
+  {% for state, label in [
+    ("interested", "Interested"),
+    ("bid_placed", "Bid placed"),
+    ("purchased", "Purchased"),
+    ("passed", "Passed"),
+  ] %}
+    <section class="watched__bucket" data-state="{{ state }}">
+      <h2>
+        {{ label }}
+        <span class="watched__count">{{ buckets[state] | length }}</span>
+      </h2>
+      {% if buckets[state] %}
+        <ul class="watched__list">
+          {% for item in buckets[state] %}
+            <li>
+              {% include "partials/lot_card.html" %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="watched__empty">No lots in this bucket.</p>
+      {% endif %}
+    </section>
   {% endfor %}
+</section>
 {% endblock %}

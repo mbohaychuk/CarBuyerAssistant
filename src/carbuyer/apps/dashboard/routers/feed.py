@@ -138,7 +138,7 @@ async def feed(  # noqa: PLR0912, PLR0913, PLR0915
     closing_hours: int | None = None,
     watched_only: bool = False,
     hide_showstoppers: bool = False,
-    exclude_not_interested: bool = True,
+    exclude_passed: bool = True,
     cursor: int | None = None,
     cursor_score: float | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 20,
@@ -158,7 +158,7 @@ async def feed(  # noqa: PLR0912, PLR0913, PLR0915
         "closing_hours": closing_hours,
         "watched_only": watched_only,
         "hide_showstoppers": hide_showstoppers,
-        "exclude_not_interested": exclude_not_interested,
+        "exclude_passed": exclude_passed,
     }
 
     # Apply preset overrides. Numeric thresholds widen with max() so an
@@ -232,14 +232,15 @@ async def feed(  # noqa: PLR0912, PLR0913, PLR0915
             ),
         )
     if watched_only:
+        _watched = [
+            UserAction.INTERESTED.value,
+            UserAction.BID_PLACED.value,
+            UserAction.PURCHASED.value,
+        ]
+        stmt = stmt.where(AuctionLot.user_action.in_(_watched))
+    elif exclude_passed:
         stmt = stmt.where(
-            AuctionLot.user_action.in_(
-                [UserAction.INTERESTED.value, UserAction.MAYBE.value],
-            ),
-        )
-    elif exclude_not_interested:
-        stmt = stmt.where(
-            AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
+            AuctionLot.user_action.is_distinct_from(UserAction.PASSED.value),
         )
     if hide_showstoppers:
         stmt = stmt.where(
@@ -372,7 +373,7 @@ async def feed(  # noqa: PLR0912, PLR0913, PLR0915
                 "min_score": min_score,
                 "min_rarity": min_rarity,
                 "max_price_cad": max_price_cad,
-                "exclude_not_interested": exclude_not_interested,
+                "exclude_passed": exclude_passed,
                 "active_chips": active_chips,
             },
         },

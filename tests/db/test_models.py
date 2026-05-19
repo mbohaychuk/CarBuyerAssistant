@@ -1,3 +1,4 @@
+from carbuyer.db.base import Base
 from carbuyer.db.enums import (
     AuctionStatus,
     EnrichmentStatus,
@@ -64,8 +65,16 @@ def test_auction_lot_has_required_columns() -> None:
         "notification_status", "enrichment_version",
         "early_warning_notified_at", "cheap_notified_at", "closing_notified_at",
         "trajectory_notified_at", "extended_notified_at", "last_notified_channel",
-        "user_action", "notes", "was_purchased_by_us",
+        "user_action", "max_bid_cad", "bid_placed_at", "won_at", "notes",
         "created_at", "updated_at",
     }
     missing = expected - cols
     assert not missing, f"missing columns: {missing}"
+
+
+def test_lot_action_history_table_present():
+    assert "lot_action_history" in Base.metadata.tables
+    cols = {c.name for c in Base.metadata.tables["lot_action_history"].columns}
+    assert cols == {
+        "id", "lot_id", "user_action", "max_bid_cad", "changed_at", "source",
+    }

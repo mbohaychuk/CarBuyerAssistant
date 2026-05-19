@@ -207,37 +207,37 @@ async def test_feed_filters_by_province(_patch_deps: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_feed_excludes_not_interested(_patch_deps: AsyncSession) -> None:
+async def test_feed_excludes_passed(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
     a = _seed_auction(session, source_id="A1", province="AB")
     _seed_lot(session, a, source_lot_id="KEEP")
     _seed_lot(
         session, a, source_lot_id="DROP",
-        user_action=UserAction.NOT_INTERESTED.value,
+        user_action=UserAction.PASSED.value,
     )
     await session.commit()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/lots?exclude_not_interested=true")
+        r = await client.get("/lots?exclude_passed=true")
     assert r.status_code == 200  # noqa: PLR2004
     assert "KEEP" in r.text
     assert "DROP" not in r.text
 
 
 @pytest.mark.asyncio
-async def test_feed_includes_not_interested_when_disabled(_patch_deps: AsyncSession) -> None:
+async def test_feed_includes_passed_when_disabled(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
     a = _seed_auction(session, source_id="A1", province="AB")
     _seed_lot(
         session, a, source_lot_id="DROP",
-        user_action=UserAction.NOT_INTERESTED.value,
+        user_action=UserAction.PASSED.value,
     )
     await session.commit()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/lots?exclude_not_interested=false")
+        r = await client.get("/lots?exclude_passed=false")
     assert r.status_code == 200  # noqa: PLR2004
     assert "DROP" in r.text
 

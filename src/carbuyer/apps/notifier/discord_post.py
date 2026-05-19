@@ -42,11 +42,6 @@ def _components_for_lot(lot_id: int) -> list[dict[str, Any]]:
                     "custom_id": f"deal:interested:{lot_id}",
                 },
                 {
-                    "type": _BUTTON, "style": _STYLE_SECONDARY,
-                    "label": "\U0001f914 Maybe",
-                    "custom_id": f"deal:maybe:{lot_id}",
-                },
-                {
                     "type": _BUTTON, "style": _STYLE_DANGER,
                     "label": "\U0001f44e Not interested",
                     "custom_id": f"deal:not_interested:{lot_id}",

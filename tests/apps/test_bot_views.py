@@ -31,6 +31,7 @@ from carbuyer.apps.bot.views import (
     _set_user_action,  # pyright: ignore[reportPrivateUsage]
 )
 from carbuyer.db.enums import UserAction
+from carbuyer.db.lot_state import apply_user_action
 from carbuyer.db.models import Auction, AuctionLot
 
 
@@ -137,9 +138,10 @@ async def test_set_user_action_writes_when_lot_exists(
     await session.flush()
     lot_id = lot.id
 
-    ok = await _set_user_action(lot_id, UserAction.INTERESTED)
+    ok, refusal = await _set_user_action(lot_id, UserAction.INTERESTED)
 
     assert ok is True
+    assert refusal is None
     await session.refresh(lot)
     assert lot.user_action == "interested"
 
@@ -163,9 +165,10 @@ async def test_set_user_action_logs_on_success(
     spy.info = capture_info
     monkeypatch.setattr(views_mod, "log", spy)
 
-    ok = await _set_user_action(lot_id, UserAction.INTERESTED)
+    ok, refusal = await _set_user_action(lot_id, UserAction.INTERESTED)
 
     assert ok is True
+    assert refusal is None
     assert infos == [
         (
             "user_action written",
@@ -191,12 +194,51 @@ async def test_set_user_action_returns_false_when_lot_missing(
     spy.warning = capture_warning
     monkeypatch.setattr(views_mod, "log", spy)
 
-    ok = await _set_user_action(999_999, UserAction.MAYBE)
+    ok, refusal = await _set_user_action(999_999, UserAction.INTERESTED)
 
     assert ok is False
+    assert refusal is None
     assert warnings == [
         (
             "user_action write skipped — lot not found",
-            {"lot_id": 999_999, "action": UserAction.MAYBE},
+            {"lot_id": 999_999, "action": UserAction.INTERESTED},
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_maybe_button_refuses_downgrade_of_purchased_lot(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """Clicking the legacy Maybe button on a purchased lot must not regress."""
+    session = _patched_get_session
+    lot = _seed_lot(session)
+    await session.flush()
+
+    # Advance to PURCHASED via the state machine so won_at is stamped correctly.
+    apply_user_action(session, lot, UserAction.PURCHASED, source="test")
+    await session.flush()
+    assert lot.user_action == UserAction.PURCHASED
+
+    interaction = MagicMock()
+    interaction.response = MagicMock()
+    interaction.response.defer = MagicMock(return_value=_noop_coro())
+    interaction.followup = MagicMock()
+    interaction.followup.send = MagicMock(return_value=_noop_coro())
+
+    button = LotMaybeButton(lot.id)
+    await button.callback(interaction)
+
+    # The bot replied with a refusal message.
+    args, kwargs = interaction.followup.send.call_args
+    msg: str = args[0] if args else kwargs.get("content", "")
+    assert "dashboard" in msg.lower()
+    assert kwargs.get("ephemeral") is True
+
+    # State did NOT regress.
+    await session.refresh(lot)
+    assert lot.user_action == UserAction.PURCHASED
+
+
+async def _noop_coro() -> None:
+    """Trivial coroutine for mocking async Discord methods."""

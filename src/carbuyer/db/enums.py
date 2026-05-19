@@ -69,8 +69,9 @@ class AuctionStatus(StrEnum):
 
 class UserAction(StrEnum):
     INTERESTED = "interested"
-    MAYBE = "maybe"
-    NOT_INTERESTED = "not_interested"
+    BID_PLACED = "bid_placed"
+    PURCHASED = "purchased"
+    PASSED = "passed"
 
 
 class AuctionSubtype(StrEnum):

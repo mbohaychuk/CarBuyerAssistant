@@ -48,8 +48,6 @@
 .lot-card[data-state="purchased"]  { border-left-color: var(--color-stamp-blue); }
 .lot-card[data-state="passed"]     { opacity: 0.55; }
 .lot-card[data-state="passed"]:hover { opacity: 0.95; }
-.lot-card[data-state="not_interested"] { opacity: 0.55; }
-.lot-card[data-state="not_interested"]:hover { opacity: 0.95; }
 
 /* ── Photo column ───────────────────────────────────────────────── */
 

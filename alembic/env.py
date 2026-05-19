@@ -31,7 +31,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(settings.database_url, poolclass=pool.NullPool)
+    # Prefer an explicit URL set on the alembic Config (used by test helpers
+    # that target a separate database). Fall back to the app settings so that
+    # the normal `alembic upgrade head` CLI flow is unchanged.
+    url = config.get_main_option("sqlalchemy.url") or settings.database_url
+    connectable = create_engine(url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
