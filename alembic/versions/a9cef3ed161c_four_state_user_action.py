@@ -13,7 +13,10 @@ was_purchased_by_us=TRUE AND user_action='not_interested' lands at
 'purchased', NOT 'passed' — purchased wins. Tested in
 tests/db/test_migration_four_state.py.
 
-Downgrade is LOSSY: formerly-`maybe` rows stay `interested` post-roundtrip.
+Downgrade is LOSSY: formerly-`maybe` rows stay `interested` post-roundtrip;
+`bid_placed` rows are remapped to `interested` (bid amount on those rows lives
+only in `lot_action_history`, which is also dropped — so the bid commitment is
+fully lost on downgrade).
 
 Revision ID: a9cef3ed161c
 Revises: a7d3a0c1e927
@@ -101,28 +104,33 @@ def upgrade() -> None:
     # 6. Drop the now-redundant was_purchased_by_us column
     op.drop_column("auction_lots", "was_purchased_by_us")
 
-    # 7. Add bidirectional CHECK constraints
+    # 7. Add bidirectional CHECK constraints.
+    # COALESCE(user_action::text, '') turns NULL into '' so the equality is
+    # always non-NULL — closing the gap where NULL = 'bid_placed' evaluates to
+    # NULL (passes the check) instead of FALSE (rejects the row).
     op.create_check_constraint(
         "ck_auction_lots_bid_placed_iff_max_bid",
         "auction_lots",
-        "(user_action = 'bid_placed') = (max_bid_cad IS NOT NULL)",
+        "(COALESCE(user_action::text, '') = 'bid_placed') = (max_bid_cad IS NOT NULL)",
     )
     op.create_check_constraint(
         "ck_auction_lots_bid_placed_iff_timestamp",
         "auction_lots",
-        "(user_action = 'bid_placed') = (bid_placed_at IS NOT NULL)",
+        "(COALESCE(user_action::text, '') = 'bid_placed') = (bid_placed_at IS NOT NULL)",
     )
     op.create_check_constraint(
         "ck_auction_lots_purchased_iff_won_at",
         "auction_lots",
-        "(user_action = 'purchased') = (won_at IS NOT NULL)",
+        "(COALESCE(user_action::text, '') = 'purchased') = (won_at IS NOT NULL)",
     )
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_auction_lots_purchased_iff_won_at", "auction_lots")
-    op.drop_constraint("ck_auction_lots_bid_placed_iff_timestamp", "auction_lots")
-    op.drop_constraint("ck_auction_lots_bid_placed_iff_max_bid", "auction_lots")
+    # NOTE: op.create_check_constraint prepends the table name, so the
+    # constraint names in the DB are doubled: ck_auction_lots_ck_auction_lots_*
+    op.drop_constraint("ck_auction_lots_ck_auction_lots_purchased_iff_won_at", "auction_lots")
+    op.drop_constraint("ck_auction_lots_ck_auction_lots_bid_placed_iff_timestamp", "auction_lots")
+    op.drop_constraint("ck_auction_lots_ck_auction_lots_bid_placed_iff_max_bid", "auction_lots")
 
     op.add_column(
         "auction_lots",
@@ -145,6 +153,13 @@ def downgrade() -> None:
     op.execute(
         "UPDATE auction_lots SET user_action = 'interested' "
         "WHERE user_action = 'purchased'"
+    )
+    # bid_placed is not a valid legacy value; remap to interested (positive
+    # intent). The bid amount is lost — it only ever lived in max_bid_cad (being
+    # dropped below) and lot_action_history (also dropped below).
+    op.execute(
+        "UPDATE auction_lots SET user_action = 'interested' "
+        "WHERE user_action = 'bid_placed'"
     )
 
     op.drop_column("auction_lots", "won_at")
