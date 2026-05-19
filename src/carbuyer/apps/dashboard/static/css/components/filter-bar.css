@@ -1,0 +1,289 @@
+/* FilterBar — Auction House Ledger.
+ *
+ * Sticky multi-row block that lives directly under the topnav. Row 1 =
+ * search + sort; row 2 = preset chips (horizontally scrollable on
+ * phone); row 3 = province chips + "More filters" popover; row 4 =
+ * active-filter summary chips. The bar collapses gracefully on mobile —
+ * everything in row 2/3 is touch-targetable.
+ */
+
+.filter-bar {
+  position: sticky;
+  top: var(--topnav-h);
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  background: color-mix(in srgb, var(--color-paper) 96%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: var(--space-3);
+}
+
+.filter-bar__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.filter-bar__row--main {
+  gap: var(--space-2);
+}
+
+.filter-bar__search {
+  position: relative;
+  flex: 1;
+  min-width: 200px;
+}
+.filter-bar__search input {
+  width: 100%;
+  padding: 8px 10px 8px 32px;
+  min-height: 38px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  color: var(--color-text);
+}
+.filter-bar__search input:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+}
+.filter-bar__search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}
+
+.filter-bar__sort select {
+  padding: 0 var(--space-3);
+  min-height: 38px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+/* ── Preset chips row ─────────────────────────────────────────── */
+
+.filter-bar__row--presets {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  margin: 0 calc(var(--space-3) * -1);
+  padding: 0 var(--space-3) 2px;
+}
+
+.preset-chip {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  min-height: 30px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-med);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+.preset-chip:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.preset-chip[data-active="true"] {
+  background: var(--color-ink);
+  color: var(--color-paper);
+  border-color: var(--color-ink);
+}
+
+/* ── Province + secondary row ─────────────────────────────────── */
+
+.filter-bar__row--secondary {
+  align-items: center;
+}
+
+.province-chips {
+  display: flex;
+  gap: 2px;
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 2px;
+}
+
+.province-chip {
+  display: inline-flex;
+  cursor: pointer;
+  user-select: none;
+}
+.province-chip input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  border: 0;
+}
+.province-chip span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 30px;
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-med);
+  letter-spacing: 0.02em;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: background 100ms ease, color 100ms ease;
+}
+.province-chip:has(input:checked) span,
+.province-chip input:checked + span {
+  background: var(--color-ink);
+  color: var(--color-paper);
+}
+.province-chip:hover:not(:has(input:checked)) span {
+  background: var(--color-paper);
+  color: var(--color-text);
+}
+
+/* ── "More filters" popover ────────────────────────────────────── */
+
+.filter-bar__more {
+  margin-left: auto;
+  position: relative;
+}
+.filter-bar__more > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  user-select: none;
+}
+.filter-bar__more > summary::-webkit-details-marker { display: none; }
+.filter-bar__more > summary:hover {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+.filter-bar__more[open] > summary {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+.filter-bar__more-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 260px;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  z-index: 20;
+}
+.filter-bar__slider {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--color-text);
+}
+.filter-bar__slider input {
+  width: 80px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.filter-bar__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.filter-bar__toggle input {
+  min-height: auto;
+  width: 16px;
+  height: 16px;
+}
+
+/* ── Active-filter chips ──────────────────────────────────────── */
+
+.filter-bar__row--active {
+  gap: 6px;
+}
+
+.active-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 10px;
+  font-size: var(--fs-xs);
+  font-family: var(--font-sans);
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text);
+}
+.active-chip a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+.active-chip a:hover {
+  color: var(--color-bad);
+}
+.active-chip__clear {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  margin-left: 4px;
+}
+.active-chip__clear:hover {
+  color: var(--color-bad);
+  text-decoration: underline;
+}
+
+/* ── Mobile: stack everything ─────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .filter-bar__row--main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-bar__sort select { width: 100%; }
+  .filter-bar__more { margin-left: 0; }
+  .filter-bar__more-panel { left: 0; right: 0; }
+}

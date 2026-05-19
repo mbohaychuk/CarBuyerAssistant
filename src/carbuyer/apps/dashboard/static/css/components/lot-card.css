@@ -1,16 +1,20 @@
-/* LotCard — Auction House Ledger.
+/* LotCard — Auction House Ledger, pricing-rail layout.
  *
- * Cream paper card on a cream paper page, hairline rule under the heading,
- * deal-score-colored left edge, slight photo desaturation so rough auction
- * shots read as documentary rather than fighting for attention. Container
- * query reflows from stacked-mobile to photo-left at 560px so the card
- * works inside narrow kanban columns and wide feed grids alike.
+ * 3-column grid: photo (160px) / metadata / pricing rail (200px).
+ * Pricing rail is the headline — the big mono number on the right is
+ * what the eye lands on. Photo is documentary evidence; metadata is
+ * for skim; the right rail is the decision signal.
+ *
+ * Container query reflows the 3-col to 2-col then 1-col at narrower
+ * widths so the card works inside narrow kanban columns and wide feed
+ * grids without media-query coordination.
  */
 
 .lot-card {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: 160px 1fr 200px;
   gap: var(--space-3);
+  align-items: stretch;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-border);
@@ -18,15 +22,16 @@
   padding: var(--space-3);
   transition: background 140ms ease, box-shadow 140ms ease;
   container-type: inline-size;
+  position: relative;
 }
 .lot-card:hover {
   background: var(--color-surface-elevated);
   box-shadow: var(--shadow-sm);
 }
 
-/* Deal-score-as-emphasis: bucket via data-deal="0..4". Bucket 4 gets the
- * full accent green plus a faint shadow lift so the best deals stand out
- * at a feed-scan glance. */
+/* Deal-score-as-emphasis: bucket via data-deal="0..4". Bucket 4 is the
+ * only one that picks up a shadow lift, so the best deals visually
+ * separate from the page even at a feed-scan glance. */
 .lot-card[data-deal="0"] { border-left-color: var(--color-deal-0); }
 .lot-card[data-deal="1"] { border-left-color: var(--color-deal-1); }
 .lot-card[data-deal="2"] { border-left-color: var(--color-deal-2); }
@@ -36,33 +41,85 @@
   box-shadow: var(--shadow-sm);
 }
 
+/* User-action state overrides deal-score left-border once user has
+ * acted: explicit decisions trump algorithmic prioritization. */
+.lot-card[data-state="interested"] { border-left-color: var(--color-good); }
+.lot-card[data-state="bid_placed"] { border-left-color: var(--color-accent-ink); }
+.lot-card[data-state="purchased"]  { border-left-color: var(--color-stamp-blue); }
+.lot-card[data-state="passed"]     { opacity: 0.55; }
+.lot-card[data-state="passed"]:hover { opacity: 0.95; }
+.lot-card[data-state="not_interested"] { opacity: 0.55; }
+.lot-card[data-state="not_interested"]:hover { opacity: 0.95; }
+
+/* ── Photo column ───────────────────────────────────────────────── */
+
 .lot-card__photo {
   display: block;
+  position: relative;
   aspect-ratio: 4 / 3;
   background: var(--color-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   overflow: hidden;
-  position: relative;
 }
 .lot-card__photo img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  /* Subtle desaturation matches the documentary-evidence treatment of
-   * Direction A — rough yard photos shouldn't fight for attention. */
   filter: saturate(0.92);
+  transition: filter 140ms ease;
+}
+.lot-card:hover .lot-card__photo img {
+  filter: saturate(1);
 }
 .lot-card__photo--empty {
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
   color: var(--color-text-muted);
   font-family: var(--font-display);
   font-size: var(--fs-sm);
   font-style: italic;
-  letter-spacing: 0.02em;
-  height: 100%;
 }
+.lot-card__photo--stamp {
+  font-family: var(--font-display);
+  font-size: 32px;
+  font-weight: var(--fw-bold);
+  font-style: normal;
+  opacity: 0.32;
+  line-height: 1;
+}
+.lot-card__photo-count {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--fw-med);
+  color: var(--color-paper);
+  background: rgba(20, 17, 13, 0.6);
+  border-radius: var(--radius-sm);
+}
+.lot-card__state-dot {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-muted);
+  border: 2px solid var(--color-paper);
+}
+.lot-card__state-dot[data-state="interested"] { background: var(--color-good); }
+.lot-card__state-dot[data-state="bid_placed"] { background: var(--color-accent-ink); }
+.lot-card__state-dot[data-state="purchased"]  { background: var(--color-stamp-blue); }
+.lot-card__state-dot[data-state="passed"]     { background: var(--color-bad); }
+
+/* ── Metadata column ───────────────────────────────────────────── */
 
 .lot-card__body {
   min-width: 0;
@@ -71,7 +128,14 @@
   gap: 6px;
 }
 
-/* Hairline rule under the heading — signature of the ledger metaphor. */
+.lot-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
 .lot-card__title {
   font-family: var(--font-display);
   font-size: var(--fs-md);
@@ -79,8 +143,7 @@
   letter-spacing: -0.01em;
   line-height: var(--lh-tight);
   margin: 0;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--color-border);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -93,30 +156,193 @@
   color: var(--color-accent);
   text-decoration: none;
 }
-
-.lot-card__location {
+.lot-card__tagline {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: var(--fs-sm);
+  color: var(--color-ink-soft);
+  line-height: 1.35;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.lot-card__meta {
   font-size: var(--fs-sm);
   color: var(--color-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+  line-height: 1.4;
+}
+.lot-card__sep { opacity: 0.5; }
+.lot-card__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+/* ── Pricing rail (right column) ──────────────────────────────── */
+
+.lot-card__rail {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  text-align: right;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.lot-card__price-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.lot-card__price-label {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+}
+.lot-card__price {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: var(--fw-sbd);
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+.lot-card__price-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.lot-card__range {
+  width: 100%;
+  margin-top: 4px;
+}
+.lot-card__deal {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: var(--fw-sbd);
+  color: var(--color-good);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.lot-card__deal-arrow {
+  font-size: 9px;
+  position: relative;
+  top: -1px;
+}
+.lot-card__deal--suspect {
+  color: var(--color-bad);
+}
+
+/* ── Action buttons row (bottom of rail) ─────────────────────── */
+
+.lot-actions {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.lot-actions__btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  min-height: 30px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: var(--fw-med);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
   white-space: nowrap;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+.lot-actions__btn svg { flex-shrink: 0; }
+.lot-actions__btn:hover {
+  color: var(--color-text);
+  background: var(--color-surface-elevated);
+}
+.lot-actions__btn[data-action="interested"]:hover { color: var(--color-good); border-color: var(--color-good); }
+.lot-actions__btn[data-action="bid_placed"]:hover { color: var(--color-accent-ink); border-color: var(--color-accent-ink); }
+.lot-actions__btn[data-action="passed"]:hover     { color: var(--color-bad); border-color: var(--color-bad); }
+
+.lot-actions__btn[data-active="true"][data-action="interested"] {
+  color: var(--color-paper); background: var(--color-good); border-color: var(--color-good);
+}
+.lot-actions__btn[data-active="true"][data-action="bid_placed"] {
+  color: var(--color-paper); background: var(--color-accent-ink); border-color: var(--color-accent-ink);
+}
+.lot-actions__btn[data-active="true"][data-action="passed"] {
+  color: var(--color-paper); background: var(--color-bad); border-color: var(--color-bad);
 }
 
-/* Container query: above 560px parent width, switch to photo-left layout. */
-@container (min-width: 560px) {
+.lot-actions__btn--primary[data-active="false"] {
+  /* The bid_placed button gets a slight emphasis even when inactive
+   * because it's the commit action — most consequential. */
+  border-color: var(--color-border-strong);
+}
+
+/* ── Responsive reflow ───────────────────────────────────────── */
+
+/* Tablet: collapse to 2-col (photo + body), rail spans below.
+ * Container queries on .lot-card itself can't change its own grid
+ * template (circular), so we use viewport media queries instead. */
+@media (max-width: 880px) {
   .lot-card {
-    grid-template-columns: 160px 1fr;
+    grid-template-columns: 140px 1fr;
     gap: var(--space-3);
-    padding: var(--space-3);
   }
+  .lot-card__rail {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: space-between;
+    text-align: left;
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-2);
+  }
+  .lot-card__price-block { align-items: flex-start; }
+  .lot-card__range { width: 160px; }
 }
 
-/* Mobile-explicit: tighten on narrow phones. */
-@container (max-width: 380px) {
+/* Phone: photo full-width on top, everything stacked. */
+@media (max-width: 480px) {
   .lot-card {
+    grid-template-columns: 1fr;
     padding: var(--space-2);
-    gap: var(--space-2);
   }
+  .lot-card__photo { aspect-ratio: 16 / 10; }
+  .lot-card__rail {
+    flex-direction: column;
+    align-items: stretch;
+    border-top: 1px solid var(--color-border);
+  }
+  .lot-card__price-block {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .lot-actions { width: 100%; }
 }
 
 /* Flash animation when an HTMX swap updates a card (e.g., bid changed). */

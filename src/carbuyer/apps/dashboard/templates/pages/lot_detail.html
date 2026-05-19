@@ -1,42 +1,186 @@
 {% extends "base.html" %}
-{% from "_macros.html" import money %}
-{% block title %}{{ lot.title or "Lot" }}{% endblock %}
+{% from "_macros.html" import money, countdown_chip, flag_chip, range_bar, action_buttons %}
+{% set heading_parts = [lot.year, lot.make, lot.model, lot.trim] | select | list %}
+{% set heading = heading_parts | join(" ") if heading_parts else (lot.title or ("Lot #" ~ lot.id)) %}
+{% block title %}{{ heading }} — CarBuyer{% endblock %}
 {% block content %}
-  <h1>{{ lot.year or "" }} {{ lot.make or "" }} {{ lot.model or "" }} {{ lot.trim or "" }}</h1>
-  <p class="muted">
-    {{ auction.auctioneer_name or auction.source }} ·
-    {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
-    <a href="{{ lot.url }}" target="_blank">view at source</a>
-  </p>
-
-  <section class="card">
-    <h3>Comparable vehicles</h3>
-    <div hx-get="/lots/{{ lot.id }}/comps" hx-trigger="load" hx-swap="innerHTML">
-      Loading…
+<article class="lot-detail">
+  <header class="lot-detail__head">
+    <a href="javascript:history.back()" class="lot-detail__back">← back</a>
+    <div class="lot-detail__heading">
+      <h1>{{ heading }}</h1>
+      <p class="lot-detail__meta">
+        <span>{{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }}</span>
+        <span class="lot-detail__sep">·</span>
+        <span>{{ auction.auctioneer_name or auction.source }}</span>
+        {% if lot.vin %}<span class="lot-detail__sep">·</span><span class="t-mono">VIN {{ lot.vin }}</span>{% endif %}
+        {% if lot.mileage_km %}<span class="lot-detail__sep">·</span><span class="t-mono">{{ "{:,}".format(lot.mileage_km) }} km</span>{% endif %}
+      </p>
     </div>
-  </section>
+    <a class="lot-detail__source" href="{{ lot.url }}" target="_blank" rel="noopener">View at {{ auction.source }} ↗</a>
+  </header>
 
-  <section class="card">
-    <h3>Pricing</h3>
-    <p>Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong></p>
-    <p>All-in at current bid: {{ money(lot.all_in_at_current_bid_cad) }}</p>
-    <p>Expected value (private equiv): {{ money(lot.expected_value_cad) }}</p>
-    <p>Recommended max bid: <strong>{{ money(lot.recommended_max_bid_cad) }}</strong></p>
-  </section>
+  <div class="lot-detail__cols">
+    <main class="lot-detail__main">
 
-  <section class="card">
-    <h3>Flags</h3>
-    {% if lot.red_flags %}<p>Red: {% for f in lot.red_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
-    {% if lot.green_flags %}<p>Green: {% for f in lot.green_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
-    {% if lot.showstopper_flags %}<p style="color:#d33">Showstoppers: {% for f in lot.showstopper_flags %}<span class="tag">{{ f.flag }}</span>{% endfor %}</p>{% endif %}
-  </section>
+      {# Photos — gallery or empty stamp #}
+      <section class="lot-detail__photos">
+        {% if lot.photos %}
+          <div class="photo-strip">
+            {% for src in lot.photos %}
+              <img src="{{ src }}" loading="{{ 'eager' if loop.first else 'lazy' }}" alt="">
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="lot-detail__photos--empty">
+            <span class="lot-detail__photos-stamp">{{ (lot.make or '?')[:1] | upper }}</span>
+            <p>No photos in source data.</p>
+          </div>
+        {% endif %}
+      </section>
 
-  <section class="card">
-    <h3>Actions</h3>
-    <form hx-post="/lots/{{ lot.id }}/mark" hx-swap="none" style="display:inline">
-      <button name="action" value="interested">Interested</button>
-      <button name="action" value="maybe">Maybe</button>
-      <button name="action" value="not_interested">Not interested</button>
-    </form>
-  </section>
+      {# LLM summary, if present #}
+      {% if lot.summary %}
+        <section class="lot-detail__section">
+          <h2>Summary</h2>
+          <p class="lot-detail__summary">{{ lot.summary }}</p>
+        </section>
+      {% endif %}
+
+      {# Condition signals — flags grouped #}
+      {% if lot.showstopper_flags or lot.red_flags or lot.green_flags %}
+        <section class="lot-detail__section">
+          <h2>Condition signals</h2>
+          {% if lot.showstopper_flags %}
+            <div class="lot-detail__flagrow lot-detail__flagrow--stop">
+              <h3>Showstoppers</h3>
+              <ul>{% for f in lot.showstopper_flags %}<li>{{ flag_chip(f, 'stop') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+            </div>
+          {% endif %}
+          {% if lot.red_flags %}
+            <div class="lot-detail__flagrow">
+              <h3>Concerns</h3>
+              <ul>{% for f in lot.red_flags %}<li>{{ flag_chip(f, 'bad') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+            </div>
+          {% endif %}
+          {% if lot.green_flags %}
+            <div class="lot-detail__flagrow">
+              <h3>Strengths</h3>
+              <ul>{% for f in lot.green_flags %}<li>{{ flag_chip(f, 'good') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+            </div>
+          {% endif %}
+          {% if lot.vision_contradictions %}
+            <details class="lot-detail__vision">
+              <summary>Vision findings ({{ "%.0f"|format((lot.vision_confidence or 0) * 100) }}% confident)</summary>
+              <p class="t-meta">{{ lot.vision_contradictions }}</p>
+            </details>
+          {% endif %}
+        </section>
+      {% endif %}
+
+      {# Vehicle specs — definition list #}
+      <section class="lot-detail__section">
+        <h2>Specs</h2>
+        <dl class="specs">
+          {% if lot.engine %}<div><dt>Engine</dt><dd>{{ lot.engine }}</dd></div>{% endif %}
+          {% if lot.transmission %}<div><dt>Transmission</dt><dd>{{ lot.transmission }}</dd></div>{% endif %}
+          {% if lot.drivetrain %}<div><dt>Drivetrain</dt><dd>{{ lot.drivetrain }}</dd></div>{% endif %}
+          {% if lot.title_status %}<div><dt>Title</dt><dd>{{ lot.title_status }}</dd></div>{% endif %}
+          {% if lot.province_of_origin %}<div><dt>Origin</dt><dd>{{ lot.province_of_origin }}</dd></div>{% endif %}
+          {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}</dd></div>{% endif %}
+          {% if auction.pickup_window_text %}<div><dt>Pickup</dt><dd>{{ auction.pickup_window_text }}</dd></div>{% endif %}
+          {% if auction.terms_text %}<div><dt>Terms</dt><dd class="t-meta">{{ auction.terms_text }}</dd></div>{% endif %}
+        </dl>
+      </section>
+
+      {# Comparable sales — HTMX loaded #}
+      <section class="lot-detail__section" hx-get="/lots/{{ lot.id }}/comps" hx-trigger="load" hx-swap="innerHTML">
+        <h2>Comparable sales</h2>
+        <p class="t-meta">Loading comps…</p>
+      </section>
+    </main>
+
+    {# Right rail — sticky decision card #}
+    <aside class="lot-detail__rail">
+      <div class="decision-card">
+        <div class="decision-card__row">
+          <div class="decision-card__label">Current bid</div>
+          {{ countdown_chip(auction.scheduled_end_at) }}
+        </div>
+        <div class="decision-card__price">{{ money(lot.current_high_bid_cad, variant='large') }}</div>
+        {% if lot.all_in_at_current_bid_cad %}
+          <div class="decision-card__meta">all-in {{ money(lot.all_in_at_current_bid_cad) }}</div>
+        {% endif %}
+
+        {% if lot.value_low_cad and lot.value_high_cad %}
+          <div class="decision-card__range">
+            {{ range_bar(lot.value_low_cad, lot.value_mid_cad, lot.value_high_cad, lot.current_high_bid_cad) }}
+          </div>
+        {% endif %}
+
+        <hr class="decision-card__rule">
+
+        <div class="decision-card__row">
+          <div class="decision-card__label">Recommended max</div>
+        </div>
+        <div class="decision-card__max">{{ money(lot.recommended_max_bid_cad, variant='main') }}</div>
+
+        {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+          <div class="decision-card__deal">{{ "%.0f"|format(lot.price_deal_score * 100) }}% under fair</div>
+        {% endif %}
+
+        <div class="decision-card__actions" id="lot-{{ lot.id }}">
+          {{ action_buttons(lot.id, lot.user_action, size='lg') }}
+        </div>
+
+        <a class="decision-card__source" href="{{ lot.url }}" target="_blank" rel="noopener">
+          Bid at {{ auction.source }} ↗
+        </a>
+      </div>
+
+      <form class="lot-detail__notes" hx-post="/lots/{{ lot.id }}/notes"
+            hx-trigger="change from:textarea delay:600ms" hx-swap="none">
+        <label>
+          <span class="lot-detail__notes-label">Notes</span>
+          <textarea name="note" placeholder="Why am I watching this lot…">{{ lot.notes or "" }}</textarea>
+        </label>
+      </form>
+
+      {% if auction %}
+        <section class="auction-context">
+          <h3>Auction</h3>
+          <p>
+            {{ auction.auctioneer_name or auction.source }}<br>
+            {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }}
+          </p>
+          {% if auction.buyer_premium_pct %}
+            <p class="t-meta">
+              Premium {{ "%.0f"|format(auction.buyer_premium_pct * 100) }}%
+              {% if auction.buyer_premium_max_cad %} · cap {{ money(auction.buyer_premium_max_cad) }}{% endif %}
+              {% if auction.buyer_premium_min_cad %} · min {{ money(auction.buyer_premium_min_cad) }}{% endif %}
+            </p>
+          {% endif %}
+        </section>
+      {% endif %}
+    </aside>
+  </div>
+
+  {# Sticky bottom bid console on mobile — always-visible decision rail
+     condensed into a single fixed bar at the bottom of the viewport.
+     CSS hides it above the lot-detail breakpoint. #}
+  <div class="bid-console">
+    <div class="bid-console__price">
+      <div class="bid-console__label">Bid</div>
+      <div class="bid-console__value">{{ money(lot.current_high_bid_cad) }}</div>
+    </div>
+    <div class="bid-console__max">
+      <div class="bid-console__label">Max</div>
+      <div class="bid-console__value">{{ money(lot.recommended_max_bid_cad) }}</div>
+    </div>
+    <div class="bid-console__countdown">{{ countdown_chip(auction.scheduled_end_at) }}</div>
+    <div class="bid-console__actions" id="lot-{{ lot.id }}-mobile">
+      {{ action_buttons(lot.id, lot.user_action, size='mobile') }}
+    </div>
+  </div>
+</article>
 {% endblock %}

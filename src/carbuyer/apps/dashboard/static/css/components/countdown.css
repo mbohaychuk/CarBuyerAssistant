@@ -49,3 +49,25 @@
 @keyframes countdown-pulse {
   50% { box-shadow: 0 0 0 4px rgba(74, 10, 6, 0.22); }
 }
+
+/* Bid-velocity dot — appears inside .countdown when a bid landed in
+ * the last 10 minutes. Filled accent-color dot with a soft pulse halo.
+ * Signals "this auction is hot right now" independent of urgency tier.
+ */
+.countdown__pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin-left: 2px;
+  animation: velocity-pulse 1.8s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.countdown[data-urgency="now"] .countdown__pulse {
+  background: var(--color-paper);
+}
+@keyframes velocity-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(31, 90, 58, 0.4); }
+  50%      { box-shadow: 0 0 0 4px rgba(31, 90, 58, 0.0); }
+}
