@@ -52,17 +52,36 @@ async def mark_lot(
     action: Annotated[str, Form()],
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[CurrentUser, Depends(current_user)],
+    currently_active: Annotated[bool, Form()] = False,
 ) -> HTMLResponse | Response:
+    """Set, toggle, or clear `user_action` for a lot.
+
+    `action` is the button's intent ("interested" / "bid_placed" /
+    "passed" / etc). `currently_active` is the button's own
+    `data-active` value — the macro passes it through via `hx-vals` so
+    the server can treat "click an already-active button" as toggle-off
+    (clearing user_action to NULL). Without this, clicking Watch on an
+    already-watched lot just re-writes the same value, leaving no way
+    to un-watch without explicitly clicking Pass.
+    """
     if action not in _ACCEPTED_ACTIONS:
         raise HTTPException(status_code=422, detail=f"invalid action {action!r}")
     lot = await session.get(AuctionLot, lot_id)
     if lot is None:
         raise HTTPException(status_code=404)
-    db_value = _to_enum_value(action)
-    lot.user_action = db_value
+    if currently_active:
+        lot.user_action = None
+        effective_state: str | None = None
+    else:
+        db_value = _to_enum_value(action)
+        lot.user_action = db_value
+        effective_state = action
     await session.commit()
     await session.refresh(lot)
-    log.info("lot marked", lot_id=lot_id, action=action, stored=db_value)
+    log.info(
+        "lot marked", lot_id=lot_id, action=action,
+        stored=lot.user_action, toggled_off=currently_active,
+    )
 
     if not request.headers.get("HX-Request"):
         return Response(status_code=204)
@@ -73,6 +92,7 @@ async def mark_lot(
     # aliased value. A subsequent full page load will revert to the
     # stored value — known transitional limitation until the workflow
     # migration ships, documented in [[dashboard-redesign-direction-a]].
+    # On a toggle-off, effective_state is None so no button renders active.
     hx_target = request.headers.get("HX-Target", "") or ""
     is_button_fragment_target = (
         hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
@@ -89,7 +109,7 @@ async def mark_lot(
                 "lot_id": lot.id,
                 "target_id": hx_target,
                 "wrapper_class": wrapper_class,
-                "effective_state": action,
+                "effective_state": effective_state,
             },
         )
     auction = await session.get(Auction, lot.auction_id)
@@ -98,7 +118,7 @@ async def mark_lot(
         "partials/lot_card.html",
         {
             "item": {"lot": lot, "auction": auction},
-            "effective_state": action,
+            "effective_state": effective_state,
         },
     )
 
