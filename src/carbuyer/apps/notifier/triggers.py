@@ -68,6 +68,9 @@ def evaluate_triggers(
     ):
         out.append(TriggerResult("early_warning", f"rarity={state.rarity_score}"))
 
+    if state.user_action == "purchased":
+        return out  # never alert on lots we already own
+
     # Going-cheap: price looks good; gate on quality signals. All gates are
     # block-scoped to this trigger so subsequent triggers (closing_soon,
     # lot_extended) aren't short-circuited by the going-cheap gates.
