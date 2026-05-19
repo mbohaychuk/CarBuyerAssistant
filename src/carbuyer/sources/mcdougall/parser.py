@@ -303,20 +303,49 @@ def _parse_vin(tree: HTMLParser) -> tuple[str | None, str | None]:
     return (None, None)
 
 
+_BOILERPLATE_STARTS_WITH = "All payments must be made in full"
+
+
+def _listing_details_td(tree: HTMLParser) -> Node | None:
+    """Return the first <td> in the first <table> inside div#listing-details.
+
+    McDougall's redesigned layout places all lot-specific content (features,
+    damages, registration history) as <p> elements inside this cell.
+    """
+    listing = tree.css_first("div#listing-details")
+    if listing is None:
+        return None
+    table = listing.css_first("table")
+    if table is None:
+        return None
+    return table.css_first("td")
+
+
 def _parse_description(tree: HTMLParser) -> str | None:
-    # Description is the <td> body following a "<span>Consignor Remarks:</span>".
-    for span in tree.css("span"):
-        if "consignor remarks" not in span.text(strip=True).casefold():
+    """Collect lot-specific <p> text from div#listing-details, excluding the
+    trailing boilerplate paragraphs that appear identically on every lot.
+
+    Section headers ("Damages:", "Registration History:") are rendered as
+    <p><b>Header:</b></p> and are preserved — they give the enrichment LLM
+    useful structural context.
+
+    Boilerplate cut: drop every <p> from the first one whose text starts with
+    "All payments must be made in full" onward; those four paragraphs are
+    identical legal text on every McDougall lot.
+    """
+    td = _listing_details_td(tree)
+    if td is None:
+        return None
+    paragraphs: list[str] = []
+    for p in td.css("p"):
+        text = p.text(strip=True)
+        if not text:
             continue
-        parent = span.parent
-        if parent is None:
-            continue
-        # The label and the prose live in the same <td>; selectolax returns
-        # the prose nested under <p> elements in HTML order. Stitch them all.
-        paragraphs = [p.text(strip=True) for p in parent.css("p") if p.text(strip=True)]
-        joined = "\n".join(paragraphs).strip()
-        return joined or None
-    return None
+        if text.startswith(_BOILERPLATE_STARTS_WITH):
+            break
+        paragraphs.append(text)
+    joined = "\n".join(paragraphs).strip()
+    return joined or None
 
 
 def _parse_photos(tree: HTMLParser) -> list[str]:
@@ -411,14 +440,21 @@ def parse_lot_detail(html: str, *, lot_guid: str) -> LotDetail:
     title_node = tree.css_first("div.full-product-title h1")
     title = title_node.text(strip=True) if title_node is not None else None
 
-    # "Showing Unverified" sits in the label, not the value. Track which
-    # label we matched so the flag survives into extras.
-    mileage_unverified = True
-    mileage_raw = _text_after_label(tree, "Mileage (Showing Unverified)*:")
-    if mileage_raw is None:
-        mileage_unverified = False
-        mileage_raw = _text_after_label(tree, "Mileage*:")
-    mileage_km = _parse_mileage_km(mileage_raw)
+    # Mileage is in a plain <p> "Mileage (...): NNN,NNN km" inside the
+    # #listing-details table. The provenance qualifier ("Showing Unverified",
+    # "Showing Verified") is inline in the paragraph text rather than in a
+    # <span> label. Scan the td <p> elements for the mileage line.
+    mileage_km: int | None = None
+    mileage_unverified = False
+    td = _listing_details_td(tree)
+    if td is not None:
+        for p in td.css("p"):
+            text = p.text(strip=True)
+            if text.lower().startswith("mileage"):
+                if "unverified" in text.lower():
+                    mileage_unverified = True
+                mileage_km = _parse_mileage_km(text)
+                break
 
     pickup_location = _text_after_label(tree, "Pick up location:")
 
