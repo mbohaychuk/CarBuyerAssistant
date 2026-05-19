@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Phase 3 design overlay #14: bumped on every prompt/taxonomy change so a
     # backfill can re-pend stale rows: UPDATE auction_lots SET
     # enrichment_status='pending' WHERE enrichment_version IS DISTINCT FROM 'vN'.
-    enrichment_version: str = "v1"
+    enrichment_version: str = "v2"
     discord_bot_token: str = Field(default="")
     discord_guild_id: int | None = None
     # Values can be int channel IDs OR string channel names. Names are

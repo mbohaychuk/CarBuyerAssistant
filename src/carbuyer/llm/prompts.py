@@ -87,6 +87,8 @@ GENERAL RULES:
 - For each flag in `red_flags`/`green_flags`: use the exact taxonomy `flag` key and copy the corresponding `weight` value verbatim from the taxonomy. Provide `evidence` quoted verbatim from the listing — do not paraphrase. If you can't quote, do not fire the flag.
 - For `description_quality`: output `thin` for listings with <100 chars or no condition / mileage / service mention; `detailed` for listings with explicit condition + service history + photo coverage; `adequate` otherwise.
 - For `summary`: 1-3 sentences, factual, no marketing tone.
+- For `concerns`: surface up to ~5 free-form judgements the fixed flag taxonomy above does NOT capture — non-obvious risks, correlations between facts, and inferences drawn from the description. Example: "blue smoke on cold start + 240k km → likely worn valve seals, budget a top-end job". Each concern needs a `severity` of minor / moderate / serious. Do not restate taxonomy flags here; use an empty list only when nothing warrants comment.
+- For `normalized_vehicle.mileage_is_verified`: output `true` when the listing explicitly states the odometer is verified / actual; `false` when it states unverified / TMU / "showing" / exempt; `null` when the listing says nothing about odometer verification.
 - If no MODEL-SPECIFIC GOTCHAS block follows in the user message, do not invent gotchas the model wasn't told about.
 """
 
