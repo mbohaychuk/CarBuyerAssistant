@@ -4,9 +4,10 @@ After=carbuyer-postgres.service
 
 [Timer]
 OnCalendar=*:0/60
-# 17min offset so the watchdog doesn't run at the same instant as the
-# ingester's 6h tick (which it monitors); reduces noise from a transient
-# overlap where ingest is mid-run but hasn't committed yet.
+# Up to 5min jitter so an accidental concurrent run (e.g. operator-triggered
+# while the timer was about to fire) doesn't collide with itself on the
+# alert-state upsert. The singleton lock catches the race regardless, but
+# jitter avoids the noisy lock-contention log.
 RandomizedDelaySec=300
 Persistent=true
 Unit=carbuyer-source-watchdog.service
