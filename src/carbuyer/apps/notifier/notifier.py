@@ -127,8 +127,9 @@ def _trigger_overrides_quiet_hours(
     price_deal_score >= quiet_hours_override_score; closing-T-1h fires always.
 
     closing_soon and lot_extended are inherently urgency-class — they only fire
-    on lots the user already flagged interested/maybe AND only at the imminent
-    boundary (T-1h for closing_soon, soft-close extension event for extended).
+    on lots the user already flagged interested, bid_placed, or purchased AND
+    only at the imminent boundary (T-1h for closing_soon, soft-close extension
+    event for extended).
     Waiting for the morning digest defeats the trigger's whole purpose.
     """
     if trigger.trigger in {"early_warning", "closing_soon", "lot_extended"}:

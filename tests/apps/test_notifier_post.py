@@ -100,20 +100,17 @@ async def test_post_message_success(monkeypatch: pytest.MonkeyPatch) -> None:
     call = captured[0]
     assert "channels/99/messages" in call["url"]
     assert call["headers"]["Authorization"] == "Bot tok123"
-    # Verify action-row component shape: one row, three buttons with correct custom_ids.
+    # Verify action-row component shape: one row, two buttons with correct custom_ids.
     comps = call["json"]["components"]
     assert len(comps) == 1
     row = comps[0]
     assert row["type"] == 1  # ACTION_ROW
     buttons = row["components"]
-    assert len(buttons) == 3  # noqa: PLR2004
-    custom_ids = [b["custom_id"] for b in buttons]
-    assert "deal:interested:7" in custom_ids
-    assert "deal:maybe:7" in custom_ids
-    assert "deal:not_interested:7" in custom_ids
+    assert len(buttons) == 2  # noqa: PLR2004
+    custom_ids = {b["custom_id"] for b in buttons}
+    assert custom_ids == {"deal:interested:7", "deal:not_interested:7"}
     styles = [b["style"] for b in buttons]
     assert 3 in styles  # noqa: PLR2004  # SUCCESS (green)
-    assert 2 in styles  # noqa: PLR2004  # SECONDARY (gray)
     assert 4 in styles  # noqa: PLR2004  # DANGER (red)
 
 

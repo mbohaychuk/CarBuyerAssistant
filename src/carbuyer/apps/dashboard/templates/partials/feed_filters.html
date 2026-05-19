@@ -2,7 +2,7 @@
    Row 1: free-text search + sort
    Row 2: quick-filter preset chips (horizontally scrollable on phone)
    Row 3: province toggle chips + "More filters" popover (deal-score
-          range, rarity range, exclude-not-interested)
+          range, rarity range, exclude-passed)
    Row 4: active-filter summary chips (only if anything is set)
 
    All inputs swap #lot-list via HTMX. hx-include on the form picks up
@@ -78,8 +78,8 @@
           <input type="number" name="min_rarity" step="0.5" min="0" max="5" value="{{ filters.min_rarity }}">
         </label>
         <label class="filter-bar__toggle">
-          <input type="checkbox" name="exclude_not_interested" value="true"
-                 {% if filters.exclude_not_interested %}checked{% endif %}>
+          <input type="checkbox" name="exclude_passed" value="true"
+                 {% if filters.exclude_passed %}checked{% endif %}>
           <span>Hide passed lots</span>
         </label>
       </div>

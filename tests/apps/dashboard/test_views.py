@@ -100,13 +100,14 @@ async def test_closing_includes_lot_within_window(_patch_deps: AsyncSession) -> 
 
 
 @pytest.mark.asyncio
-async def test_watched_default_tier_interested(_patch_deps: AsyncSession) -> None:
+async def test_watched_returns_four_buckets(_patch_deps: AsyncSession) -> None:
+    """All 4 state sections render; each lot appears in its own bucket."""
     session = _patch_deps
     _seed_auction_with_lot(
         session, end_at=None, user_action=UserAction.INTERESTED.value, title="WANT",
     )
     _seed_auction_with_lot(
-        session, end_at=None, user_action=UserAction.MAYBE.value, title="PERHAPS",
+        session, end_at=None, user_action=UserAction.PASSED.value, title="PASSED-LOT",
     )
     await session.commit()
 
@@ -114,34 +115,29 @@ async def test_watched_default_tier_interested(_patch_deps: AsyncSession) -> Non
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/watched")
     assert r.status_code == 200  # noqa: PLR2004
-    assert "WANT" in r.text
-    assert "PERHAPS" not in r.text
+    body = r.text
+    assert 'data-state="interested"' in body
+    assert 'data-state="bid_placed"' in body
+    assert 'data-state="purchased"' in body
+    assert 'data-state="passed"' in body
+    assert "WANT" in body
+    assert "PASSED-LOT" in body
 
 
 @pytest.mark.asyncio
-async def test_watched_tier_maybe(_patch_deps: AsyncSession) -> None:
+async def test_watched_excludes_null_user_action_lots(_patch_deps: AsyncSession) -> None:
+    """Lots with NULL user_action don't appear on the watchlist."""
     session = _patch_deps
     _seed_auction_with_lot(
-        session, end_at=None, user_action=UserAction.MAYBE.value, title="PERHAPS",
+        session, end_at=None, user_action=None, title="UNTAGGED",
     )
     await session.commit()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/watched?tier=maybe")
+        r = await client.get("/watched")
     assert r.status_code == 200  # noqa: PLR2004
-    assert "PERHAPS" in r.text
-
-
-@pytest.mark.asyncio
-async def test_watched_invalid_tier_falls_back_to_interested(
-    _patch_deps: AsyncSession,
-) -> None:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/watched?tier=garbage")
-    assert r.status_code == 200  # noqa: PLR2004
-    assert "Watched lots" in r.text
+    assert "UNTAGGED" not in r.text
 
 
 # ─── /comps ───

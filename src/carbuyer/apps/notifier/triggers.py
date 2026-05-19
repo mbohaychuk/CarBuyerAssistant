@@ -40,7 +40,7 @@ class TriggerResult:
 # single fire at the most-urgent (T-1h) tier to fit the existing single-column
 # closing_notified_at schema. Multi-tier delivery is Phase 14.
 _CLOSING_SOON_WINDOW = timedelta(hours=1)
-_WATCHED_ACTIONS = frozenset({"interested", "maybe"})
+_WATCHED_ACTIONS = frozenset({"interested", "bid_placed", "purchased"})
 _ACTIVE_LOT_STATUSES = frozenset({"open", "closing_soon", "extended"})
 
 
@@ -55,7 +55,7 @@ def evaluate_triggers(
 ) -> list[TriggerResult]:
     out: list[TriggerResult] = []
 
-    if state.user_action == "not_interested":
+    if state.user_action == "passed":
         return out
 
     # Early-warning: rare car, not yet notified, closing far enough out to act.
@@ -67,6 +67,9 @@ def evaluate_triggers(
         and (state.scheduled_end_at - now) >= timedelta(hours=early_warning_min_hours)
     ):
         out.append(TriggerResult("early_warning", f"rarity={state.rarity_score}"))
+
+    if state.user_action == "purchased":
+        return out  # never alert on lots we already own
 
     # Going-cheap: price looks good; gate on quality signals. All gates are
     # block-scoped to this trigger so subsequent triggers (closing_soon,
@@ -82,8 +85,8 @@ def evaluate_triggers(
             state.scheduled_end_at is not None
             and state.scheduled_end_at - now <= timedelta(hours=24)
         )
-        eligible_user = state.user_action in {"interested", "maybe", None}
-        fires_for_watched = state.user_action in {"interested", "maybe"}
+        eligible_user = state.user_action in {"interested", "bid_placed", None}
+        fires_for_watched = state.user_action in {"interested", "bid_placed"}
         fires_for_unflagged = closing_in_24h
 
         should_fire = False

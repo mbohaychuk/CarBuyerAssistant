@@ -30,12 +30,18 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    func,
     text,
 )
+from sqlalchemy import (
+    Enum as SAEnum,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from carbuyer.db.base import Base, TimestampMixin
+from carbuyer.db.enums import UserAction
 
 
 class Auction(Base, TimestampMixin):
@@ -365,15 +371,25 @@ class AuctionLot(Base, TimestampMixin):
     last_notified_channel: Mapped[str | None] = mapped_column(String(64))
 
     # ── Owned by: dashboard (user input) ────────────────────────────────────
-    user_action: Mapped[str | None] = mapped_column(String(16), index=True)
-    notes: Mapped[str | None] = mapped_column(Text)
-    was_purchased_by_us: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
+    # values_callable: store the enum .value ("bid_placed") not .name ("BID_PLACED").
+    # The check constraints compare against lowercase literals, so the two must agree.
+    user_action: Mapped[UserAction | None] = mapped_column(
+        SAEnum(UserAction, native_enum=False, length=16,
+               values_callable=lambda x: [e.value for e in x]),
         index=True,
     )
+    max_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    bid_placed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    won_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    @hybrid_property
+    def is_active_bid(self) -> bool:
+        return self.user_action == UserAction.BID_PLACED
+
+    @hybrid_property
+    def is_purchased(self) -> bool:
+        return self.user_action == UserAction.PURCHASED
 
     auction: Mapped[Auction] = relationship(back_populates="lots", lazy="raise")
     bid_history: Mapped[list[AuctionBidHistory]] = relationship(
@@ -416,6 +432,18 @@ class AuctionLot(Base, TimestampMixin):
             "id",
             postgresql_where=text("notification_status = 'pending'"),
         ),
+        CheckConstraint(
+            "(COALESCE(user_action::text, '') = 'bid_placed') = (max_bid_cad IS NOT NULL)",
+            name="ck_auction_lots_bid_placed_iff_max_bid",
+        ),
+        CheckConstraint(
+            "(COALESCE(user_action::text, '') = 'bid_placed') = (bid_placed_at IS NOT NULL)",
+            name="ck_auction_lots_bid_placed_iff_timestamp",
+        ),
+        CheckConstraint(
+            "(COALESCE(user_action::text, '') = 'purchased') = (won_at IS NOT NULL)",
+            name="ck_auction_lots_purchased_iff_won_at",
+        ),
     )
 
 
@@ -435,6 +463,44 @@ class AuctionBidHistory(Base):
     lot: Mapped[AuctionLot] = relationship(back_populates="bid_history", lazy="raise")
 
     __table_args__ = (Index("ix_bid_history_lot_observed", "lot_id", "observed_at"),)
+
+
+class LotActionHistory(Base):
+    """Immutable transition log for AuctionLot.user_action.
+
+    Every call to apply_user_action appends one row. The lot's current
+    user_action / max_bid_cad / bid_placed_at / won_at columns reflect the
+    *current* state; history columns here reflect the state being entered
+    at the moment of transition.
+    """
+
+    __tablename__ = "lot_action_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    lot_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("auction_lots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_action: Mapped[UserAction | None] = mapped_column(
+        SAEnum(UserAction, native_enum=False, length=16,
+               values_callable=lambda x: [e.value for e in x]),
+    )
+    max_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_lot_action_history_lot_id_changed_at",
+            "lot_id",
+            "changed_at",
+        ),
+    )
 
 
 class HistoricalSale(Base, TimestampMixin):

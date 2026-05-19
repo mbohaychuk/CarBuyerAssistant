@@ -84,8 +84,8 @@ def test_going_cheap_for_unflagged_only_when_closing_soon() -> None:
     assert any(t.trigger == "going_cheap" for t in out_near)
 
 
-def test_not_interested_suppresses() -> None:
-    s = _state(rarity_score=3.0, price_deal_score=0.30, user_action="not_interested")
+def test_passed_suppresses() -> None:
+    s = _state(rarity_score=3.0, price_deal_score=0.30, user_action="passed")
     out = _run(s)
     assert out == []
 
@@ -189,7 +189,7 @@ def test_closing_soon_dedups_via_timestamp() -> None:
 
 def test_lot_extended_fires_for_watched_on_status_extended() -> None:
     s = _state(
-        user_action="maybe",
+        user_action="interested",
         lot_status="extended",
         scheduled_end_at=NOW + timedelta(minutes=5),
     )
@@ -225,11 +225,47 @@ def test_lot_extended_dedups_via_timestamp() -> None:
     assert not any(t.trigger == "lot_extended" for t in out)
 
 
-def test_not_interested_suppresses_closing_and_extended() -> None:
-    """user_action=not_interested short-circuits at the top of evaluate_triggers —
+# ─── Phase 5.1: purchased suppresses going_cheap / closing_soon / lot_extended
+
+
+def test_going_cheap_suppressed_when_purchased() -> None:
+    """A lot the user already bought should not generate going_cheap pings."""
+    s = _state(
+        price_deal_score=0.20,
+        user_action="purchased",
+        scheduled_end_at=NOW + timedelta(days=10),
+    )
+    out = _run(s)
+    assert not any(t.trigger == "going_cheap" for t in out)
+
+
+def test_closing_soon_suppressed_when_purchased() -> None:
+    """A purchased lot within the closing window must not fire closing_soon."""
+    s = _state(
+        user_action="purchased",
+        scheduled_end_at=NOW + timedelta(minutes=45),
+        lot_status="closing_soon",
+    )
+    out = _run(s)
+    assert not any(t.trigger == "closing_soon" for t in out)
+
+
+def test_lot_extended_suppressed_when_purchased() -> None:
+    """A purchased lot that gets soft-closed must not fire lot_extended."""
+    s = _state(
+        user_action="purchased",
+        lot_status="extended",
+        scheduled_end_at=NOW + timedelta(minutes=5),
+    )
+    out = _run(s)
+    assert not any(t.trigger == "lot_extended" for t in out)
+
+
+def test_passed_suppresses_closing_and_extended() -> None:
+    """user_action=passed short-circuits at the top of evaluate_triggers —
     must also block closing_soon and lot_extended."""
     s = _state(
-        user_action="not_interested",
+        user_action="passed",
         scheduled_end_at=NOW + timedelta(minutes=30),
         lot_status="extended",
     )

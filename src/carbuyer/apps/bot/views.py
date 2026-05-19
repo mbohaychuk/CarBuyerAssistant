@@ -22,6 +22,7 @@ from discord import ButtonStyle, Interaction
 from discord.ui import DynamicItem, View
 
 from carbuyer.db.enums import UserAction
+from carbuyer.db.lot_state import apply_user_action
 from carbuyer.db.models import AuctionLot
 from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
@@ -29,7 +30,16 @@ from carbuyer.shared.logging import get_logger
 log = get_logger("bot")
 
 
-async def _set_user_action(lot_id: int, action: UserAction) -> bool:
+async def _set_user_action(
+    lot_id: int,
+    action: UserAction,
+    *,
+    allow_downgrade: bool = True,
+) -> tuple[bool, str | None]:
+    """Returns (ok, refusal_reason). ok=False with reason != None means
+    apply_user_action refused (typically allow_downgrade=False guard).
+    ok=False with reason=None means the lot was not found.
+    """
     async with get_session() as session, session.begin():
         lot = await session.get(AuctionLot, lot_id)
         if lot is None:
@@ -38,10 +48,21 @@ async def _set_user_action(lot_id: int, action: UserAction) -> bool:
                 lot_id=lot_id,
                 action=action,
             )
-            return False
-        lot.user_action = action
+            return False, None
+        try:
+            apply_user_action(
+                session, lot, action,
+                source="discord_bot",
+                allow_downgrade=allow_downgrade,
+            )
+        except ValueError as exc:
+            log.info(
+                "user_action write refused",
+                lot_id=lot_id, action=action, reason=str(exc),
+            )
+            return False, str(exc)
         log.info("user_action written", lot_id=lot_id, action=action)
-        return True
+        return True, None
 
 
 class LotInterestedButton(
@@ -70,12 +91,19 @@ class LotInterestedButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        ok = await _set_user_action(self.lot_id, UserAction.INTERESTED)
-        msg = (
-            f"Marked lot {self.lot_id} as interested."
-            if ok
-            else f"Lot {self.lot_id} not found."
+        ok, refusal = await _set_user_action(
+            self.lot_id, UserAction.INTERESTED,
+            allow_downgrade=False,
         )
+        if ok:
+            msg = f"Marked lot {self.lot_id} as interested."
+        elif refusal is not None:
+            msg = (
+                f"Lot {self.lot_id} is already marked purchased or bid-placed. "
+                f"Use the dashboard to change its state."
+            )
+        else:
+            msg = f"Lot {self.lot_id} not found."
         await interaction.followup.send(msg, ephemeral=True)
 
 
@@ -105,12 +133,19 @@ class LotMaybeButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        ok = await _set_user_action(self.lot_id, UserAction.MAYBE)
-        msg = (
-            f"Marked lot {self.lot_id} as maybe."
-            if ok
-            else f"Lot {self.lot_id} not found."
+        ok, refusal = await _set_user_action(
+            self.lot_id, UserAction.INTERESTED,
+            allow_downgrade=False,
         )
+        if ok:
+            msg = f"Marked lot {self.lot_id} as interested."
+        elif refusal is not None:
+            msg = (
+                f"Lot {self.lot_id} is already marked purchased or bid-placed. "
+                f"Use the dashboard to change its state."
+            )
+        else:
+            msg = f"Lot {self.lot_id} not found."
         await interaction.followup.send(msg, ephemeral=True)
 
 
@@ -140,12 +175,19 @@ class LotNotInterestedButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        ok = await _set_user_action(self.lot_id, UserAction.NOT_INTERESTED)
-        msg = (
-            f"Marked lot {self.lot_id} as not interested."
-            if ok
-            else f"Lot {self.lot_id} not found."
+        ok, refusal = await _set_user_action(
+            self.lot_id, UserAction.PASSED,
+            allow_downgrade=False,
         )
+        if ok:
+            msg = f"Marked lot {self.lot_id} as passed."
+        elif refusal is not None:
+            msg = (
+                f"Lot {self.lot_id} is already marked purchased or bid-placed. "
+                f"Use the dashboard to change its state."
+            )
+        else:
+            msg = f"Lot {self.lot_id} not found."
         await interaction.followup.send(msg, ephemeral=True)
 
 
