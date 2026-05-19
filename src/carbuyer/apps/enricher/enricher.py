@@ -273,6 +273,8 @@ def _apply_to_lot(
     lot.red_flags = [f.model_dump() for f in out.red_flags]
     lot.green_flags = [f.model_dump() for f in out.green_flags]
     lot.showstopper_flags = [f.model_dump() for f in out.showstopper_flags]
+    lot.llm_concerns = [c.model_dump() for c in out.concerns]
+    lot.mileage_is_verified = nv.mileage_is_verified
     lot.summary = out.summary
     lot.carfax_url = out.carfax_url or raw_carfax_url
     lot.desirable_trim_or_spec = out.rarity.desirable_trim_or_spec
