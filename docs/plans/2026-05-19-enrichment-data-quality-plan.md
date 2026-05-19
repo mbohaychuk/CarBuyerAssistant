@@ -217,7 +217,55 @@ Adds the new schema fields and DB columns. No behaviour wiring yet.
 
 ---
 
+## Task 5 — `enrichment_version` re-pend mechanism
+
+The `config.py:50` comment describes a re-pend keyed on `enrichment_version`
+that was never implemented — so the v1→v2 bump in Task 3 does not by itself
+re-enrich the existing corpus. This task implements it, so the new
+`llm_concerns` / `mileage_is_verified` fields backfill on the first enricher
+run after deploy.
+
+**Files:**
+- Modify: `src/carbuyer/apps/enricher/enricher.py` (`_catchup_sweep`, + a new
+  re-pend helper) — or place the helper in `src/carbuyer/db/queue.py` next to
+  `recover_orphans` if that reads more naturally; implementer's judgement.
+- Test: the enricher / queue test module that already covers
+  `recover_orphans` / `select_pending_ids`.
+
+**Steps:**
+
+- [ ] **5a. Failing test.** Seed four lots: (i) `enrichment_status=DONE`,
+  `enrichment_version="v1"`; (ii) `DONE`, `enrichment_version="v2"` (current);
+  (iii) `FAILED`, `enrichment_version=NULL`; (iv) `PENDING`, never enriched.
+  Call the new re-pend function with current version `"v2"`. Assert: (i) →
+  `PENDING`; (ii), (iii), (iv) unchanged. Assert the returned count is 1.
+
+- [ ] **5b. Re-pend helper.** Add an async function that issues:
+  ```python
+  update(AuctionLot)
+      .where(
+          AuctionLot.enrichment_status == EnrichmentStatus.DONE,
+          AuctionLot.enrichment_version.is_distinct_from(
+              settings.enrichment_version),
+      )
+      .values(enrichment_status=EnrichmentStatus.PENDING)
+  ```
+  Return the affected row count (`result.rowcount`). Scope to `DONE` is
+  mandatory — FAILED lots have no `enrichment_version`, an unscoped re-pend
+  would retry them every startup.
+
+- [ ] **5c. Wire into startup.** Call the helper at the START of
+  `_catchup_sweep`, before `recover_orphans`, inside a session/transaction.
+  Log the count at `info` (or `warning` when > 0) so an operator sees the
+  backfill happen. The existing `select_pending_ids` drain loop then picks the
+  re-pended rows up — no extra NOTIFY needed.
+
+- [ ] **5d. Run + commit.** `uv run pytest -q` green. Commit:
+  `enricher: re-pend stale-enrichment_version lots at startup`.
+
+---
+
 ## Final review
 
-After Task 4: full-branch code review, `uv run pytest -q` green, manual
+After Task 5: full-branch code review, `uv run pytest -q` green, manual
 spot-check of a lot-detail page in the browser if feasible, then open the PR.

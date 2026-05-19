@@ -83,10 +83,25 @@ Add a free-text **advisory** channel:
 ## Re-enrichment / backfill
 
 Existing rows have no `concerns` and no `mileage_is_verified`. Bump
-`settings.enrichment_version` `"v1"` → `"v2"` (`shared/config.py`). Per the
-documented mechanism (`config.py:50` — re-pend `WHERE enrichment_version IS
-DISTINCT FROM`), the next enricher cycle re-enriches every lot, populating both
-new fields.
+`settings.enrichment_version` `"v1"` → `"v2"` (`shared/config.py`).
+
+The re-pend mechanism the `config.py:50` comment describes turned out never to
+have been implemented — `enrichment_version` was a dead field. This workstream
+implements it: on enricher startup (`_catchup_sweep`, before orphan recovery)
+the worker runs
+
+```sql
+UPDATE auction_lots SET enrichment_status = 'pending'
+WHERE enrichment_status = 'done'
+  AND enrichment_version IS DISTINCT FROM :current_version
+```
+
+Scoping to `enrichment_status = 'done'` is deliberate: FAILED lots never get
+`enrichment_version` stamped (it is written only on the success path), so an
+unscoped re-pend would retry them on every startup forever. The operation is
+idempotent — a re-enriched lot is stamped with the current version and is not
+matched again. The first enricher run after deploy thus backfills both new
+fields across the existing corpus.
 
 ## Schema summary
 
