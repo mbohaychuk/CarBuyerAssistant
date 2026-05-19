@@ -1,4 +1,8 @@
-"""Feed router — the homepage triage view.
+"""Feed router — the filter-heavy "browse all lots" view at `/lots`.
+
+(Used to be the homepage at `/`; replaced by the Today inbox in the
+inbox redesign. The filter UX is still load-bearing for power-use
+browsing, so it lives on at `/lots`.)
 
 Supports:
   - free-text search (`q`) via ILIKE against title/make/model
@@ -58,7 +62,7 @@ _NON_FILTER_PARAMS = frozenset({"cursor", "cursor_score"})
 
 
 def _query_url(params: dict[str, Any], *, drop: set[str] | None = None) -> str:
-    """Render a `/` URL from the current params, optionally dropping keys.
+    """Render a `/lots` URL from the current params, optionally dropping keys.
 
     Used for active-filter chip × buttons (drop the one filter) and for
     preset chips (apply preset on top of current state). Multi-value keys
@@ -78,7 +82,7 @@ def _query_url(params: dict[str, Any], *, drop: set[str] | None = None) -> str:
                 clean.append((key, "true"))
         else:
             clean.append((key, str(value)))
-    return "/" + ("?" + urlencode(clean) if clean else "")
+    return "/lots" + ("?" + urlencode(clean) if clean else "")
 
 
 def _build_active_chips(
@@ -120,7 +124,7 @@ def _build_active_chips(
     return chips
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/lots", response_class=HTMLResponse)
 async def feed(  # noqa: PLR0912, PLR0913, PLR0915
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
