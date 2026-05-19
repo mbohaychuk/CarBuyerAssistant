@@ -1,33 +1,65 @@
-{% from "_macros.html" import money %}
+{% from "_macros.html" import money, countdown_chip, flag_chip, deal_bucket, range_bar %}
 {% set lot = item.lot %}
 {% set auction = item.auction %}
 {# Heading: prefer normalized year/make/model/trim when available, else the
-   raw scraped title. Final fallback to "Lot #id" so the card is never an
-   anchor with no text (accessibility + click-target). #}
+   raw scraped title. Final fallback to "Lot #id" so the card is never a
+   link with no text (accessibility + click target). #}
 {% set ymm = (lot.year or "") ~ " " ~ (lot.make or "") ~ " " ~ (lot.model or "") ~ " " ~ (lot.trim or "") %}
 {% set heading = ymm.strip() or lot.title or ("Lot #" ~ lot.id) %}
-<div class="card">
-  <h3>
-    <a href="/lots/{{ lot.id }}">{{ heading }}</a>
-  </h3>
-  <p class="muted">
-    {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }} ·
-    closes {{ auction.scheduled_end_at | local_dt }}
-  </p>
-  <p>
-    Current bid: <strong>{{ money(lot.current_high_bid_cad) }}</strong>
-    {% if lot.all_in_at_current_bid_cad %} · All-in: {{ money(lot.all_in_at_current_bid_cad) }}{% endif %}
-    {% if lot.expected_value_cad %} · Est value: {{ money(lot.expected_value_cad) }}{% endif %}
-  </p>
-  <p>
-    {% if lot.rarity_score and lot.rarity_score >= 2.0 %}
-      <span class="tag rare">Rarity {{ "%.1f"|format(lot.rarity_score) }}</span>
+{# Photos populated by both HiBid + McDougall scrapers; missing for ~rare lots
+   so the empty-state slot keeps the layout from collapsing. #}
+{% set photo = lot.photos[0] if lot.photos else None %}
+<article class="lot-card" data-deal="{{ deal_bucket(lot.price_deal_score) }}">
+  <a class="lot-card__photo" href="/lots/{{ lot.id }}" aria-label="{{ heading }}">
+    {% if photo %}
+      <img src="{{ photo }}" loading="lazy" alt="">
+    {% else %}
+      <span class="lot-card__photo--empty">no photo</span>
     {% endif %}
-    {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
-      <span class="tag deal">Deal {{ "%.0f"|format(lot.price_deal_score * 100) }}%</span>
+  </a>
+  <div class="lot-card__body stack stack--sm">
+    <header class="cluster cluster--between cluster--baseline">
+      <h3 class="lot-card__title">
+        <a href="/lots/{{ lot.id }}">{{ heading }}</a>
+      </h3>
+      {{ countdown_chip(auction.scheduled_end_at) }}
+    </header>
+    <p class="lot-card__location">
+      {{ auction.pickup_city or "?" }}, {{ auction.pickup_province or "?" }}
+      {% if auction.auctioneer_name %}· {{ auction.auctioneer_name }}{% endif %}
+    </p>
+    {% if lot.value_low_cad and lot.value_high_cad %}
+      {{ range_bar(lot.value_low_cad, lot.value_mid_cad, lot.value_high_cad, lot.current_high_bid_cad) }}
     {% endif %}
-    {% if lot.suspicious_underprice_flag %}
-      <span class="tag" style="background:#ffe0e0">below low end</span>
+    <div class="cluster cluster--tight cluster--baseline">
+      {{ money(lot.current_high_bid_cad, variant='main') }}
+      {% if lot.all_in_at_current_bid_cad %}
+        <span class="t-meta">all-in {{ money(lot.all_in_at_current_bid_cad) }}</span>
+      {% endif %}
+      {% if lot.expected_value_cad %}
+        <span class="t-meta">est {{ money(lot.expected_value_cad) }}</span>
+      {% endif %}
+      {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+        <span class="t-meta t-strong" style="color: var(--color-good)">
+          {{ "%.0f"|format(lot.price_deal_score * 100) }}% deal
+        </span>
+      {% endif %}
+    </div>
+    {% if lot.showstopper_flags or lot.red_flags or lot.green_flags %}
+      <div class="cluster cluster--tight">
+        {% for f in lot.showstopper_flags %}
+          {{ flag_chip(f, 'stop') }}
+        {% endfor %}
+        {% for f in lot.red_flags[:3] %}
+          {{ flag_chip(f, 'bad') }}
+        {% endfor %}
+        {% if lot.red_flags|length > 3 %}
+          <span class="flag flag--overflow"><a href="/lots/{{ lot.id }}">+{{ lot.red_flags|length - 3 }} more</a></span>
+        {% endif %}
+        {% for f in lot.green_flags[:2] %}
+          {{ flag_chip(f, 'good') }}
+        {% endfor %}
+      </div>
     {% endif %}
-  </p>
-</div>
+  </div>
+</article>

@@ -1,12 +1,60 @@
-body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #fafaf9; color: #1a1a1a; }
-.topnav { background: #1a1a1a; padding: 0.75rem 1rem; }
-.topnav a { color: #fafaf9; margin-right: 1.25rem; text-decoration: none; }
-.topnav a:hover { text-decoration: underline; }
-main { padding: 1rem; max-width: 1200px; margin: 0 auto; }
-.card { background: white; border: 1px solid #e5e5e5; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
-.muted { color: #666; }
-.range-bar { position: relative; height: 8px; background: #ddd; border-radius: 4px; }
-.range-bar .marker { position: absolute; width: 4px; height: 12px; top: -2px; background: #d33; border-radius: 2px; }
-.tag { display: inline-block; padding: 0.1rem 0.5rem; background: #eee; border-radius: 999px; font-size: 0.85em; margin-right: 0.25rem; }
-.tag.rare { background: #ffd166; }
-.tag.deal { background: #06d6a0; }
+/* Dashboard stylesheet — composed from layered CSS files.
+ *
+ * Order matters: tokens.css MUST come first so semantic variables exist
+ * before any rule that references them. Component CSS lives under
+ * components/ and is imported alongside its primitive class.
+ *
+ * Legacy compatibility: the .card/.tag/.muted/.range-bar classes at the
+ * bottom are re-implementations of the original 13-line app.css so pages
+ * that haven't been migrated to the new component vocabulary still render.
+ * Each subsequent template migration replaces a legacy class with its new
+ * primitive (.card -> structured component, .tag -> .flag, etc).
+ */
+
+@import "tokens.css";
+@import "base.css";
+@import "utilities.css";
+@import "layout.css";
+@import "components/lot-card.css";
+@import "components/countdown.css";
+@import "components/flag.css";
+@import "components/money.css";
+@import "components/range-bar.css";
+@import "components/photo-strip.css";
+@import "components/htmx-states.css";
+
+/* ── Legacy classes ─────────────────────────────────────────────────────
+ * Implemented against tokens so the look is consistent even on pages that
+ * haven't been migrated. Deleted as each page moves to the component
+ * vocabulary. Do NOT add new uses of these classes — use the primitives. */
+
+main {
+  display: block;
+  /* `.container` is the new primitive. Bare <main> is a fallback for pages
+     that haven't been wrapped yet. */
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-4);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.muted { color: var(--color-text-muted); }
+
+.tag {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  background: var(--color-surface-sunk);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  margin-right: var(--space-1);
+  color: var(--color-text);
+}
+.tag.rare { background: var(--amber-100); color: var(--color-warn); }
+.tag.deal { background: var(--color-good-bg); color: var(--color-good); }

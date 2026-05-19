@@ -1,0 +1,47 @@
+/* Money — currency rendering primitive.
+ *
+ * Tabular numerics so values align when stacked vertically. The currency
+ * symbol is muted via ::first-letter so the eye lands on the digits;
+ * keeping the text as one continuous run inside .money (rather than a
+ * nested .money__sym span) preserves substring-based test assertions and
+ * lets the symbol blend with the surrounding text in flowing copy.
+ *
+ * Variants: --main (oversize, semibold — the primary number on a card),
+ * --large (lot detail headline), --empty (em-dash for null).
+ */
+
+.money {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--fw-med);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+.money::first-letter {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-reg);
+}
+
+.money--main {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-sbd);
+}
+
+.money--large {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-sbd);
+}
+
+.money--empty {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-reg);
+}
+
+/* Flash animation for live bid updates (paired with hx-swap or SSE). */
+.money--just-changed {
+  animation: money-flash 1.2s ease-out;
+}
+@keyframes money-flash {
+  0%   { background: var(--color-info-bg); }
+  100% { background: transparent; }
+}

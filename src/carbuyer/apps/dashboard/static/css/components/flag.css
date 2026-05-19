@@ -1,0 +1,41 @@
+/* FlagChip — red/green/showstopper indicators on lot cards + detail.
+ *
+ * Capped at ~3 red + 2 green per card; overflow becomes a "+N" chip linking
+ * to lot detail. Showstoppers always render (and override the cap).
+ */
+
+.flag {
+  display: inline-block;
+  font-size: var(--fs-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: var(--fw-med);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.flag--good {
+  color: var(--color-good);
+  background: var(--color-good-bg);
+}
+
+.flag--bad {
+  color: var(--color-bad);
+  background: var(--color-bad-bg);
+}
+
+/* Showstopper — uses solid color rather than tint to break visual rhythm. */
+.flag--stop {
+  color: var(--color-text-inverse);
+  background: var(--color-bad);
+  font-weight: var(--fw-sbd);
+}
+
+.flag--overflow {
+  background: transparent;
+  border: 1px dashed var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+.flag--overflow a {
+  color: inherit;
+}

@@ -1,0 +1,59 @@
+/* RangeBar — value-range visualization.
+ *
+ * Three reference points (value_low / value_mid / value_high from the
+ * valuator) become the bar's gradient zones. The current bid is a
+ * vertical marker placed by percent along the low-to-high range.
+ *
+ * When the current bid is below value_low the bar shifts visual emphasis
+ * to the bad-bg zone — at-a-glance "this is a deal" without reading
+ * numbers.
+ */
+
+.range-bar {
+  position: relative;
+  height: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--color-bad-bg)   0%    33%,
+    var(--color-warn-bg)  33%   66%,
+    var(--color-good-bg)  66%   100%
+  );
+  border-radius: var(--radius-pill);
+  margin: var(--space-2) 0;
+}
+
+/* The current-bid marker — placed via inline style: `left: 42%`. */
+.range-bar .marker {
+  position: absolute;
+  width: 2px;
+  height: 14px;
+  top: -3px;
+  background: var(--ink-900);
+  border-radius: 1px;
+  transform: translateX(-1px);
+}
+
+/* Value_mid marker — subtler, indicates where "fair" sits. */
+.range-bar .marker--mid {
+  background: var(--color-text-muted);
+  height: 10px;
+  top: -1px;
+}
+
+/* Below-low-end accent: the whole bar tints toward bad-bg as a deal cue. */
+.range-bar--steal {
+  background: linear-gradient(
+    90deg,
+    var(--color-bad-bg)   0%    100%
+  );
+  box-shadow: 0 0 0 1px var(--color-bad);
+}
+
+.range-bar__labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
