@@ -5,23 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>{% block title %}CarBuyer{% endblock %}</title>
+  {# Fonts — Fraunces (slab-serif display, catalog feel), Inter (body),
+     JetBrains Mono (money + countdown + VIN). preconnect cuts the
+     first-paint penalty. One stylesheet for all three. #}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="/static/css/app.css">
   <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/vendor/chart.umd.js" defer></script>
 </head>
 <body>
-  {# Topnav: sticky, horizontally scrolling segmented bar. Active page is
-     marked via the `nav` block; templates that don't set it just don't
-     get an aria-current. Same nav shows on phone and desktop — single
-     user, all destinations equally cheap to expose. #}
+  {# Topnav: sticky, horizontally scrolling segmented bar — same shape on
+     phone and desktop (single user, all destinations cheap). #}
   {% set nav = self.nav() | default('') | trim %}
   <nav class="topnav" aria-label="Primary">
-    <a href="/"           {% if nav == 'today'     %}aria-current="page"{% endif %}>Today</a>
-    <a href="/auctions"   {% if nav == 'auctions'  %}aria-current="page"{% endif %}>Auctions</a>
-    <a href="/watched"    {% if nav == 'watchlist' %}aria-current="page"{% endif %}>Watchlist</a>
-    <a href="/comps"      {% if nav == 'comps'     %}aria-current="page"{% endif %}>Comps</a>
-    <a href="/purchases"  {% if nav == 'garage'    %}aria-current="page"{% endif %}>Garage</a>
-    <a href="/admin"      {% if nav == 'admin'     %}aria-current="page"{% endif %}>Admin</a>
+    <span class="topnav__brand">CarBuyer<span>/Ledger</span></span>
+    <a href="/"          {% if nav == 'today'     %}aria-current="page"{% endif %}>Today</a>
+    <a href="/auctions"  {% if nav == 'auctions'  %}aria-current="page"{% endif %}>Auctions</a>
+    <a href="/watched"   {% if nav == 'watchlist' %}aria-current="page"{% endif %}>Watchlist</a>
+    <a href="/comps"     {% if nav == 'comps'     %}aria-current="page"{% endif %}>Comps</a>
+    <a href="/purchases" {% if nav == 'garage'    %}aria-current="page"{% endif %}>Garage</a>
+    <a href="/admin"     {% if nav == 'admin'     %}aria-current="page"{% endif %}>Admin</a>
   </nav>
   <main class="container">{% block content %}{% endblock %}</main>
   {% block nav %}{% endblock %}

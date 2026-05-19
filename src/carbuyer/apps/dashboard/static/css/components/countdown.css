@@ -1,45 +1,51 @@
-/* CountdownChip — closing-in-Xh visual.
+/* CountdownChip — Auction House Ledger.
  *
- * Urgency tier (data-urgency) is set server-side from minutes-to-close.
- * Pure CSS — no JavaScript ticker. The chip updates only when the page
- * (or its enclosing HTMX target) re-renders, which is fine for the
- * "closing in 6h" precision the user actually cares about. Sub-minute
- * countdowns live in the Bid Console with a real ticker.
+ * Monospaced (JetBrains Mono), color-only urgency at low/med tiers (no
+ * pill background — keeps the card calm during normal browsing), pill
+ * background only kicks in at high and now tiers when the chip needs
+ * to assert itself. Pure CSS; data-urgency is set server-side from
+ * minutes-to-close. Sub-minute countdowns get a real ticker in the
+ * Bid Console.
  */
 
 .countdown {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
+  padding: 2px 0;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-weight: var(--fw-med);
   font-size: var(--fs-sm);
-  background: var(--color-surface-sunk);
-  color: var(--color-text-muted);
+  letter-spacing: -0.02em;
+  color: var(--color-urgency-low);
   white-space: nowrap;
 }
 
 .countdown[data-urgency="med"] {
-  color: var(--urgency-med);
-  background: var(--color-warn-bg);
+  color: var(--color-urgency-med);
 }
 .countdown[data-urgency="high"] {
-  color: var(--urgency-high);
-  background: var(--color-bad-bg);
+  color: var(--color-urgency-high);
+  font-weight: var(--fw-sbd);
 }
 .countdown[data-urgency="now"] {
-  color: var(--color-text-inverse);
-  background: var(--urgency-now);
+  /* Final-15-minutes treatment: oxblood pill with paper text, gentle
+   * pulse halo. The animation pulls the eye without changing layout. */
+  color: var(--color-paper);
+  background: var(--color-urgency-now);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-weight: var(--fw-sbd);
   animation: countdown-pulse 2s ease-in-out infinite;
 }
 .countdown[data-urgency="closed"] {
   color: var(--color-text-muted);
-  background: transparent;
   font-style: italic;
+  font-family: var(--font-display);
+  letter-spacing: 0;
 }
 
 @keyframes countdown-pulse {
-  50% { box-shadow: 0 0 0 4px rgba(122, 15, 10, 0.18); }
+  50% { box-shadow: 0 0 0 4px rgba(74, 10, 6, 0.22); }
 }
