@@ -15,17 +15,21 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
@@ -534,6 +538,37 @@ class Search(Base, TimestampMixin):
         server_default=text("true"),
         nullable=False,
     )
+
+
+class DashboardState(Base):
+    """Singleton row tracking when the user last opened the Today inbox.
+
+    Used by the inbox view to compute "alerts since your last visit" — new
+    lots matching watched make/model, state transitions on interested lots,
+    late-discovered showstoppers. The CHECK constraint enforces the
+    one-row-forever invariant at the DB layer; the migration seeds id=1.
+    """
+
+    __tablename__ = "dashboard_state"
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    last_visited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_dashboard_state_singleton"),)
+
+
+# Self-seed the singleton row on any after_create — covers Base.metadata.create_all
+# paths (tests, fresh-DB bootstraps). The migration also inserts the row in prod;
+# ON CONFLICT keeps both paths idempotent.
+event.listen(
+    DashboardState.__table__,
+    "after_create",
+    DDL("INSERT INTO dashboard_state (id) VALUES (1) ON CONFLICT DO NOTHING"),
+)
 
 
 class SourceAlertState(Base):
