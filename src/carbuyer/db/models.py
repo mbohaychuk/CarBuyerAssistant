@@ -168,6 +168,7 @@ class AuctionLot(Base, TimestampMixin):
     transmission: Mapped[str | None] = mapped_column(String(16))
     drivetrain: Mapped[str | None] = mapped_column(String(16))
     mileage_km: Mapped[int | None] = mapped_column(Integer)
+    mileage_is_verified: Mapped[bool | None] = mapped_column(Boolean)
     vin: Mapped[str | None] = mapped_column(String(32))
     title_status: Mapped[str] = mapped_column(
         String(32),
@@ -193,6 +194,12 @@ class AuctionLot(Base, TimestampMixin):
         nullable=False,
     )
     showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+        nullable=False,
+    )
+    llm_concerns: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB,
         default=list,
         server_default=text("'[]'::jsonb"),

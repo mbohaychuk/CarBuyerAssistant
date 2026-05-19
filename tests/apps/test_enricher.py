@@ -53,7 +53,7 @@ def _enrichment(
             year=2010, make="Ford", model="F-150", trim=None,
             engine="5.4L", transmission=transmission,  # type: ignore[arg-type]
             drivetrain=drivetrain,  # type: ignore[arg-type]
-            mileage_km=200000, vin=None,
+            mileage_km=200000, mileage_is_verified=None, vin=None,
         ),
         title_status="NORMAL",
         condition_categorical=condition,  # type: ignore[arg-type]
@@ -61,6 +61,7 @@ def _enrichment(
         red_flags=red_flags or [],
         green_flags=[],
         showstopper_flags=[],
+        concerns=[],
         carfax_url=carfax_url,
         summary=summary,
         description_quality=description_quality,  # type: ignore[arg-type]

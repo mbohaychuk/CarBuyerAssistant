@@ -25,6 +25,7 @@ TitleStatus = Literal[
 ]
 Condition = Literal["bad", "poor", "decent", "good", "great"]
 DescriptionQuality = Literal["thin", "adequate", "detailed"]
+ConcernSeverity = Literal["minor", "moderate", "serious"]
 
 
 class NormalizedVehicle(BaseModel):
@@ -37,6 +38,7 @@ class NormalizedVehicle(BaseModel):
     transmission: Transmission
     drivetrain: Drivetrain
     mileage_km: int | None
+    mileage_is_verified: bool | None
     vin: str | None
 
 
@@ -51,6 +53,12 @@ class ShowstopperInstance(BaseModel):
     model_config = ConfigDict(extra="forbid")
     flag: str
     evidence: str
+
+
+class Concern(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+    severity: ConcernSeverity
 
 
 class RarityAssessment(BaseModel):
@@ -70,6 +78,7 @@ class EnrichmentOutput(BaseModel):
     red_flags: list[FlagInstance]
     green_flags: list[FlagInstance]
     showstopper_flags: list[ShowstopperInstance]
+    concerns: list[Concern]
     carfax_url: str | None
     summary: str
     description_quality: DescriptionQuality
