@@ -241,12 +241,11 @@
  * template migration replaces a legacy class (.card → structured
  * component, .tag → .flag, etc.) and a corresponding block here gets
  * deleted once unused. */
-main {
-  display: block;
-  max-width: var(--container-max);
-  margin: 0 auto;
-  padding: var(--space-4);
-}
+/* Removed legacy `main { ... }` bare-tag rule — the outer page wrapper
+ * uses `.container` for max-width / padding, and the bare-tag selector
+ * was clobbering any *nested* <main> (e.g. lot-detail's inner column
+ * was a <main>, which inherited the global max-width and blew out of
+ * its grid track). Nested <main> would also be an a11y smell. */
 
 .card {
   background: var(--color-surface);
