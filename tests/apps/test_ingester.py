@@ -75,3 +75,43 @@ async def test_dispatch_empty_strategy_list_is_a_no_op(
     ingester.STRATEGIES.clear()
     results = await ingester._dispatch_strategies()
     assert results == {}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_binds_strategy_contextvar_for_each_invocation(
+    _restore_strategies: None,
+) -> None:
+    """_dispatch_strategies wraps each strategy call in
+    `bound_contextvars(strategy=name)` so all log lines inside (including
+    any source-plugin log lines emitted during the strategy run) get
+    strategy attribution merged in by the configured processor chain.
+
+    Verified by having each strategy capture its own contextvars at call
+    time — the binding must be the *current* iteration's name, not stale
+    from the previous one.
+    """
+    import structlog  # noqa: PLC0415
+
+    captured: dict[str, dict[str, object]] = {}
+
+    def _capture(name: str) -> Callable[[], Awaitable[int]]:
+        async def _strategy() -> int:
+            captured[name] = dict(structlog.contextvars.get_contextvars())
+            return 1
+
+        return _strategy
+
+    ingester.STRATEGIES.clear()
+    ingester.STRATEGIES.extend([
+        ("first", _capture("first")),
+        ("second", _capture("second")),
+    ])
+    structlog.contextvars.clear_contextvars()
+
+    await ingester._dispatch_strategies()
+
+    assert captured["first"].get("strategy") == "first"
+    assert captured["second"].get("strategy") == "second"
+    # Binding must be unbound on dispatch exit — otherwise the next ingester
+    # run (or the calling main()) inherits stale attribution.
+    assert "strategy" not in structlog.contextvars.get_contextvars()

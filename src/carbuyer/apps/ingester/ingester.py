@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+import structlog
+
 from carbuyer.db.notify import notify
 from carbuyer.db.upserts import upsert_auction, upsert_lot_with_status_cascade
 from carbuyer.db.session import get_session
@@ -65,15 +67,16 @@ async def _run_hibid_lot_first() -> int:
     hibid_source = SOURCES.get(HibidSource.name)
     if not isinstance(hibid_source, HibidSource):
         raise RuntimeError("hibid plugin did not self-register")
-    total = 0
-    async with hibid_source:
-        for province in settings.hibid_provinces:
-            log.info("ingest province start", province=province)
-            n = await _ingest_one_hibid_province(hibid_source, province)
-            log.info("ingest province done", province=province, lots=n)
-            total += n
-    log.info("ingest complete", total_lots=total)
-    return total
+    with structlog.contextvars.bound_contextvars(source=HibidSource.name):
+        total = 0
+        async with hibid_source:
+            for province in settings.hibid_provinces:
+                log.info("ingest province start", province=province)
+                n = await _ingest_one_hibid_province(hibid_source, province)
+                log.info("ingest province done", province=province, lots=n)
+                total += n
+        log.info("ingest complete", total_lots=total)
+        return total
 
 
 async def _run_mcdougall_lot_first() -> int:
@@ -86,20 +89,21 @@ async def _run_mcdougall_lot_first() -> int:
     mcdougall = SOURCES.get(McDougallSource.name)
     if not isinstance(mcdougall, McDougallSource):
         raise RuntimeError("mcdougall plugin did not self-register")
-    count = 0
-    async with mcdougall:
-        async for raw_auction, raw_lot in mcdougall.discover_vehicle_lots():
-            async with get_session() as session, session.begin():
-                auction = await upsert_auction(
-                    session, raw_auction, discovered_via="ingester",
-                )
-                lot = await upsert_lot_with_status_cascade(
-                    session, auction.id, raw_lot,
-                    parser_version=_MCDOUGALL_PARSER_VERSION,
-                )
-                await notify(session, "enrichment_pending", str(lot.id))
-                count += 1
-    return count
+    with structlog.contextvars.bound_contextvars(source=McDougallSource.name):
+        count = 0
+        async with mcdougall:
+            async for raw_auction, raw_lot in mcdougall.discover_vehicle_lots():
+                async with get_session() as session, session.begin():
+                    auction = await upsert_auction(
+                        session, raw_auction, discovered_via="ingester",
+                    )
+                    lot = await upsert_lot_with_status_cascade(
+                        session, auction.id, raw_lot,
+                        parser_version=_MCDOUGALL_PARSER_VERSION,
+                    )
+                    await notify(session, "enrichment_pending", str(lot.id))
+                    count += 1
+        return count
 
 
 # Strategy registration. Each entry's name appears in structured logs so a
@@ -123,18 +127,24 @@ async def _dispatch_strategies() -> dict[str, int | None]:
     Returns a name -> lots-ingested mapping; None means the strategy raised
     (already logged at error level). The mapping is for the final summary
     log so the operator sees per-source counts in one line.
+
+    Binds ``strategy=<name>`` as a structlog contextvar around each strategy
+    invocation so per-strategy log lines are filterable in journalctl. The
+    strategy itself binds ``source=<plugin-name>`` so logs inside source
+    plugins also carry that attribution.
     """
     results: dict[str, int | None] = {}
     for name, strategy in STRATEGIES:
-        log.info("ingest strategy start", strategy=name)
-        try:
-            count = await strategy()
-        except Exception:
-            log.exception("ingest strategy failed", strategy=name)
-            results[name] = None
-            continue
-        log.info("ingest strategy done", strategy=name, lots=count)
-        results[name] = count
+        with structlog.contextvars.bound_contextvars(strategy=name):
+            log.info("ingest strategy start")
+            try:
+                count = await strategy()
+            except Exception:
+                log.exception("ingest strategy failed")
+                results[name] = None
+                continue
+            log.info("ingest strategy done", lots=count)
+            results[name] = count
     return results
 
 
