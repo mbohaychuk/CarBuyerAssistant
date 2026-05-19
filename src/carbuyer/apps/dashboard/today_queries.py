@@ -37,6 +37,17 @@ _WATCHED_ACTIONS = (
     UserAction.PURCHASED.value,
 )
 
+# _WATCHED_ACTIONS = lots considered "in the user's world" — shown anywhere
+# "watched" is the boundary (Today buckets, /watched route, feed).
+# _INTEREST_DERIVATION_ACTIONS = lots whose make/model contribute to the
+# derived "interests" set. PURCHASED is excluded — otherwise the user gets
+# perpetual "new lot matching your interests" alerts for vehicles they
+# already own.
+_INTEREST_DERIVATION_ACTIONS = (
+    UserAction.INTERESTED.value,
+    UserAction.BID_PLACED.value,
+)
+
 _LOCAL_TZ = ZoneInfo("America/Edmonton")
 
 # Boundary between "Now" and "Next 2h" buckets. Lots within this window
@@ -142,17 +153,18 @@ async def read_and_bump_last_visit(session: AsyncSession) -> datetime:
 async def derive_watched_make_model(session: AsyncSession) -> set[tuple[str, str]]:
     """The (make, model) pairs the user has shown interest in.
 
-    Auto-derived from the user's watched-lot history (INTERESTED,
-    BID_PLACED, or PURCHASED) rather than requiring a separate
-    watch-config table. Both
-    make and model must be non-null — accessory lots (no normalized
+    Auto-derived from the user's watched-lot history (INTERESTED or
+    BID_PLACED) rather than requiring a separate watch-config table.
+    PURCHASED is intentionally excluded — a car the user already bought
+    should not generate perpetual "new lot matching your interests" alerts.
+    Both make and model must be non-null — accessory lots (no normalized
     fields) can't be matched against, so we don't widen `NULL IN (…)`
     semantics into the alert query.
     """
     stmt = (
         select(AuctionLot.make, AuctionLot.model)
         .where(
-            AuctionLot.user_action.in_(_WATCHED_ACTIONS),
+            AuctionLot.user_action.in_(_INTEREST_DERIVATION_ACTIONS),
             AuctionLot.make.is_not(None),
             AuctionLot.model.is_not(None),
         )

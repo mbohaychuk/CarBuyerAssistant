@@ -22,6 +22,7 @@ from carbuyer.apps.dashboard.today_queries import (
     best_deals,
     closing_buckets,
     dashboard_kpis,
+    derive_watched_make_model,
     read_and_bump_last_visit,
 )
 from carbuyer.db.enums import LotStatus, UserAction
@@ -533,3 +534,37 @@ async def test_root_and_lots_both_respond(_patch_deps: AsyncSession) -> None:
         r_lots = await client.get("/lots")
     assert r_today.status_code == 200  # noqa: PLR2004
     assert r_lots.status_code == 200  # noqa: PLR2004
+
+
+# ── derive_watched_make_model: PURCHASED exclusion ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_derive_watched_make_model_excludes_purchased(
+    _patch_deps: AsyncSession,
+) -> None:
+    """A purchased lot's make/model must NOT enter the derived interest set.
+
+    If PURCHASED were included, the user would receive perpetual "new lot
+    matching your interests" alerts for makes/models they already bought.
+    """
+    session = _patch_deps
+    a = _seed_auction(session, source_id="A_PURCHASED_EXCL")
+    _seed_lot(
+        session, a, source_lot_id="INTERESTED_CAMRY",
+        make="Toyota", model="Camry",
+        user_action=UserAction.INTERESTED.value,
+    )
+    purchased = _seed_lot(
+        session, a, source_lot_id="PURCHASED_CIVIC",
+        make="Honda", model="Civic",
+        # PURCHASED requires won_at per the purchased_iff_won_at check constraint.
+        user_action=UserAction.PURCHASED.value,
+    )
+    purchased.won_at = datetime.now(UTC)
+    await session.commit()
+
+    pairs = await derive_watched_make_model(session)
+
+    assert ("Toyota", "Camry") in pairs
+    assert ("Honda", "Civic") not in pairs
