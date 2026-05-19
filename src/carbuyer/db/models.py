@@ -534,3 +534,20 @@ class Search(Base, TimestampMixin):
         server_default=text("true"),
         nullable=False,
     )
+
+
+class SourceAlertState(Base):
+    """Last-alerted-at timestamp per source for the stale-source watchdog.
+
+    A separate tiny table rather than a column on auctions because freshness
+    is computed via aggregation over auctions.last_seen_at — the watchdog
+    needs only a dedup window, not freshness state. One row per registered
+    source; rows materialize on first alert and are upserted thereafter.
+    """
+
+    __tablename__ = "source_alert_state"
+
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_alerted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
