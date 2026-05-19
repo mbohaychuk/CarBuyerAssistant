@@ -32,10 +32,9 @@ def _alembic_config(url: str) -> Config:
 
 @pytest.fixture
 def migration_db() -> Generator[sa.Engine, None, None]:
-    """Fresh sync engine pointed at carbuyer_migration_test schema.
+    """Fresh sync engine on a throwaway carbuyer_migration_test database.
 
-    Drops + creates the schema before each test so each scenario starts
-    from a known state. Sync because alembic command.* is sync.
+    Sync, not async: alembic's command.* API runs synchronously.
     """
     base = os.environ.get(
         "DATABASE_URL",
@@ -46,13 +45,12 @@ def migration_db() -> Generator[sa.Engine, None, None]:
     else:
         pytest.skip("DATABASE_URL doesn't look like the dev URL")
 
-    sync_url = url.replace("+psycopg_async", "+psycopg")
-    eng = sa.create_engine(sync_url)
+    eng = sa.create_engine(url)
     with eng.begin() as conn:
         conn.execute(sa.text("DROP SCHEMA IF EXISTS public CASCADE"))
         conn.execute(sa.text("CREATE SCHEMA public"))
 
-    cfg = _alembic_config(sync_url)
+    cfg = _alembic_config(url)
     command.upgrade(cfg, PREV_HEAD)
     yield eng
     eng.dispose()
