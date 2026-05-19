@@ -160,6 +160,92 @@ async def test_lot_detail_no_sparse_qualifier_for_confident_condition(
 
 
 @pytest.mark.asyncio
+async def test_lot_detail_renders_analyst_concerns(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.llm_concerns = [
+        {"text": "blue smoke on cold start suggests worn valve seals", "severity": "serious"},
+        {"text": "aftermarket exhaust may mask a deeper issue", "severity": "minor"},
+    ]
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Analyst notes" in r.text
+    assert "blue smoke on cold start suggests worn valve seals" in r.text
+    assert "aftermarket exhaust may mask a deeper issue" in r.text
+    assert "concern--serious" in r.text
+    assert "concern--minor" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_analyst_notes_when_no_concerns(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Analyst notes" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_unverified_mileage_marker(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.mileage_is_verified = False
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "(unverified)" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_unverified_marker_when_verified(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.mileage_is_verified = True
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "(unverified)" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_unverified_marker_when_provenance_unknown(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "(unverified)" not in r.text
+
+
+@pytest.mark.asyncio
 async def test_lot_detail_404_when_missing(_patch_deps: AsyncSession) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

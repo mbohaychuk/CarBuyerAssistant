@@ -14,7 +14,7 @@
         <span class="lot-detail__sep">·</span>
         <span>{{ auction.auctioneer_name or auction.source }}</span>
         {% if lot.vin %}<span class="lot-detail__sep">·</span><span class="t-mono">VIN {{ lot.vin }}</span>{% endif %}
-        {% if lot.mileage_km %}<span class="lot-detail__sep">·</span><span class="t-mono">{{ "{:,}".format(lot.mileage_km) }} km</span>{% endif %}
+        {% if lot.mileage_km %}<span class="lot-detail__sep">·</span><span class="t-mono">{{ "{:,}".format(lot.mileage_km) }} km</span>{% if lot.mileage_is_verified == False %} <span class="t-meta">(unverified)</span>{% endif %}{% endif %}
       </p>
     </div>
     <a class="lot-detail__source" href="{{ lot.url }}" target="_blank" rel="noopener">View at {{ auction.source }} ↗</a>
@@ -56,7 +56,7 @@
       {% endif %}
 
       {# Condition signals — flags grouped #}
-      {% if lot.showstopper_flags or lot.red_flags or lot.green_flags %}
+      {% if lot.showstopper_flags or lot.red_flags or lot.green_flags or lot.llm_concerns %}
         <section class="lot-detail__section">
           <h2>Condition signals</h2>
           {% if lot.showstopper_flags %}
@@ -75,6 +75,15 @@
             <div class="lot-detail__flagrow">
               <h3>Strengths</h3>
               <ul>{% for f in lot.green_flags %}<li>{{ flag_chip(f, 'good') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
+            </div>
+          {% endif %}
+          {% if lot.llm_concerns %}
+            <div class="lot-detail__flagrow">
+              <h3>Analyst notes</h3>
+              <ul>{% for c in lot.llm_concerns %}
+                <li><span class="concern concern--{{ c.severity }}">{{ c.severity }}</span>
+                    <span class="t-meta">{{ c.text }}</span></li>
+              {% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.vision_contradictions %}
