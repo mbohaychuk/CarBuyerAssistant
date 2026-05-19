@@ -48,6 +48,7 @@ from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import (
     claim_pending_ids,
     recover_orphans,
+    repend_stale_enrichment_version,
     select_pending_ids,
 )
 from carbuyer.db.session import get_session, get_session_maker
@@ -434,6 +435,18 @@ async def _catchup_sweep(provider: OpenAIProvider) -> None:
     row forever (Phase 2.5 watchdog is referenced in queue.py:64 but isn't
     actually implemented yet).
     """
+    async with get_session() as s, s.begin():
+        repended = await repend_stale_enrichment_version(
+            s, current_version=settings.enrichment_version,
+        )
+    if repended > 0:
+        log.warning(
+            "re-pended stale-enrichment_version lots at startup",
+            count=repended,
+            current_version=settings.enrichment_version,
+        )
+    else:
+        log.info("no stale-enrichment_version lots to re-pend")
     async with get_session() as s, s.begin():
         recovered = await recover_orphans(s, status_field="enrichment_status")
     if recovered > 0:
