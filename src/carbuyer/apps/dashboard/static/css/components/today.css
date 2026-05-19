@@ -1,0 +1,373 @@
+/* Today inbox — homepage triage view (`/`).
+ *
+ * Layout sections:
+ *   .today          — root spacing column
+ *   .kpi-strip      — above-the-fold 4-tile band
+ *   .alerts-panel   — "since your last visit" 3-column strip
+ *   .today-buckets  — closing-time bin sections
+ *   .today-row      — compact lot row (used in alerts + buckets)
+ *   .today-deals    — best-deals card grid (reuses .lot-card)
+ *
+ * All tokens come from the @theme block in tailwind.css. No new
+ * palette values defined here — this file is shape, not color.
+ */
+
+.today {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-8);
+  padding-block: var(--spacing-4) var(--spacing-12);
+}
+
+.today__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+}
+
+.today__head h1 {
+  font-family: "Fraunces", serif;
+  font-weight: 600;
+  font-size: var(--text-3xl);
+  line-height: 1;
+  margin: 0;
+  color: var(--color-ink);
+}
+
+.today__browse {
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--color-rule-strong);
+  padding-bottom: 1px;
+}
+.today__browse:hover {
+  color: var(--color-ink);
+  border-bottom-color: var(--color-ink);
+}
+
+/* ── KPI strip ──────────────────────────────────────────────────────── */
+
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--spacing-3);
+}
+
+.kpi-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  padding: var(--spacing-4) var(--spacing-5);
+  background: var(--color-paper-3);
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--color-ink);
+  min-height: 96px;
+  transition: transform 80ms ease, border-color 80ms ease;
+  position: relative;
+}
+.kpi-tile:hover {
+  border-color: var(--color-rule-strong);
+  transform: translateY(-1px);
+}
+
+.kpi-tile__value {
+  font-family: "Fraunces", serif;
+  font-weight: 600;
+  font-size: 2.5rem;
+  line-height: 1;
+  color: var(--color-ink);
+  font-variant-numeric: tabular-nums;
+}
+.kpi-tile__unit {
+  font-size: 1.25rem;
+  margin-left: 2px;
+  color: var(--color-muted);
+}
+.kpi-tile__label {
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+/* Tile tone — a thin left ledger-rule that color-keys the metric.
+ * Mirrors the data-deal accent on lot cards, so the language stays
+ * consistent across the app. */
+.kpi-tile::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--color-rule);
+  border-radius: 4px 0 0 4px;
+}
+.kpi-tile[data-tone="urgent"]::before { background: var(--color-ox); }
+.kpi-tile[data-tone="urgent"] .kpi-tile__value { color: var(--color-ox); }
+.kpi-tile[data-tone="accent"]::before { background: var(--color-ember); }
+.kpi-tile[data-tone="accent"] .kpi-tile__value { color: var(--color-ember); }
+.kpi-tile[data-tone="deal"]::before   { background: var(--color-accent); }
+.kpi-tile[data-tone="deal"] .kpi-tile__value   { color: var(--color-accent); }
+.kpi-tile[data-tone="muted"]::before  { background: var(--color-rule); }
+.kpi-tile[data-tone="neutral"]::before { background: var(--color-stamp-blue); }
+
+/* ── Alerts panel ───────────────────────────────────────────────────── */
+
+.alerts-panel {
+  border: 1px solid var(--color-rule);
+  border-left: 3px solid var(--color-ember);
+  background: var(--color-paper-3);
+  border-radius: 4px;
+  padding: var(--spacing-4) var(--spacing-5);
+}
+
+.alerts-panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  margin-bottom: var(--spacing-4);
+}
+.alerts-panel__head h2 {
+  font-family: "Fraunces", serif;
+  font-weight: 600;
+  font-size: var(--text-xl);
+  margin: 0;
+}
+.alerts-panel__since {
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+  font-family: "JetBrains Mono", monospace;
+}
+
+.alerts-panel__cols {
+  display: grid;
+  gap: var(--spacing-5);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.alerts-col h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  font-size: var(--text-sm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  margin: 0 0 var(--spacing-2);
+}
+.alerts-col__count {
+  font-family: "JetBrains Mono", monospace;
+  font-size: var(--text-xs);
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--color-ink);
+}
+.alerts-col[data-kind="new"]      h3 { color: var(--color-stamp-blue); }
+.alerts-col[data-kind="bid"]      h3 { color: var(--color-ember); }
+.alerts-col[data-kind="showstop"] h3 { color: var(--color-ox); }
+
+.alerts-col ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.alerts-col li + li { border-top: 1px dashed var(--color-rule); }
+
+/* ── Bucket sections ────────────────────────────────────────────────── */
+
+.today-buckets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-6);
+}
+
+.today-bucket {
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  background: var(--color-paper-3);
+  overflow: hidden;
+}
+.today-bucket[data-density="dense"] { border-left: 3px solid var(--color-ox); }
+.today-bucket[data-density="normal"] { border-left: 3px solid var(--color-rule-strong); }
+
+.today-bucket__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) var(--spacing-5);
+  background: var(--color-paper-2);
+  border-bottom: 1px solid var(--color-rule);
+}
+.today-bucket__head h2 {
+  font-family: "Fraunces", serif;
+  font-weight: 600;
+  font-size: var(--text-lg);
+  margin: 0;
+  color: var(--color-ink);
+}
+.today-bucket__count {
+  font-family: "JetBrains Mono", monospace;
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+  background: var(--color-paper-3);
+  border: 1px solid var(--color-rule);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.today-bucket__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.today-bucket__list li + li { border-top: 1px solid var(--color-rule); }
+.today-bucket__empty {
+  padding: var(--spacing-4) var(--spacing-5);
+  margin: 0;
+  color: var(--color-muted);
+  font-style: italic;
+  font-size: var(--text-sm);
+}
+
+/* ── Compact row (used by alerts + bucket lists) ────────────────────── */
+
+.today-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) var(--spacing-5);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color 80ms ease;
+  position: relative;
+}
+.today-row:hover { background: var(--color-paper-2); }
+/* Flex children: title is the only flexible item so the meta + price +
+ * deal + time cluster sticks to the right. Reason chip (when present)
+ * sits on the far left without competing for space. */
+.today-row > * { flex: 0 0 auto; }
+.today-row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.today-row__meta {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* Deal accent — left edge stripe, mirroring the card data-deal idiom. */
+.today-row::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: transparent;
+}
+.today-row[data-deal="3"]::before { background: var(--color-deal-3); }
+.today-row[data-deal="4"]::before { background: var(--color-deal-4); }
+.today-row[data-state="interested"]::before { background: var(--color-stamp-blue); }
+
+.today-row--dense {
+  padding: var(--spacing-2) var(--spacing-5);
+  font-size: var(--text-sm);
+}
+
+.today-row__reason {
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  font-family: "JetBrains Mono", monospace;
+  white-space: nowrap;
+}
+.today-row__title {
+  font-family: "Fraunces", serif;
+  font-weight: 600;
+  color: var(--color-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* flex: from earlier rule — preserved here for readability */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.today-row__meta {
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+.today-row__price {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 500;
+  color: var(--color-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.today-row__deal {
+  font-family: "JetBrains Mono", monospace;
+  font-size: var(--text-xs);
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+.today-row__time { margin-left: var(--spacing-2); min-width: 64px; text-align: right; }
+
+/* On narrow viewports the row wraps into two lines: title + time on
+ * top, meta + price below. The countdown stays on the title row so
+ * urgency never disappears below the fold. */
+@media (max-width: 640px) {
+  .today-row {
+    flex-wrap: wrap;
+    row-gap: var(--spacing-1);
+  }
+  .today-row__title { flex: 1 1 60%; }
+  .today-row__time  { order: 2; margin-left: auto; }
+  .today-row__meta  { order: 3; flex: 1 1 60%; }
+  .today-row__price { order: 4; margin-left: auto; }
+  .today-row__deal,
+  .today-row__reason { display: none; }
+}
+
+/* ── Best deals — uses .lot-card grid; gives it a section frame ─────── */
+
+.today-deals__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  margin-bottom: var(--spacing-3);
+}
+.today-deals__head h2 {
+  font-family: "Fraunces", serif;
+  font-weight: 600;
+  font-size: var(--text-xl);
+  margin: 0;
+}
+.today-deals__see-all {
+  font-size: var(--text-sm);
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.today-deals__grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+/* ── Responsive: KPI strip stacks 2x2 below 720px ───────────────────── */
+
+@media (max-width: 720px) {
+  .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+  .kpi-tile { min-height: 80px; padding: var(--spacing-3) var(--spacing-4); }
+  .kpi-tile__value { font-size: 2rem; }
+}

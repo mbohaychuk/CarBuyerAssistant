@@ -1,0 +1,17 @@
+{# Best deals — top-N open lots by deal score, regardless of closing
+   urgency. Surfaces "you'll want to look at this" finds the user might
+   miss in the urgency-driven closing buckets above. Rendered as full
+   lot cards (not compact rows) — these are the ones worth lingering on. #}
+{% if best_deals %}
+<section id="today-deals" class="today-deals">
+  <header class="today-deals__head">
+    <h2>Best deals right now</h2>
+    <a class="today-deals__see-all" href="/lots?sort=deal&amp;min_score=0.15">See all →</a>
+  </header>
+  <div class="today-deals__grid">
+    {% for item in best_deals %}
+      {% include "partials/lot_card.html" %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
