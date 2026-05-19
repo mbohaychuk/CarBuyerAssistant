@@ -31,16 +31,32 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "CREATE INDEX ix_historical_sales_make_model_year_upper "
-        "ON historical_sales (upper(make), upper(model), year)",
-    )
-    op.execute(
-        "CREATE INDEX ix_auction_lots_make_model_year_upper "
-        "ON auction_lots (upper(make), upper(model), year)",
-    )
+    # CONCURRENTLY so we don't take ACCESS EXCLUSIVE on either table during
+    # the build — at projected ~250k-row scale the non-concurrent variant
+    # would stall every writer (valuator, enricher, bid_poller) for seconds.
+    # CIC can't run inside a transaction, hence the autocommit_block().
+    # Trade-off: an interrupted CIC leaves an INVALID index; rerunning the
+    # migration after dropping it manually is the recovery path.
+    with op.get_context().autocommit_block():
+        op.execute(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+            "ix_historical_sales_make_model_year_upper "
+            "ON historical_sales (upper(make), upper(model), year)",
+        )
+        op.execute(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+            "ix_auction_lots_make_model_year_upper "
+            "ON auction_lots (upper(make), upper(model), year)",
+        )
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS ix_auction_lots_make_model_year_upper")
-    op.execute("DROP INDEX IF EXISTS ix_historical_sales_make_model_year_upper")
+    with op.get_context().autocommit_block():
+        op.execute(
+            "DROP INDEX CONCURRENTLY IF EXISTS "
+            "ix_auction_lots_make_model_year_upper",
+        )
+        op.execute(
+            "DROP INDEX CONCURRENTLY IF EXISTS "
+            "ix_historical_sales_make_model_year_upper",
+        )
