@@ -360,7 +360,7 @@ async def dashboard_kpis(
     now_cutoff = now + _NOW_WINDOW
 
     # Match closing_buckets `now` filter exactly — same OPEN_STATUSES,
-    # same NOT_INTERESTED exclusion. Without the user-action filter the
+    # same passed exclusion. Without the user-action filter the
     # tile count and bucket section count would diverge.
     closing_now_stmt = (
         select(func.count())
