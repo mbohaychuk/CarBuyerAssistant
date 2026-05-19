@@ -119,18 +119,18 @@ async def test_watched_default_tier_interested(_patch_deps: AsyncSession) -> Non
 
 
 @pytest.mark.asyncio
-async def test_watched_tier_maybe(_patch_deps: AsyncSession) -> None:
+async def test_watched_tier_passed(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
     _seed_auction_with_lot(
-        session, end_at=None, user_action=UserAction.INTERESTED.value, title="PERHAPS",
+        session, end_at=None, user_action=UserAction.PASSED.value, title="PASSED-LOT",
     )
     await session.commit()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/watched?tier=maybe")
+        r = await client.get("/watched?tier=passed")
     assert r.status_code == 200  # noqa: PLR2004
-    assert "PERHAPS" in r.text
+    assert "PASSED-LOT" in r.text
 
 
 @pytest.mark.asyncio
