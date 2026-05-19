@@ -119,27 +119,40 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
    lands, bid_placed and purchased alias to interested in the DB; the
    immediate post-click render uses the user's intent so the button they
    clicked appears active.) #}
+{# Toggle-on-re-click: each button emits `currently_active` as a static
+   JSON literal per its own render-time state. Clicking an active
+   button sends `currently_active=true` and the server clears
+   `user_action` to NULL; clicking an inactive button sends false and
+   the server sets the new state. We render literals instead of using
+   `hx-vals='js:...'` because HTMX 2.x dropped the `this` reference
+   inside JS-evaluated vals — there's no clean per-button JS context. #}
 {% macro action_buttons(lot_id, current_state, size='sm', target=None) -%}
 {% set hx_target = target or ('#lot-' ~ lot_id) %}
+{% set watch_on   = current_state == 'interested' %}
+{% set bid_on     = current_state == 'bid_placed' %}
+{% set pass_on    = current_state == 'passed' or current_state == 'not_interested' %}
 <div class="lot-actions" data-size="{{ size }}" hx-target="{{ hx_target }}" hx-swap="outerHTML">
   <button class="lot-actions__btn" data-action="interested"
-          data-active="{{ 'true' if current_state == 'interested' else 'false' }}"
-          hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"interested"}'
-          aria-label="Mark interested">
+          data-active="{{ 'true' if watch_on else 'false' }}"
+          hx-post="/lots/{{ lot_id }}/mark"
+          hx-vals='{"action":"interested","currently_active":"{{ 'true' if watch_on else 'false' }}"}'
+          aria-label="Watch / unwatch">
     <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14">
       <path fill="currentColor" d="M8 14l-1-.91C3.4 9.84 1 7.67 1 5a3.5 3.5 0 0 1 6-2.45A3.5 3.5 0 0 1 15 5c0 2.67-2.4 4.84-6 8.09L8 14z"/>
     </svg>
     Watch
   </button>
   <button class="lot-actions__btn lot-actions__btn--primary" data-action="bid_placed"
-          data-active="{{ 'true' if current_state == 'bid_placed' else 'false' }}"
-          hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"bid_placed"}'
+          data-active="{{ 'true' if bid_on else 'false' }}"
+          hx-post="/lots/{{ lot_id }}/mark"
+          hx-vals='{"action":"bid_placed","currently_active":"{{ 'true' if bid_on else 'false' }}"}'
           aria-label="Mark bid placed">
     Bid placed
   </button>
   <button class="lot-actions__btn" data-action="passed"
-          data-active="{{ 'true' if current_state == 'passed' or current_state == 'not_interested' else 'false' }}"
-          hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"passed"}'
+          data-active="{{ 'true' if pass_on else 'false' }}"
+          hx-post="/lots/{{ lot_id }}/mark"
+          hx-vals='{"action":"passed","currently_active":"{{ 'true' if pass_on else 'false' }}"}'
           aria-label="Pass on this lot">
     Pass
   </button>
