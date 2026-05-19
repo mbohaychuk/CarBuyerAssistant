@@ -430,15 +430,15 @@ class AuctionLot(Base, TimestampMixin):
             postgresql_where=text("notification_status = 'pending'"),
         ),
         CheckConstraint(
-            "(user_action = 'bid_placed') = (max_bid_cad IS NOT NULL)",
+            "(COALESCE(user_action::text, '') = 'bid_placed') = (max_bid_cad IS NOT NULL)",
             name="ck_auction_lots_bid_placed_iff_max_bid",
         ),
         CheckConstraint(
-            "(user_action = 'bid_placed') = (bid_placed_at IS NOT NULL)",
+            "(COALESCE(user_action::text, '') = 'bid_placed') = (bid_placed_at IS NOT NULL)",
             name="ck_auction_lots_bid_placed_iff_timestamp",
         ),
         CheckConstraint(
-            "(user_action = 'purchased') = (won_at IS NOT NULL)",
+            "(COALESCE(user_action::text, '') = 'purchased') = (won_at IS NOT NULL)",
             name="ck_auction_lots_purchased_iff_won_at",
         ),
     )

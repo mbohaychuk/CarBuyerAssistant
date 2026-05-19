@@ -127,7 +127,7 @@ async def main(now: datetime | None = None) -> None:
             ),
             AuctionLot.closed_at.is_not(None),
             AuctionLot.closed_at <= cutoff,
-            AuctionLot.user_action.is_distinct_from("purchased"),
+            AuctionLot.user_action.is_distinct_from(UserAction.PURCHASED.value),
             # Keep watched lots within the retention window. The safe positive
             # form avoids NULL-IN pitfalls: include the lot if user_action is
             # NULL (unreviewed), is not a watched status, or is old enough that
@@ -135,7 +135,11 @@ async def main(now: datetime | None = None) -> None:
             # column silently drops rows where user_action IS NULL.
             or_(
                 AuctionLot.user_action.is_(None),
-                AuctionLot.user_action.not_in(["interested", "bid_placed", "purchased"]),
+                AuctionLot.user_action.not_in([
+                    UserAction.INTERESTED.value,
+                    UserAction.BID_PLACED.value,
+                    UserAction.PURCHASED.value,
+                ]),
                 AuctionLot.closed_at <= keep_notified_cutoff,
             ),
         )
