@@ -21,9 +21,6 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Import plugin modules for their register() side effects so SOURCES is
-# populated when we read it below.
-from carbuyer.apps.bot.channels import select_channel
 from carbuyer.apps.notifier.channel_resolver import resolve_channels
 from carbuyer.apps.notifier.discord_post import post_simple_message
 from carbuyer.db.models import Auction, SourceAlertState
@@ -87,41 +84,63 @@ async def _record_alert(
 
 
 def _format_alert(source: str, last_seen: datetime, now: datetime) -> str:
-    """Operator-facing one-line Discord message."""
+    """Operator-facing one-line Discord message.
+
+    Optimized for a 3am phone-glance: source name + age + actionable next
+    step in one line. ISO timestamp omitted because the journal already
+    has it under structured logging (search by source=).
+    """
     gap = now - last_seen
     hours = int(gap.total_seconds() // 3600)
     return (
-        f":warning: source `{source}` has not ingested in {hours}h "
-        f"(last seen at {last_seen.isoformat()}). Check the ingester "
-        f"journal and the source's upstream."
+        f":warning: source `{source}` last ingested {hours}h ago. "
+        f"Check `journalctl -u carbuyer-ingester.service`."
     )
 
 
-async def _resolve_system_health_channel() -> int | None:
+async def _resolve_system_health_channel() -> int:
     """Resolve the configured system_health channel to a numeric ID.
 
-    Returns None if unconfigured or the name doesn't resolve. We warn but
-    don't raise — a missing channel shouldn't block ingest; the warning
-    surfaces in the journal where the operator can fix the config.
+    Raises ``RuntimeError`` on any unresolvable state. The watchdog's entire
+    job is to alert when sources go dark; a silently-misconfigured watchdog
+    would reintroduce the exact failure mode this app exists to close.
+    Raising here exits the worker non-zero so systemd marks the timer as
+    failed (``systemctl --failed`` / ``journalctl -u … --failed`` surface
+    it) and the operator sees the misconfiguration loudly instead of
+    discovering it the next time a real source goes silent unnoticed.
     """
     raw = settings.discord_channels.get("system_health")
     if raw is None:
-        log.warning("system_health channel not configured; skipping alerts")
-        return None
+        log.error(
+            "system_health channel not configured; watchdog cannot alert. "
+            "Add 'system_health' to DISCORD_CHANNELS.",
+        )
+        raise RuntimeError("system_health channel not configured")
     if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()):
         return int(raw)
     if not settings.discord_bot_token or settings.discord_guild_id is None:
-        log.warning(
-            "system_health channel name configured but bot_token/guild_id "
-            "missing; cannot resolve",
+        log.error(
+            "system_health channel name configured but DISCORD_BOT_TOKEN / "
+            "DISCORD_GUILD_ID missing; cannot resolve name to id",
         )
-        return None
+        raise RuntimeError(
+            "cannot resolve channel name without bot_token + guild_id",
+        )
     resolved = await resolve_channels(
         {"system_health": raw},
         guild_id=settings.discord_guild_id,
         bot_token=settings.discord_bot_token,
     )
-    return resolved.get("system_health")
+    channel_id = resolved.get("system_health")
+    if channel_id is None:
+        log.error(
+            "system_health channel name not found in guild",
+            channel_name=raw,
+        )
+        raise RuntimeError(
+            f"system_health channel {raw!r} not found in guild",
+        )
+    return channel_id
 
 
 async def _check_and_alert(
@@ -160,8 +179,14 @@ async def _check_and_alert(
                 channel_id, content, session=http_session,
             )
             if not ok:
-                # post_simple_message already logged the failure; don't
-                # record the alert so the next run retries.
+                # post_simple_message logs the HTTP-level failure; this
+                # log line correlates the stale source with the delivery
+                # outcome so a single journal grep on source= shows both.
+                # Don't record the alert — next run retries.
+                log.warning(
+                    "stale source alert delivery failed; will retry next run",
+                    source=source_name,
+                )
                 continue
             await _record_alert(session, source_name, now)
             alerts_posted += 1
@@ -175,13 +200,18 @@ async def _check_and_alert(
 
 
 async def main() -> None:
-    """One-shot watchdog run. Acquires singleton lock to prevent concurrent
-    invocations from racing on the source_alert_state upsert."""
+    """One-shot watchdog run.
+
+    Acquires the singleton lock to prevent concurrent invocations from racing
+    on the source_alert_state upsert. Designed to fail loudly on any
+    unrecoverable state (missing channel config, DB unreachable) — systemd
+    Type=oneshot records the non-zero exit and the operator catches it via
+    `systemctl --failed` or a journal alert. Transient blips recover on the
+    next hourly tick.
+    """
     lock_conn = await acquire_singleton_lock("source_watchdog")
     try:
         channel_id = await _resolve_system_health_channel()
-        if channel_id is None:
-            return
         async with aiohttp.ClientSession() as http_session:
             posted = await _check_and_alert(
                 http_session=http_session, channel_id=channel_id,

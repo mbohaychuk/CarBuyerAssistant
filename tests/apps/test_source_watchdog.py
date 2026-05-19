@@ -233,7 +233,9 @@ def test_format_alert_includes_source_and_age() -> None:
     msg = _format_alert("mcdougall", last_seen, now)
     assert "mcdougall" in msg
     assert "30h" in msg
-    assert last_seen.isoformat() in msg
+    # The actionable hint to the operator at 3am — without it the alert
+    # is observation without remediation.
+    assert "journalctl" in msg
 
 
 # ── poster failure path ────────────────────────────────────────────────────
@@ -265,3 +267,121 @@ async def test_failed_post_does_not_record_alert_state(
     assert posted == 0
     row = await _patched_session.get(SourceAlertState, "hibid")
     assert row is None  # not recorded, will retry next run
+
+
+# ── _resolve_system_health_channel ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_resolve_returns_int_when_configured_as_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator-friendly path: channel set as a bare integer in config."""
+    from carbuyer.apps.source_watchdog.watchdog import (
+        _resolve_system_health_channel,
+    )
+
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_channels",
+        {"system_health": 12345},
+    )
+    assert await _resolve_system_health_channel() == 12345  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_resolve_returns_int_when_configured_as_digit_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All-digit string is treated as an ID (matches channel_resolver heuristic)."""
+    from carbuyer.apps.source_watchdog.watchdog import (
+        _resolve_system_health_channel,
+    )
+
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_channels",
+        {"system_health": "67890"},
+    )
+    assert await _resolve_system_health_channel() == 67890  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_resolve_raises_when_channel_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watchdog's whole job is to alert; a misconfigured channel makes
+    the watchdog itself a silent failure. Must raise so systemd flags the
+    timer as failed and the operator sees it, instead of every hourly run
+    succeeding-but-not-alerting forever."""
+    from carbuyer.apps.source_watchdog.watchdog import (
+        _resolve_system_health_channel,
+    )
+
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_channels",
+        {},
+    )
+    with pytest.raises(RuntimeError, match="system_health channel not configured"):
+        await _resolve_system_health_channel()
+
+
+@pytest.mark.asyncio
+async def test_resolve_raises_when_name_configured_but_token_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Name-based channel config requires bot_token + guild_id to resolve.
+    Without either, the watchdog can't do its job — raise to surface the
+    misconfiguration the same way as an entirely missing channel."""
+    from carbuyer.apps.source_watchdog.watchdog import (
+        _resolve_system_health_channel,
+    )
+
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_channels",
+        {"system_health": "#system-health"},
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_bot_token",
+        "",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_guild_id",
+        None,
+    )
+    with pytest.raises(RuntimeError, match="bot_token \\+ guild_id"):
+        await _resolve_system_health_channel()
+
+
+@pytest.mark.asyncio
+async def test_resolve_raises_when_name_not_in_guild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Channel name configured + credentials present, but the name doesn't
+    exist in the guild. resolve_channels returns an empty dict; we raise
+    so the operator notices the typo or stale rename."""
+    from carbuyer.apps.source_watchdog import watchdog as watchdog_mod
+    from carbuyer.apps.source_watchdog.watchdog import (
+        _resolve_system_health_channel,
+    )
+
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_channels",
+        {"system_health": "system-health"},
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_bot_token",
+        "bot-token",
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.source_watchdog.watchdog.settings.discord_guild_id",
+        99999,
+    )
+
+    async def fake_resolve(
+        raw: dict[str, int | str], **_kwargs: object,
+    ) -> dict[str, int]:
+        return {}  # channel name not found
+
+    monkeypatch.setattr(watchdog_mod, "resolve_channels", fake_resolve)
+
+    with pytest.raises(RuntimeError, match="not found in guild"):
+        await _resolve_system_health_channel()
