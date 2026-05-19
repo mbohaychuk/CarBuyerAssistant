@@ -183,6 +183,35 @@
 }
 .lot-detail__flagrow--stop h3 { color: var(--color-bad); }
 
+/* Analyst-concern severity chip — advisory, not a scored taxonomy flag,
+ * so it reads as a quiet label rather than a stamped flag. */
+.concern {
+  display: inline-block;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+.concern--minor {
+  color: var(--color-text-muted);
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
+}
+.concern--moderate {
+  color: var(--color-bad);
+  background: var(--color-bad-bg);
+  border: 1px solid color-mix(in srgb, var(--color-bad) 22%, transparent);
+}
+.concern--serious {
+  color: var(--color-paper);
+  background: var(--color-bad);
+  border: 1px solid var(--color-ox-dark);
+  font-weight: var(--fw-sbd);
+}
+
 .lot-detail__vision {
   margin-top: var(--space-2);
   padding-top: var(--space-2);
