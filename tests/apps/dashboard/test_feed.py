@@ -82,7 +82,7 @@ async def test_feed_root_returns_html(_patch_deps: AsyncSession) -> None:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/lots")
     assert r.status_code == 200  # noqa: PLR2004
-    assert "Auction feed" in r.text
+    assert "All lots" in r.text
 
 
 @pytest.mark.asyncio
@@ -97,7 +97,7 @@ async def test_feed_htmx_returns_partial(_patch_deps: AsyncSession) -> None:
         r = await client.get("/lots", headers={"HX-Request": "true"})
     assert r.status_code == 200  # noqa: PLR2004
     # Partial omits the page header AND the surrounding <html> doctype.
-    assert "Auction feed" not in r.text
+    assert "All lots" not in r.text
     assert "<!doctype html>" not in r.text.lower()
     # Positive anchor: the seeded lot card must render — without this, an
     # empty / blank partial template would silently pass.
