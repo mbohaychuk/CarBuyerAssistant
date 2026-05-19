@@ -105,11 +105,23 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
 {%- endif -%}
 {%- endmacro %}
 
-{# Action buttons row — Watch / Bid placed / Pass. HTMX optimistic update:
-   data-state on the enclosing card flips immediately on click; the server
-   responds with the full updated card markup which then swaps in. #}
-{% macro action_buttons(lot_id, current_state, size='sm') -%}
-<div class="lot-actions" data-size="{{ size }}" hx-target="#lot-{{ lot_id }}" hx-swap="outerHTML">
+{# Action buttons row — Watch / Bid placed / Pass.
+
+   `target` defaults to the card's outer element (`#lot-{{ lot_id }}`) so
+   feed-card clicks swap the whole card. The mobile bid console passes a
+   different target (its own wrapper id) so the bid-console clicks update
+   the bid console, not the desktop rail buried elsewhere on the page.
+
+   `current_state` is the user_action value the buttons should compare
+   against. Defaults to the lot's stored value; the mark endpoint passes
+   the *clicked* action explicitly after a transition so the in-flight
+   UI reflects the user's intent. (Until the 4-state workflow migration
+   lands, bid_placed and purchased alias to interested in the DB; the
+   immediate post-click render uses the user's intent so the button they
+   clicked appears active.) #}
+{% macro action_buttons(lot_id, current_state, size='sm', target=None) -%}
+{% set hx_target = target or ('#lot-' ~ lot_id) %}
+<div class="lot-actions" data-size="{{ size }}" hx-target="{{ hx_target }}" hx-swap="outerHTML">
   <button class="lot-actions__btn" data-action="interested"
           data-active="{{ 'true' if current_state == 'interested' else 'false' }}"
           hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"interested"}'
@@ -126,7 +138,7 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
     Bid placed
   </button>
   <button class="lot-actions__btn" data-action="passed"
-          data-active="{{ 'true' if current_state == 'passed' else 'false' }}"
+          data-active="{{ 'true' if current_state == 'passed' or current_state == 'not_interested' else 'false' }}"
           hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"passed"}'
           aria-label="Pass on this lot">
     Pass

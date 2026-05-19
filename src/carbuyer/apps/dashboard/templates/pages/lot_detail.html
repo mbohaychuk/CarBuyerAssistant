@@ -129,8 +129,11 @@
           <div class="decision-card__deal">{{ "%.0f"|format(lot.price_deal_score * 100) }}% under fair</div>
         {% endif %}
 
-        <div class="decision-card__actions" id="lot-{{ lot.id }}">
-          {{ action_buttons(lot.id, lot.user_action, size='lg') }}
+        <div class="decision-card__actions" id="lot-{{ lot.id }}-desktop">
+          {# Desktop rail buttons target their own wrapper so the swap
+             redraws only this block (not the mobile bid console which
+             lives elsewhere on the page). #}
+          {{ action_buttons(lot.id, lot.user_action, size='lg', target='#lot-' ~ lot.id ~ '-desktop') }}
         </div>
 
         <a class="decision-card__source" href="{{ lot.url }}" target="_blank" rel="noopener">
@@ -179,7 +182,10 @@
     </div>
     <div class="bid-console__countdown">{{ countdown_chip(auction.scheduled_end_at) }}</div>
     <div class="bid-console__actions" id="lot-{{ lot.id }}-mobile">
-      {{ action_buttons(lot.id, lot.user_action, size='mobile') }}
+      {# Mobile console buttons target their own wrapper so clicks here
+         update this block, not the desktop rail (which is also on the
+         same page but hidden by the breakpoint). #}
+      {{ action_buttons(lot.id, lot.user_action, size='mobile', target='#lot-' ~ lot.id ~ '-mobile') }}
     </div>
   </div>
 </article>

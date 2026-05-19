@@ -1,0 +1,8 @@
+{# Fragment returned by the mark endpoint when the swap target is a
+   bare action-buttons wrapper (e.g. lot detail's desktop rail or
+   mobile bid console). The wrapper id is preserved so HTMX's
+   outerHTML swap replaces the right element in place. #}
+{% from "_macros.html" import action_buttons %}
+<div id="{{ target_id }}" class="{{ wrapper_class }}">
+  {{ action_buttons(lot_id, effective_state, target='#' ~ target_id) }}
+</div>

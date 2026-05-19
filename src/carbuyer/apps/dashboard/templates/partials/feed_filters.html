@@ -49,7 +49,7 @@
     {% for value, label in presets %}
       <button type="button" class="preset-chip"
               data-active="{{ 'true' if filters.preset == value else 'false' }}"
-              hx-get="/?preset={{ value }}" hx-target="#lot-list" hx-push-url="true">
+              hx-get="{{ preset_chip_urls[value] }}" hx-target="#lot-list" hx-push-url="true">
         {{ label }}
       </button>
     {% endfor %}
