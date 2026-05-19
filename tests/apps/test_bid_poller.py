@@ -561,3 +561,75 @@ def test_verify_pollers_registered_raises_on_empty() -> None:
     forever on an empty poll loop."""
     with pytest.raises(RuntimeError, match="no BidPoller plugins registered"):
         _verify_pollers_registered({})
+
+
+# ── source contextvar binding ───────────────────────────────────────────────
+
+
+class _ContextSpyPoller(BidPoller):
+    """Captures structlog contextvars at the moment poll_bid is called.
+
+    structlog's capture_logs bypasses the configured merge_contextvars
+    processor, so verifying the binding via the contextvars API directly is
+    the reliable test approach.
+    """
+
+    name = "hibid"
+    version = "test"
+
+    def __init__(self) -> None:
+        self.captured: dict[str, object] = {}
+
+    async def poll_bid(self, ref: LotRef) -> BidObservation:
+        import structlog  # noqa: PLC0415
+
+        self.captured = dict(structlog.contextvars.get_contextvars())
+        # Raise so the catch-all except-Exception path is also exercised
+        # under the binding — that's the line the silent-failure review
+        # flagged as losing source attribution.
+        raise RuntimeError("captured-then-raise")
+
+
+@pytest.mark.asyncio
+async def test_poll_one_binds_source_contextvar_around_poll_body(
+    _patched_get_session: AsyncSession,
+) -> None:
+    """_poll_one wraps its body in `bound_contextvars(source=ref.source)` so
+    every log line inside (including the catch-all 'poll_bid failed') gets
+    source attribution merged in by the configured processor chain."""
+    import structlog  # noqa: PLC0415
+
+    session = _patched_get_session
+    _, lot = _seed_lot(session)
+    session.add(lot)
+    await session.flush()
+
+    ref = LotRef(
+        source="hibid", source_auction_id="A1", source_lot_id="L1",
+        url="https://x/lot/1",
+    )
+    spy = _ContextSpyPoller()
+
+    structlog.contextvars.clear_contextvars()
+    await _poll_one(lot.id, ref, pollers={"hibid": spy})
+
+    assert spy.captured.get("source") == "hibid"
+    # After _poll_one returns the binding must be gone — otherwise the next
+    # lot's poll inherits stale source attribution from this one.
+    assert "source" not in structlog.contextvars.get_contextvars()
+
+
+def test_poll_one_unbinds_source_contextvar_on_unknown_source_path() -> None:
+    """The early-return 'no bid_poller registered' branch must also leave
+    contextvars clean on exit."""
+    import asyncio  # noqa: PLC0415
+
+    import structlog  # noqa: PLC0415
+
+    ref = LotRef(
+        source="ritchie_bros", source_auction_id="A1", source_lot_id="L1",
+        url="https://x",
+    )
+    structlog.contextvars.clear_contextvars()
+    asyncio.run(_poll_one(1, ref, pollers={}))
+    assert "source" not in structlog.contextvars.get_contextvars()

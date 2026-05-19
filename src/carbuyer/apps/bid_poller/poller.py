@@ -41,6 +41,7 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 import httpx
+import structlog
 from sqlalchemy import func, select
 
 from carbuyer.apps.bid_poller.scheduler import next_poll_delay
@@ -253,40 +254,44 @@ async def _poll_one(
     *,
     pollers: dict[str, BidPoller],
 ) -> None:
-    """Poll one lot: HTTP call outside any transaction, then write in a fresh tx."""
-    poller = pollers.get(ref.source)
-    if poller is None:
-        # Lot exists in the DB but its source has no registered BidPoller.
-        # Today this shouldn't happen -- FAG-routed unknown:* auctions never
-        # get lots, and every fetcher plugin is a BidPoller. If we ever add
-        # a listing-only source (no poll capability) this branch keeps the
-        # worker quiet AND surfaces the lots in journalctl for triage.
-        log.warning(
-            "no bid_poller registered for lot source; skipping",
-            lot_id=lot_id, source=ref.source,
-        )
-        return
+    """Poll one lot: HTTP call outside any transaction, then write in a fresh tx.
 
-    try:
-        obs = await poller.poll_bid(ref)
-    except httpx.HTTPStatusError as exc:
-        # Review fix #4: surface the upstream status code + Retry-After header
-        # so ops can spot WAF rejections / 5xx outages in the journal. Without
-        # this, every upstream error logs as a generic "poll_bid failed" and
-        # an operator has no way to know the lots are being WAF-blocked.
-        log.warning(
-            "poll_bid http error",
-            lot_id=lot_id,
-            status_code=exc.response.status_code,
-            retry_after=exc.response.headers.get("Retry-After"),
-            url=ref.url,
-        )
-        return
-    except Exception:
-        log.exception("poll_bid failed", lot_id=lot_id)
-        return
+    Binds ``source=ref.source`` as a structlog contextvar for the duration of
+    the poll so every log line inside (including the generic catch-all
+    exception path) carries source attribution. Without this, the journal
+    line ``poll_bid failed lot_id=4823`` doesn't tell ops which plugin's
+    parser regressed or which upstream is WAF-blocked.
+    """
+    with structlog.contextvars.bound_contextvars(source=ref.source):
+        poller = pollers.get(ref.source)
+        if poller is None:
+            # Lot exists in the DB but its source has no registered BidPoller.
+            # Today this shouldn't happen -- every fetcher plugin is a
+            # BidPoller. If we ever add a listing-only source (no poll
+            # capability) this branch keeps the worker quiet AND surfaces
+            # the lots in journalctl for triage.
+            log.warning(
+                "no bid_poller registered for lot source; skipping",
+                lot_id=lot_id,
+            )
+            return
 
-    await _write_observation(lot_id, obs)
+        try:
+            obs = await poller.poll_bid(ref)
+        except httpx.HTTPStatusError as exc:
+            log.warning(
+                "poll_bid http error",
+                lot_id=lot_id,
+                status_code=exc.response.status_code,
+                retry_after=exc.response.headers.get("Retry-After"),
+                url=ref.url,
+            )
+            return
+        except Exception:
+            log.exception("poll_bid failed", lot_id=lot_id)
+            return
+
+        await _write_observation(lot_id, obs)
 
 
 def _verify_pollers_registered(pollers: dict[str, BidPoller]) -> None:
