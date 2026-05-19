@@ -8,6 +8,7 @@ from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.db.queue import (
     claim_pending_ids,
     recover_orphans,
+    repend_stale_enrichment_version,
     select_pending_ids,
 )
 
@@ -129,6 +130,41 @@ async def test_recover_orphans_scoped_to_named_status_field(
     )).scalars().all())
     assert lots[0].enrichment_status == EnrichmentStatus.PENDING
     assert lots[0].valuation_status == ValuationStatus.IN_PROGRESS  # untouched
+
+
+@pytest.mark.asyncio
+async def test_repend_stale_enrichment_version(session: AsyncSession) -> None:
+    """Re-pend flips only DONE rows whose enrichment_version differs from the
+    current one. FAILED rows (never version-stamped) and already-current DONE
+    rows stay put; so does a never-enriched PENDING row."""
+    a = _seed_auction(session)
+    await session.flush()
+    stale_done = AuctionLot(
+        auction_id=a.id, source_lot_id="L_stale", url="u_stale",
+        enrichment_status=EnrichmentStatus.DONE, enrichment_version="v1",
+    )
+    current_done = AuctionLot(
+        auction_id=a.id, source_lot_id="L_current", url="u_current",
+        enrichment_status=EnrichmentStatus.DONE, enrichment_version="v2",
+    )
+    failed = AuctionLot(
+        auction_id=a.id, source_lot_id="L_failed", url="u_failed",
+        enrichment_status=EnrichmentStatus.FAILED, enrichment_version=None,
+    )
+    fresh_pending = AuctionLot(
+        auction_id=a.id, source_lot_id="L_pending", url="u_pending",
+    )
+    session.add_all([stale_done, current_done, failed, fresh_pending])
+    await session.flush()
+
+    n = await repend_stale_enrichment_version(session, current_version="v2")
+    assert n == 1
+    await session.flush()
+
+    assert stale_done.enrichment_status == EnrichmentStatus.PENDING
+    assert current_done.enrichment_status == EnrichmentStatus.DONE
+    assert failed.enrichment_status == EnrichmentStatus.FAILED
+    assert fresh_pending.enrichment_status == EnrichmentStatus.PENDING
 
 
 @pytest.mark.asyncio
