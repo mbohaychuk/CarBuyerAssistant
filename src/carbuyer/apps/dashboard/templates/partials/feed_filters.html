@@ -9,7 +9,7 @@
    every named input, so any change reissues the full query — simplest
    and most reliable for a single-user dev tool. #}
 <form id="feed-filters" class="filter-bar"
-  hx-get="/"
+  hx-get="/lots"
   hx-target="#lot-list"
   hx-swap="innerHTML"
   hx-trigger="change, keyup changed delay:300ms from:input[type='search'], keyup changed delay:300ms from:input[type='number']"
@@ -94,7 +94,7 @@
           <a href="{{ chip.remove_url }}" hx-get="{{ chip.remove_url }}" hx-target="#lot-list" aria-label="Remove {{ chip.label }}">×</a>
         </span>
       {% endfor %}
-      <a class="active-chip__clear" href="/" hx-get="/" hx-target="#lot-list">Clear all</a>
+      <a class="active-chip__clear" href="/lots" hx-get="/lots" hx-target="#lot-list">Clear all</a>
     </div>
   {% endif %}
 </form>

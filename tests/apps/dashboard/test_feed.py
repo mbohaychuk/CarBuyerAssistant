@@ -80,9 +80,9 @@ def _patch_deps(  # pyright: ignore[reportUnusedFunction]
 async def test_feed_root_returns_html(_patch_deps: AsyncSession) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/")
+        r = await client.get("/lots")
     assert r.status_code == 200  # noqa: PLR2004
-    assert "Auction feed" in r.text
+    assert "All lots" in r.text
 
 
 @pytest.mark.asyncio
@@ -94,10 +94,10 @@ async def test_feed_htmx_returns_partial(_patch_deps: AsyncSession) -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/", headers={"HX-Request": "true"})
+        r = await client.get("/lots", headers={"HX-Request": "true"})
     assert r.status_code == 200  # noqa: PLR2004
     # Partial omits the page header AND the surrounding <html> doctype.
-    assert "Auction feed" not in r.text
+    assert "All lots" not in r.text
     assert "<!doctype html>" not in r.text.lower()
     # Positive anchor: the seeded lot card must render — without this, an
     # empty / blank partial template would silently pass.
@@ -114,7 +114,7 @@ async def test_feed_filters_by_min_score(_patch_deps: AsyncSession) -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/?min_score=0.5")
+        r = await client.get("/lots?min_score=0.5")
     assert r.status_code == 200  # noqa: PLR2004
     assert "HIGH" in r.text
     assert "LOW" not in r.text
@@ -130,7 +130,7 @@ async def test_feed_filters_by_min_rarity(_patch_deps: AsyncSession) -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/?min_rarity=2.0")
+        r = await client.get("/lots?min_rarity=2.0")
     assert r.status_code == 200  # noqa: PLR2004
     assert "RARE" in r.text
     assert "COMMON" not in r.text
@@ -148,7 +148,7 @@ async def test_feed_cursor_pagination(_patch_deps: AsyncSession) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Page 1: limit=2 returns the two newest (id desc).
-        r = await client.get("/?limit=2")
+        r = await client.get("/lots?limit=2")
         assert r.status_code == 200  # noqa: PLR2004
         assert "NEWEST" in r.text
         assert "MIDDLE" in r.text
@@ -164,7 +164,7 @@ async def test_feed_cursor_pagination(_patch_deps: AsyncSession) -> None:
             select(AuctionLot.id).where(AuctionLot.source_lot_id == "MIDDLE"),
         )).scalar_one()
 
-        r2 = await client.get(f"/?cursor={middle_id}&limit=2")
+        r2 = await client.get(f"/lots?cursor={middle_id}&limit=2")
         assert r2.status_code == 200  # noqa: PLR2004
         # Cursor uses `id < cursor`, so MIDDLE itself is excluded.
         assert "OLDEST" in r2.text
@@ -181,7 +181,7 @@ async def test_feed_lists_open_lots(_patch_deps: AsyncSession) -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/")
+        r = await client.get("/lots")
     assert r.status_code == 200  # noqa: PLR2004
     assert "Toyota" in r.text
 
@@ -197,7 +197,7 @@ async def test_feed_filters_by_province(_patch_deps: AsyncSession) -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/?province=AB")
+        r = await client.get("/lots?province=AB")
     assert r.status_code == 200  # noqa: PLR2004
     assert "L_AB" in r.text or "Tacoma L_AB" in r.text
     # The BC-only lot should be filtered out — its source_lot_id "L_BC"
@@ -219,7 +219,7 @@ async def test_feed_excludes_not_interested(_patch_deps: AsyncSession) -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/?exclude_not_interested=true")
+        r = await client.get("/lots?exclude_not_interested=true")
     assert r.status_code == 200  # noqa: PLR2004
     assert "KEEP" in r.text
     assert "DROP" not in r.text
@@ -237,7 +237,7 @@ async def test_feed_includes_not_interested_when_disabled(_patch_deps: AsyncSess
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/?exclude_not_interested=false")
+        r = await client.get("/lots?exclude_not_interested=false")
     assert r.status_code == 200  # noqa: PLR2004
     assert "DROP" in r.text
 
@@ -260,7 +260,7 @@ async def test_feed_orders_by_score_blend_desc(_patch_deps: AsyncSession) -> Non
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r = await client.get("/")
+        r = await client.get("/lots")
     body = r.text
     assert body.index("BEST") < body.index("MID") < body.index("WORST")
 
@@ -285,7 +285,7 @@ async def test_feed_composite_cursor_walks_scored_lots(_patch_deps: AsyncSession
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # MID's blend = 0.5*0.2 + 0.5*2.0 = 1.1. Page after MID.
-        r = await client.get(f"/?cursor={mid_id}&cursor_score=1.1&limit=2")
+        r = await client.get(f"/lots?cursor={mid_id}&cursor_score=1.1&limit=2")
     assert r.status_code == 200  # noqa: PLR2004
     body = r.text
     assert "BEST" not in body
