@@ -51,12 +51,12 @@ from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES, BidObservation, BidPoller, LotRef
-from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # registers plugin
-from carbuyer.sources.mcdougall.source import (
-    McDougallSource as _McDougallSource,  # registers plugin
-)
-
-_REGISTERED_PLUGINS = (_HibidSource.name, _McDougallSource.name)
+# Plugin imports for side-effect registration. Each module calls
+# carbuyer.sources.base.register(...) at import time; importing the module
+# here is what places the plugin into the SOURCES registry. Add a new
+# plugin's import below to enable it for bid-polling.
+from carbuyer.sources.hibid.source import HibidSource as _HibidSource  # noqa: F401
+from carbuyer.sources.mcdougall.source import McDougallSource as _McDougallSource  # noqa: F401
 
 log = get_logger("bid_poller")
 
@@ -289,20 +289,35 @@ async def _poll_one(
     await _write_observation(lot_id, obs)
 
 
+def _verify_pollers_registered(pollers: dict[str, BidPoller]) -> None:
+    """Raise if zero BidPoller plugins self-registered, log the set otherwise.
+
+    A plugin is registered by importing its module (the import triggers a
+    module-level ``register(MySource())`` call). If every plugin import at the
+    top of this file silently no-op'd, ``_build_pollers()`` returns an empty
+    dict and the worker would loop forever polling nothing. Dynamic rather
+    than name-tuple-driven so adding a plugin requires only adding its import
+    above — no edit to this check.
+    """
+    if not pollers:
+        raise RuntimeError(
+            "no BidPoller plugins registered — every plugin import at the "
+            "top of poller.py failed to call register() (circular import?)",
+        )
+    log.info("bid-poller plugins registered", plugins=sorted(pollers.keys()))
+
+
 async def main() -> None:
     """Entry point for the bid-poller worker process.
 
-    Verifies every plugin in _REGISTERED_PLUGINS self-registered at import,
-    then enters each BidPoller via AsyncExitStack so HTTP clients are
-    initialised. Runs a while-True loop: load open lots into fast/slow buckets,
-    poll each, sleep 30s, repeat.
+    Verifies at least one BidPoller plugin self-registered at import, then
+    enters each BidPoller via AsyncExitStack so HTTP clients are initialised.
+    Runs a while-True loop: load open lots into fast/slow buckets, poll each,
+    sleep 30s, repeat.
     """
-    for name in _REGISTERED_PLUGINS:
-        if name not in SOURCES:
-            raise RuntimeError(f"plugin {name!r} failed to self-register at import")
-
     lock_conn = await acquire_singleton_lock("bid_poller")
     pollers = _build_pollers()
+    _verify_pollers_registered(pollers)
     try:
         async with AsyncExitStack() as stack:
             for p in pollers.values():

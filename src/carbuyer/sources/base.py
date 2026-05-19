@@ -35,6 +35,31 @@ class LotRef:
 
 @dataclass(slots=True)
 class RawAuction:
+    """One auction's worth of parsed metadata, ready to upsert.
+
+    Plugin author contract — invariants the upsert and downstream workers
+    rely on but that the type system can't enforce:
+
+    1. **All datetime fields must be UTC-aware.** `scheduled_start_at` and
+       `scheduled_end_at` flow into `bid_poller`'s priority-queue ordering and
+       the closing-soon trigger evaluator, which both do timezone-aware
+       arithmetic. A naive datetime raises `TypeError` mid-comparison. Construct
+       via `datetime.fromisoformat(...).replace(tzinfo=UTC)` or equivalent.
+
+    2. **`ref.source_auction_id` must be stable across re-ingestion** — it's
+       half of the `(source, source_auction_id)` upsert key. Use a permanent ID
+       from the source (HiBid's catalog id, McDougall's GUID), never a
+       per-session number that rotates per ingest.
+
+    3. **`buyer_premium_pct` is a decimal fraction**, not a percentage.
+       0.10 means 10%. If the source quotes "15%", emit `Decimal("0.15")`.
+       `None` does NOT mean "no premium" — the valuator substitutes
+       `DEFAULT_BUYER_PREMIUM_PCT = Decimal("0.10")` (10%) so unattributed
+       lots still get plausibly priced. If your source's actual premium is
+       not ~10%, leaving this `None` will silently mis-price every lot;
+       emit the real value.
+    """
+
     ref: AuctionRef
     title: str | None
     description: str | None
@@ -65,6 +90,31 @@ class RawAuction:
 
 @dataclass(slots=True)
 class RawLot:
+    """One lot's worth of parsed fields, ready to upsert.
+
+    Plugin author contract — same shape as RawAuction's, narrowed to lot-level:
+
+    1. **`scheduled_end_at` must be UTC-aware when set.** It's coalesced with
+       `auction.scheduled_end_at` in `bid_poller._load_open_lot_refs` for
+       polling priority; a naive datetime crashes the sort. `None` is fine
+       (the auction-level end time is used as fallback).
+
+    2. **`ref.source_lot_id` must be stable across re-ingestion** — it's half
+       of the `(auction_id, source_lot_id)` upsert key. A session-scoped numeric
+       ID that changes per scrape silently duplicates lots every ingest cycle.
+
+    3. **`lot_status` permitted values: `"open"`, `"closed"`, `"missing"`.**
+       Maps to `carbuyer.db.enums.LotStatus` at upsert. Other strings will round-
+       trip into the DB column but downstream filters (which use enum members)
+       won't match them. New states require a `LotStatus` enum member first.
+
+    4. **`year`, `make`, `model`, `vin` are written only on INSERT** by the
+       upsert helper — they're considered "raw" inputs the enricher later
+       normalizes. A rescrape with `make="ford"` won't clobber an enricher-set
+       `make="Ford"`. This means cleaning these fields post-hoc requires a
+       separate UPDATE, not just a re-ingest.
+    """
+
     ref: LotRef
     lot_number: str | None
     title: str | None
