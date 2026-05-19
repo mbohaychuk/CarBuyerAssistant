@@ -371,8 +371,11 @@ class AuctionLot(Base, TimestampMixin):
     last_notified_channel: Mapped[str | None] = mapped_column(String(64))
 
     # ── Owned by: dashboard (user input) ────────────────────────────────────
+    # values_callable: store the enum .value ("bid_placed") not .name ("BID_PLACED").
+    # The check constraints compare against lowercase literals, so the two must agree.
     user_action: Mapped[UserAction | None] = mapped_column(
-        SAEnum(UserAction, native_enum=False, length=16),
+        SAEnum(UserAction, native_enum=False, length=16,
+               values_callable=lambda x: [e.value for e in x]),
         index=True,
     )
     max_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -480,7 +483,8 @@ class LotActionHistory(Base):
         nullable=False,
     )
     user_action: Mapped[UserAction | None] = mapped_column(
-        SAEnum(UserAction, native_enum=False, length=16),
+        SAEnum(UserAction, native_enum=False, length=16,
+               values_callable=lambda x: [e.value for e in x]),
     )
     max_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     changed_at: Mapped[datetime] = mapped_column(

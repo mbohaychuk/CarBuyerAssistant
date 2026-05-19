@@ -14,10 +14,16 @@ from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
 from carbuyer.apps.dashboard.deps import CurrentUser, current_user, require_admin
 from carbuyer.db.enums import UserAction, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.models import Auction, AuctionLot, LotActionHistory
 
 
-def _seed_lot(session: AsyncSession) -> AuctionLot:
+def _seed_lot(
+    session: AsyncSession,
+    *,
+    user_action: str | None = None,
+    max_bid_cad: Decimal | None = None,
+    bid_placed_at: datetime | None = None,
+) -> AuctionLot:
     a = Auction(
         source="hibid", source_auction_id="A1", url="https://x",
         canonical_url="https://x", auction_subtype="estate",
@@ -28,6 +34,12 @@ def _seed_lot(session: AsyncSession) -> AuctionLot:
         auction=a, source_lot_id="L1", url="https://x/lot/L1",
         title="Test", current_high_bid_cad=Decimal("1000"),
     )
+    if user_action is not None:
+        lot.user_action = UserAction(user_action)
+    if max_bid_cad is not None:
+        lot.max_bid_cad = max_bid_cad
+    if bid_placed_at is not None:
+        lot.bid_placed_at = bid_placed_at
     session.add(lot)
     return lot
 
@@ -305,6 +317,84 @@ async def test_rescore_requires_admin(_patch_deps: AsyncSession) -> None:
         assert r.status_code == 403  # noqa: PLR2004
     finally:
         app.dependency_overrides.clear()
+
+
+# ─── Phase 4: apply_user_action integration ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mark_bid_placed_writes_history_and_amount(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session, user_action=UserAction.INTERESTED.value)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "bid_placed", "max_bid_cad": "500"},
+        )
+    assert r.status_code in (200, 204)
+
+    await session.refresh(lot)
+    assert lot.user_action == UserAction.BID_PLACED
+    assert lot.max_bid_cad == Decimal("500")
+    assert lot.bid_placed_at is not None
+
+    history = list((await session.execute(
+        select(LotActionHistory).where(LotActionHistory.lot_id == lot_id),
+    )).scalars().all())
+    assert len(history) == 1
+    assert history[0].source == "dashboard"
+
+
+@pytest.mark.asyncio
+async def test_mark_bid_placed_without_amount_returns_422(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session, user_action=UserAction.INTERESTED.value)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "bid_placed"},
+        )
+    assert r.status_code == 422  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_toggle_off_clears_all_bound_fields(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(
+        session,
+        user_action=UserAction.BID_PLACED.value,
+        max_bid_cad=Decimal("500"),
+        bid_placed_at=datetime.now(UTC),
+    )
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "bid_placed", "currently_active": "true"},
+        )
+    assert r.status_code in (200, 204)
+
+    await session.refresh(lot)
+    assert lot.user_action is None
+    assert lot.max_bid_cad is None
+    assert lot.bid_placed_at is None
 
 
 @pytest.mark.asyncio
