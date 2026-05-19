@@ -47,6 +47,14 @@
         </section>
       {% endif %}
 
+      {# Raw listing description as scraped from the source #}
+      {% if lot.description %}
+        <section class="lot-detail__section">
+          <h2>Listing description</h2>
+          <p class="lot-detail__description">{{ lot.description }}</p>
+        </section>
+      {% endif %}
+
       {# Condition signals — flags grouped #}
       {% if lot.showstopper_flags or lot.red_flags or lot.green_flags %}
         <section class="lot-detail__section">
@@ -54,19 +62,19 @@
           {% if lot.showstopper_flags %}
             <div class="lot-detail__flagrow lot-detail__flagrow--stop">
               <h3>Showstoppers</h3>
-              <ul>{% for f in lot.showstopper_flags %}<li>{{ flag_chip(f, 'stop') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+              <ul>{% for f in lot.showstopper_flags %}<li>{{ flag_chip(f, 'stop') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.red_flags %}
             <div class="lot-detail__flagrow">
               <h3>Concerns</h3>
-              <ul>{% for f in lot.red_flags %}<li>{{ flag_chip(f, 'bad') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+              <ul>{% for f in lot.red_flags %}<li>{{ flag_chip(f, 'bad') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.green_flags %}
             <div class="lot-detail__flagrow">
               <h3>Strengths</h3>
-              <ul>{% for f in lot.green_flags %}<li>{{ flag_chip(f, 'good') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+              <ul>{% for f in lot.green_flags %}<li>{{ flag_chip(f, 'good') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.vision_contradictions %}
@@ -87,7 +95,7 @@
           {% if lot.drivetrain %}<div><dt>Drivetrain</dt><dd>{{ lot.drivetrain }}</dd></div>{% endif %}
           {% if lot.title_status %}<div><dt>Title</dt><dd>{{ lot.title_status }}</dd></div>{% endif %}
           {% if lot.province_of_origin %}<div><dt>Origin</dt><dd>{{ lot.province_of_origin }}</dd></div>{% endif %}
-          {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}</dd></div>{% endif %}
+          {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}{% if lot.condition_inferred_from_sparse_listing %} <span class="t-meta">— inferred from a sparse listing</span>{% endif %}</dd></div>{% endif %}
           {% if auction.pickup_window_text %}<div><dt>Pickup</dt><dd>{{ auction.pickup_window_text }}</dd></div>{% endif %}
           {% if auction.terms_text %}<div><dt>Terms</dt><dd class="t-meta">{{ auction.terms_text }}</dd></div>{% endif %}
         </dl>

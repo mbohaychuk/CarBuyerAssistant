@@ -67,7 +67,7 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
 {# Flag chip — flag is a dict with at least a `flag` key.
    variant: 'good' | 'bad' | 'stop' #}
 {% macro flag_chip(flag, variant) -%}
-<span class="flag flag--{{ variant }}" {% if flag.description %}title="{{ flag.description }}"{% endif %}>{{ flag.flag }}</span>
+<span class="flag flag--{{ variant }}" {% if flag.evidence %}title="{{ flag.evidence }}"{% endif %}>{{ flag.flag }}</span>
 {%- endmacro %}
 
 {# Range bar — value_low / value_mid / value_high with current_bid marker.

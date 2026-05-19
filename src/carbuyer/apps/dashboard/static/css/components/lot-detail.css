@@ -150,6 +150,14 @@
   color: var(--color-ink-soft);
 }
 
+/* Source newlines are meaningful in a scraped listing — preserve them. */
+.lot-detail__description {
+  white-space: pre-wrap;
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--color-ink-soft);
+}
+
 .lot-detail__flagrow { margin-top: var(--space-2); }
 .lot-detail__flagrow h3 {
   font-family: var(--font-sans);
