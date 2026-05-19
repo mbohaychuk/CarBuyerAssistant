@@ -11,7 +11,7 @@ create a second row. Seeded with `last_visited_at = now()` so the first
 page load shows a sensible empty-alerts state rather than "everything ever
 ingested is new."
 
-Revision ID: g7d3a0c1e927
+Revision ID: a7d3a0c1e927
 Revises: f6c2e9b81a04
 Create Date: 2026-05-19 12:00:00
 """
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "g7d3a0c1e927"
+revision: str = "a7d3a0c1e927"
 down_revision: str | Sequence[str] | None = "f6c2e9b81a04"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

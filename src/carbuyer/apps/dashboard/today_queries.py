@@ -17,12 +17,21 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import func, insert, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.deps import OPEN_STATUSES
 from carbuyer.db.enums import UserAction
 from carbuyer.db.models import Auction, AuctionLot, DashboardState
+from carbuyer.shared.logging import get_logger
+
+log = get_logger("dashboard.today")
+
+# Lots the user is "watching" for the Today inbox. Mirrors the
+# watched-page and feed `watched_only` definition so the KPI tile count
+# matches the page it links to. INTERESTED + MAYBE — NOT_INTERESTED is
+# explicitly excluded everywhere.
+_WATCHED_ACTIONS = (UserAction.INTERESTED.value, UserAction.MAYBE.value)
 
 _LOCAL_TZ = ZoneInfo("America/Edmonton")
 
@@ -89,28 +98,39 @@ class ClosingBuckets:
 
 
 async def read_and_bump_last_visit(session: AsyncSession) -> datetime:
-    """Atomically read the prior `last_visited_at` and update it to now().
+    """Read the prior `last_visited_at` and bump it to now() atomically.
 
-    Returns the *previous* value so the route can use it as the
-    "alerts since" lower bound. Uses a RETURNING-style update so the
-    read/write happen in one statement — no race window between two
-    overlapping tab refreshes.
+    Acquires a row-level write lock via `SELECT … FOR UPDATE` so two
+    overlapping tab refreshes serialize: the second blocks until the
+    first commits, then reads the freshly-written value (and bumps it
+    forward in turn). Without the lock, two concurrent reads would both
+    see the same prev_visit, both write now(), and one tab's bump would
+    be lost — the second tab would re-fire the same alerts.
 
-    The singleton row is guaranteed to exist (seeded by migration), so
-    this never has to handle the missing-row case.
+    Defensive recovery: if the singleton row is missing (migration not
+    applied / row truncated by mistake), log a clear error pointing at
+    the seed migration and rebuild the row in-place rather than 500-ing
+    the homepage with a generic `NoResultFound`.
     """
-    # Read the OLD value, then bump. Two statements inside the same
-    # transaction — concurrent readers see either before-both or
-    # after-both under Postgres' default READ COMMITTED.
+    now = datetime.now(UTC)
     previous_visit = (
         await session.execute(
-            select(DashboardState.last_visited_at).where(DashboardState.id == 1),
+            select(DashboardState.last_visited_at)
+            .where(DashboardState.id == 1)
+            .with_for_update(),
         )
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if previous_visit is None:
+        log.error(
+            "dashboard_state singleton row missing — rebuilding "
+            "(migration a7d3a0c1e927 / after_create event did not seed it)",
+        )
+        await session.execute(insert(DashboardState).values(id=1, last_visited_at=now))
+        return now
     await session.execute(
         update(DashboardState)
         .where(DashboardState.id == 1)
-        .values(last_visited_at=datetime.now(UTC)),
+        .values(last_visited_at=now),
     )
     return previous_visit
 
@@ -118,14 +138,16 @@ async def read_and_bump_last_visit(session: AsyncSession) -> datetime:
 async def derive_watched_make_model(session: AsyncSession) -> set[tuple[str, str]]:
     """The (make, model) pairs the user has shown interest in.
 
-    Auto-derived from the user's Interested history rather than requiring
-    a separate watch-config table. Both make and model must be non-null —
-    accessory lots (no normalized fields) can't be matched against.
+    Auto-derived from the user's watched-lot history (INTERESTED or
+    MAYBE) rather than requiring a separate watch-config table. Both
+    make and model must be non-null — accessory lots (no normalized
+    fields) can't be matched against, so we don't widen `NULL IN (…)`
+    semantics into the alert query.
     """
     stmt = (
         select(AuctionLot.make, AuctionLot.model)
         .where(
-            AuctionLot.user_action == UserAction.INTERESTED.value,
+            AuctionLot.user_action.in_(_WATCHED_ACTIONS),
             AuctionLot.make.is_not(None),
             AuctionLot.model.is_not(None),
         )
@@ -177,7 +199,7 @@ async def alerts_since(
         select(AuctionLot, Auction)
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
-            AuctionLot.user_action == UserAction.INTERESTED.value,
+            AuctionLot.user_action.in_(_WATCHED_ACTIONS),
             AuctionLot.lot_status.in_(OPEN_STATUSES),
             AuctionLot.last_bid_observed_at.is_not(None),
             AuctionLot.last_bid_observed_at > since,
@@ -198,7 +220,7 @@ async def alerts_since(
         select(AuctionLot, Auction)
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
-            AuctionLot.user_action == UserAction.INTERESTED.value,
+            AuctionLot.user_action.in_(_WATCHED_ACTIONS),
             AuctionLot.updated_at > since,
             func.jsonb_array_length(AuctionLot.showstopper_flags) > 0,
         )
@@ -225,13 +247,20 @@ async def closing_buckets(
     a 23:30 UTC lot still belongs to "today" for a user in MT, even though
     it crosses midnight UTC.
     """
+    # "End of today / tomorrow" computed via calendar-day replace rather
+    # than `+ timedelta(days=1)` on an aware datetime. Adding a UTC
+    # duration to a local-tz datetime on a DST transition day lands at
+    # the wrong wall-clock hour; replacing the date components first and
+    # then converting to UTC keeps the local 23:59:59 invariant intact.
     now_local = now.astimezone(_LOCAL_TZ)
     end_of_today_local = now_local.replace(
         hour=23, minute=59, second=59, microsecond=999_999,
     )
-    end_of_tomorrow_local = end_of_today_local + timedelta(days=1)
+    tomorrow_local = (now_local + timedelta(days=1)).replace(
+        hour=23, minute=59, second=59, microsecond=999_999,
+    )
     end_of_today = end_of_today_local.astimezone(UTC)
-    end_of_tomorrow = end_of_tomorrow_local.astimezone(UTC)
+    end_of_tomorrow = tomorrow_local.astimezone(UTC)
 
     effective_end = func.coalesce(
         AuctionLot.scheduled_end_at, Auction.scheduled_end_at,
@@ -244,7 +273,11 @@ async def closing_buckets(
             AuctionLot.lot_status.in_(OPEN_STATUSES),
             AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
             effective_end.is_not(None),
-            effective_end > now - _NOW_WINDOW,  # exclude very recently closed
+            # `> now` (not `> now - window`): a lot whose effective_end has
+            # already passed shouldn't sit under a header labelled "Closing
+            # now." The bid-poller may take a few seconds to flip status to
+            # CLOSED, but the time-based filter is the correct gate.
+            effective_end > now,
             effective_end <= end_of_tomorrow,
         )
         .order_by(effective_end.asc())
@@ -309,12 +342,16 @@ async def dashboard_kpis(
     )
     now_cutoff = now + _NOW_WINDOW
 
+    # Match closing_buckets `now` filter exactly — same OPEN_STATUSES,
+    # same NOT_INTERESTED exclusion. Without the user-action filter the
+    # tile count and bucket section count would diverge.
     closing_now_stmt = (
         select(func.count())
         .select_from(AuctionLot)
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
             AuctionLot.lot_status.in_(OPEN_STATUSES),
+            AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
             effective_end.is_not(None),
             effective_end > now,
             effective_end <= now_cutoff,
@@ -322,10 +359,12 @@ async def dashboard_kpis(
     )
     closing_now = (await session.execute(closing_now_stmt)).scalar_one()
 
+    # KPI tile links to /watched, which shows INTERESTED + MAYBE. Match
+    # that set so the tile count equals the destination-page count.
     watching_stmt = (
         select(func.count())
         .select_from(AuctionLot)
-        .where(AuctionLot.user_action == UserAction.INTERESTED.value)
+        .where(AuctionLot.user_action.in_(_WATCHED_ACTIONS))
     )
     watching = (await session.execute(watching_stmt)).scalar_one()
 
