@@ -85,8 +85,8 @@ def evaluate_triggers(
             state.scheduled_end_at is not None
             and state.scheduled_end_at - now <= timedelta(hours=24)
         )
-        eligible_user = state.user_action in {"interested", "bid_placed", "purchased", None}
-        fires_for_watched = state.user_action in {"interested", "bid_placed", "purchased"}
+        eligible_user = state.user_action in {"interested", "bid_placed", None}
+        fires_for_watched = state.user_action in {"interested", "bid_placed"}
         fires_for_unflagged = closing_in_24h
 
         should_fire = False
