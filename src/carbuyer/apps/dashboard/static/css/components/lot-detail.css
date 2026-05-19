@@ -1,0 +1,421 @@
+/* LotDetail page — Auction House Ledger.
+ *
+ * Two-column desktop (main + sticky decision rail), single-column on
+ * mobile with a sticky bottom Bid Console. Hero photo carousel anchors
+ * the top of the main column. The decision card on the right is the
+ * primary action surface.
+ */
+
+.lot-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-bottom: 80px; /* space for the mobile bid console */
+}
+
+.lot-detail__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  flex-wrap: wrap;
+}
+.lot-detail__back {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.lot-detail__back:hover { color: var(--color-accent); }
+
+.lot-detail__heading {
+  flex: 1;
+  min-width: 0;
+}
+.lot-detail__heading h1 {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-sbd);
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  margin: 0;
+}
+.lot-detail__meta {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+}
+.lot-detail__sep { opacity: 0.5; }
+
+.lot-detail__source {
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-med);
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  background: var(--color-surface);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.lot-detail__source:hover {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+/* ── Two-column layout ───────────────────────────────────────── */
+
+.lot-detail__cols {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.lot-detail__main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.lot-detail__rail {
+  position: sticky;
+  top: calc(var(--topnav-h) + var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-self: start;
+}
+
+/* ── Hero photo gallery ──────────────────────────────────────── */
+
+.lot-detail__photos { width: 100%; }
+.lot-detail__photos--empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  aspect-ratio: 16 / 9;
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-family: var(--font-display);
+  font-style: italic;
+}
+.lot-detail__photos-stamp {
+  font-family: var(--font-display);
+  font-size: 96px;
+  font-weight: var(--fw-bold);
+  opacity: 0.18;
+  line-height: 1;
+}
+
+/* ── Section blocks ──────────────────────────────────────────── */
+
+.lot-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+.lot-detail__section h2 {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-sbd);
+  margin: 0;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.lot-detail__summary {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--color-ink-soft);
+}
+
+.lot-detail__flagrow { margin-top: var(--space-2); }
+.lot-detail__flagrow h3 {
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+.lot-detail__flagrow ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lot-detail__flagrow li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.lot-detail__flagrow--stop h3 { color: var(--color-bad); }
+
+.lot-detail__vision {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--color-border);
+}
+.lot-detail__vision summary {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+}
+
+/* ── Specs definition list ───────────────────────────────────── */
+
+.specs {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+.specs > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--color-border);
+}
+.specs dt {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.specs dd {
+  margin: 0;
+  font-size: var(--fs-base);
+  color: var(--color-text);
+}
+
+/* ── Decision card (right rail) ──────────────────────────────── */
+
+.decision-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: var(--shadow-sm);
+}
+.decision-card__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.decision-card__label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+}
+.decision-card__price {
+  font-family: var(--font-mono);
+  font-size: 36px;
+  font-weight: var(--fw-sbd);
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--color-text);
+  margin-top: 2px;
+}
+.decision-card__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-2);
+}
+.decision-card__range { margin: var(--space-2) 0 var(--space-3); }
+.decision-card__rule {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-2) 0;
+}
+.decision-card__max {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: var(--fw-sbd);
+  color: var(--color-accent);
+  letter-spacing: -0.02em;
+}
+.decision-card__deal {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-med);
+  color: var(--color-good);
+}
+.decision-card__actions {
+  margin-top: var(--space-3);
+}
+.decision-card__actions .lot-actions__btn {
+  min-height: var(--tap-target);
+  padding: var(--space-2);
+  font-size: var(--fs-sm);
+}
+.decision-card__source {
+  margin-top: var(--space-3);
+  text-align: center;
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+}
+.decision-card__source:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  text-decoration: none;
+}
+
+/* ── Notes block ─────────────────────────────────────────────── */
+
+.lot-detail__notes label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lot-detail__notes-label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+}
+.lot-detail__notes textarea {
+  width: 100%;
+  min-height: 100px;
+  padding: var(--space-2);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: var(--fs-base);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  resize: vertical;
+}
+.lot-detail__notes textarea:focus {
+  border-color: var(--color-accent);
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.auction-context {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+.auction-context h3 {
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-2);
+}
+.auction-context p {
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  margin: 0 0 4px;
+}
+
+/* ── Bid Console — sticky mobile bottom bar ──────────────────── */
+
+.bid-console {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border-strong);
+  box-shadow: 0 -4px 12px rgba(20, 17, 13, 0.08);
+  padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom));
+  gap: var(--space-2);
+  align-items: center;
+}
+.bid-console__price,
+.bid-console__max {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.bid-console__label {
+  font-size: 9px;
+  font-weight: var(--fw-med);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  line-height: 1.2;
+}
+.bid-console__value {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: var(--fw-sbd);
+  color: var(--color-text);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.bid-console__max .bid-console__value { color: var(--color-accent); }
+.bid-console__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.bid-console__actions .lot-actions { gap: 4px; }
+.bid-console__actions .lot-actions__btn {
+  padding: 8px 10px;
+  font-size: 11px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+
+@media (max-width: 880px) {
+  .lot-detail__cols { grid-template-columns: 1fr; }
+  .lot-detail__rail { position: static; }
+  .bid-console { display: flex; }
+  /* Hide the inline decision-card actions on mobile so we don't have
+   * two action rows competing — bid console is the canonical surface. */
+  .decision-card__actions { display: none; }
+}
+
+@media (max-width: 640px) {
+  .lot-detail__head { flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+  .lot-detail__source { width: 100%; text-align: center; }
+}
