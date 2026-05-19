@@ -71,7 +71,6 @@ def _make_lot(
     closed_at: datetime | None = None,
     final_bid_cad: Decimal | None = Decimal("8000.00"),
     user_action: str | None = None,
-    was_purchased_by_us: bool = False,
     cheap_notified_at: datetime | None = None,
     early_warning_notified_at: datetime | None = None,
     closing_notified_at: datetime | None = None,
@@ -91,7 +90,6 @@ def _make_lot(
         closed_at=closed_at if closed_at is not None else _OLD_CLOSED,
         final_bid_cad=final_bid_cad,
         user_action=user_action,
-        was_purchased_by_us=was_purchased_by_us,
         cheap_notified_at=cheap_notified_at,
         early_warning_notified_at=early_warning_notified_at,
         closing_notified_at=closing_notified_at,
@@ -349,7 +347,7 @@ async def test_main_skips_purchased_by_us(
     """Lots we purchased are never distilled — they live in purchases table."""
     session = _patched_get_session
     auction = _make_auction(session)
-    _make_lot(session, auction, was_purchased_by_us=True)
+    _make_lot(session, auction, user_action=UserAction.PURCHASED)
     await session.flush()
 
     await main(now=_NOW)
@@ -383,7 +381,7 @@ async def test_main_keeps_watched_lots_within_keep_window(
 async def test_main_keeps_maybe_lots_within_keep_window(
     _patched_get_session: AsyncSession,
 ) -> None:
-    """MAYBE lot closed 30 days ago is also retained within KEEP_NOTIFIED_DAYS."""
+    """INTERESTED lot closed 30 days ago is also retained within KEEP_NOTIFIED_DAYS."""
     session = _patched_get_session
     closed_30_days_ago = _NOW - timedelta(days=30)
     auction = _make_auction(session)
@@ -391,7 +389,7 @@ async def test_main_keeps_maybe_lots_within_keep_window(
         session,
         auction,
         closed_at=closed_30_days_ago,
-        user_action=UserAction.MAYBE,
+        user_action=UserAction.INTERESTED,
     )
     await session.flush()
 
@@ -506,24 +504,24 @@ async def test_main_bad_lot_does_not_block_others(
     assert remaining_bad is not None
 
 
-async def test_main_distills_not_interested_lot(
+async def test_main_distills_passed_lot(
     _patched_get_session: AsyncSession,
 ) -> None:
-    """NOT_INTERESTED lot past DISTILL_AGE_DAYS (but within KEEP_NOTIFIED_DAYS) is distilled.
+    """PASSED lot past DISTILL_AGE_DAYS (but within KEEP_NOTIFIED_DAYS) is distilled.
 
-    Locks in the or_() SQL fix: NOT_INTERESTED must not be silently dropped by
-    SQL three-valued logic when user_action.not_in([INTERESTED, MAYBE]) is used.
+    Locks in the or_() SQL fix: PASSED must not be silently dropped by
+    SQL three-valued logic when user_action.not_in([INTERESTED, BID_PLACED, PURCHASED]) is used.
     """
     session = _patched_get_session
     # 30 days > DISTILL_AGE_DAYS (14), within KEEP_NOTIFIED_DAYS (90) — would be
-    # retained for INTERESTED/MAYBE, but NOT_INTERESTED has no such protection.
+    # retained for INTERESTED/BID_PLACED/PURCHASED, but PASSED has no such protection.
     closed_30_days_ago = _NOW - timedelta(days=30)
     auction = _make_auction(session)
     _make_lot(
         session,
         auction,
         closed_at=closed_30_days_ago,
-        user_action=UserAction.NOT_INTERESTED,
+        user_action=UserAction.PASSED,
     )
     await session.flush()
 

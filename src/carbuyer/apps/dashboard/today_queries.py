@@ -29,9 +29,13 @@ log = get_logger("dashboard.today")
 
 # Lots the user is "watching" for the Today inbox. Mirrors the
 # watched-page and feed `watched_only` definition so the KPI tile count
-# matches the page it links to. INTERESTED + MAYBE — NOT_INTERESTED is
-# explicitly excluded everywhere.
-_WATCHED_ACTIONS = (UserAction.INTERESTED.value, UserAction.MAYBE.value)
+# matches the page it links to. INTERESTED + BID_PLACED + PURCHASED —
+# PASSED is explicitly excluded everywhere.
+_WATCHED_ACTIONS = (
+    UserAction.INTERESTED.value,
+    UserAction.BID_PLACED.value,
+    UserAction.PURCHASED.value,
+)
 
 _LOCAL_TZ = ZoneInfo("America/Edmonton")
 
@@ -46,7 +50,7 @@ class TodayKPIs:
     """The four numeric tiles above the fold.
 
     - closing_now: lots whose effective_end is within ~15 min
-    - watching:    lots the user marked Interested (current 3-state schema)
+    - watching:    lots the user marked Interested/BID_PLACED/PURCHASED
     - alerts:      sum of the three alert categories (passed in by caller
                    because alerts_since already computes its own counts)
     - best_deal_pct: top deal-score % among open biddable lots (None if
@@ -138,8 +142,9 @@ async def read_and_bump_last_visit(session: AsyncSession) -> datetime:
 async def derive_watched_make_model(session: AsyncSession) -> set[tuple[str, str]]:
     """The (make, model) pairs the user has shown interest in.
 
-    Auto-derived from the user's watched-lot history (INTERESTED or
-    MAYBE) rather than requiring a separate watch-config table. Both
+    Auto-derived from the user's watched-lot history (INTERESTED,
+    BID_PLACED, or PURCHASED) rather than requiring a separate
+    watch-config table. Both
     make and model must be non-null — accessory lots (no normalized
     fields) can't be matched against, so we don't widen `NULL IN (…)`
     semantics into the alert query.
@@ -271,7 +276,7 @@ async def closing_buckets(
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
             AuctionLot.lot_status.in_(OPEN_STATUSES),
-            AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
+            AuctionLot.user_action.is_distinct_from(UserAction.PASSED.value),
             effective_end.is_not(None),
             # `> now` (not `> now - window`): a lot whose effective_end has
             # already passed shouldn't sit under a header labelled "Closing
@@ -315,7 +320,7 @@ async def best_deals(
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
             AuctionLot.lot_status.in_(OPEN_STATUSES),
-            AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
+            AuctionLot.user_action.is_distinct_from(UserAction.PASSED.value),
             AuctionLot.price_deal_score.is_not(None),
             AuctionLot.price_deal_score >= min_score,
         )
@@ -351,7 +356,7 @@ async def dashboard_kpis(
         .join(Auction, Auction.id == AuctionLot.auction_id)
         .where(
             AuctionLot.lot_status.in_(OPEN_STATUSES),
-            AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
+            AuctionLot.user_action.is_distinct_from(UserAction.PASSED.value),
             effective_end.is_not(None),
             effective_end > now,
             effective_end <= now_cutoff,
@@ -359,8 +364,8 @@ async def dashboard_kpis(
     )
     closing_now = (await session.execute(closing_now_stmt)).scalar_one()
 
-    # KPI tile links to /watched, which shows INTERESTED + MAYBE. Match
-    # that set so the tile count equals the destination-page count.
+    # KPI tile links to /watched, which shows INTERESTED + BID_PLACED + PURCHASED.
+    # Match that set so the tile count equals the destination-page count.
     watching_stmt = (
         select(func.count())
         .select_from(AuctionLot)

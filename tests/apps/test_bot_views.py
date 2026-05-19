@@ -191,12 +191,12 @@ async def test_set_user_action_returns_false_when_lot_missing(
     spy.warning = capture_warning
     monkeypatch.setattr(views_mod, "log", spy)
 
-    ok = await _set_user_action(999_999, UserAction.MAYBE)
+    ok = await _set_user_action(999_999, UserAction.INTERESTED)
 
     assert ok is False
     assert warnings == [
         (
             "user_action write skipped — lot not found",
-            {"lot_id": 999_999, "action": UserAction.MAYBE},
+            {"lot_id": 999_999, "action": UserAction.INTERESTED},
         ),
     ]
