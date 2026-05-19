@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
@@ -15,15 +16,13 @@ from carbuyer.apps.dashboard.deps import (
     require_admin,
 )
 from carbuyer.db.enums import UserAction, ValuationStatus
+from carbuyer.db.lot_state import apply_user_action
 from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.db.notify import notify
 from carbuyer.shared.logging import get_logger
 
 router = APIRouter()
 log = get_logger("dashboard.actions")
-
-
-_ACCEPTED_ACTIONS = frozenset({"interested", "bid_placed", "purchased", "passed"})
 
 
 @router.post("/lots/{lot_id}/mark", response_model=None)
@@ -34,39 +33,48 @@ async def mark_lot(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[CurrentUser, Depends(current_user)],
     currently_active: Annotated[bool, Form()] = False,
+    max_bid_cad: Annotated[Decimal | None, Form()] = None,
 ) -> HTMLResponse | Response:
-    """Set, toggle, or clear `user_action` for a lot.
+    """Set, toggle, or clear `user_action` for a lot via apply_user_action.
 
-    `action` is the button's intent ("interested" / "bid_placed" /
-    "passed" / etc). `currently_active` is the button's own
-    `data-active` value — the macro passes it through via `hx-vals` so
-    the server can treat "click an already-active button" as toggle-off
-    (clearing user_action to NULL). Without this, clicking Watch on an
-    already-watched lot just re-writes the same value, leaving no way
-    to un-watch without explicitly clicking Pass.
+    `action` is the button intent ("interested" / "bid_placed" / "purchased"
+    / "passed"). `currently_active=True` treats the click as toggle-off
+    (clear to NULL). `max_bid_cad` is REQUIRED when action == "bid_placed"
+    and `currently_active` is False.
     """
-    if action not in _ACCEPTED_ACTIONS:
+    if action not in {"interested", "bid_placed", "purchased", "passed"}:
         raise HTTPException(status_code=422, detail=f"invalid action {action!r}")
+
+    if action == "bid_placed" and max_bid_cad is None and not currently_active:
+        raise HTTPException(
+            status_code=422,
+            detail="bid_placed requires max_bid_cad",
+        )
+
     lot = await session.get(AuctionLot, lot_id)
     if lot is None:
         raise HTTPException(status_code=404)
-    if currently_active:
-        lot.user_action = None
-        effective_state: str | None = None
-    else:
-        lot.user_action = UserAction(action)
-        effective_state = action
+
+    target: UserAction | None = None if currently_active else UserAction(action)
+
+    apply_user_action(
+        session, lot, target,
+        max_bid_cad=max_bid_cad,
+        source="dashboard",
+    )
     await session.commit()
     await session.refresh(lot)
+
     log.info(
         "lot marked", lot_id=lot_id, action=action,
         stored=lot.user_action, toggled_off=currently_active,
     )
 
+    effective_state = lot.user_action.value if lot.user_action else None
+
     if not request.headers.get("HX-Request"):
         return Response(status_code=204)
 
-    # On a toggle-off, effective_state is None so no button renders active.
     hx_target = request.headers.get("HX-Target", "") or ""
     is_button_fragment_target = (
         hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
@@ -86,6 +94,7 @@ async def mark_lot(
                 "effective_state": effective_state,
             },
         )
+
     auction = await session.get(Auction, lot.auction_id)
     return templates.TemplateResponse(
         request,

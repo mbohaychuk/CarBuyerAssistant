@@ -71,6 +71,7 @@ def _make_lot(
     closed_at: datetime | None = None,
     final_bid_cad: Decimal | None = Decimal("8000.00"),
     user_action: str | None = None,
+    won_at: datetime | None = None,
     cheap_notified_at: datetime | None = None,
     early_warning_notified_at: datetime | None = None,
     closing_notified_at: datetime | None = None,
@@ -90,6 +91,7 @@ def _make_lot(
         closed_at=closed_at if closed_at is not None else _OLD_CLOSED,
         final_bid_cad=final_bid_cad,
         user_action=user_action,
+        won_at=won_at,
         cheap_notified_at=cheap_notified_at,
         early_warning_notified_at=early_warning_notified_at,
         closing_notified_at=closing_notified_at,
@@ -347,7 +349,7 @@ async def test_main_skips_purchased_by_us(
     """Lots we purchased are never distilled — they live in purchases table."""
     session = _patched_get_session
     auction = _make_auction(session)
-    _make_lot(session, auction, user_action=UserAction.PURCHASED)
+    _make_lot(session, auction, user_action=UserAction.PURCHASED, won_at=_NOW)
     await session.flush()
 
     await main(now=_NOW)
