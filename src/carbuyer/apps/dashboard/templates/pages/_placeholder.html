@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — CarBuyer{% endblock %}
+{% block nav %}{{ nav }}{% endblock %}
+{% block content %}
+<div class="stack stack--md container--narrow">
+  <h1>{{ title }}</h1>
+  <p class="t-muted">{{ blurb }}</p>
+  <p>
+    <a href="{{ fallback_url }}">{{ fallback_label }}</a>
+    {% if fallback_url_2 %}· <a href="{{ fallback_url_2 }}">{{ fallback_label_2 }}</a>{% endif %}
+  </p>
+</div>
+{% endblock %}

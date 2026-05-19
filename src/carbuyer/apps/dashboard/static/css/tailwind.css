@@ -1,0 +1,270 @@
+/* Tailwind input file — compiles to app.css via `make css`.
+ *
+ * The @theme block holds every design token from the previous
+ * tokens.css; Tailwind v4 picks these up as the source for generated
+ * utility classes (--color-good → bg-good / text-good, --spacing-3 →
+ * p-3, etc).
+ *
+ * The :root bridge keeps the old token names (--space-3, --fs-base,
+ * --gray-50) valid so existing component CSS files don't need to
+ * change as part of this PR. They're deleted incrementally as each
+ * component migrates to utility classes.
+ */
+
+@import "tailwindcss";
+
+@source "../../templates/**/*.html";
+
+@theme {
+  /* ── Auction House Ledger palette ─────────────────────────────────
+   * Catalog/ledger metaphor: cream paper, slab-serif headings, mono
+   * numerals, muted forest green for deals, oxblood for urgency.
+   * Survives noon-in-a-yard viewing better than dark mode; gives the
+   * dashboard a point of view rather than another neutral gray.
+   */
+
+  /* Primitives — paper neutrals (replaces the gray scale) */
+  --color-paper:        #f6f1e7;  /* page background */
+  --color-paper-2:      #ede6d4;  /* cards (raised surface) */
+  --color-paper-3:      #fffbf2;  /* modals, hover (elevated) */
+  --color-rule:         #d8cdb3;  /* hairlines, borders */
+  --color-rule-strong:  #b9ad8e;  /* emphasized borders */
+  --color-ink:          #14110d;  /* primary text */
+  --color-ink-soft:     #3a342a;  /* slightly softer than primary */
+  --color-muted:        #6b6253;  /* secondary text */
+
+  /* Primitives — semantic accents */
+  --color-accent:        #1f5a3a;  /* primary actions, deal-good */
+  --color-accent-ink:    #0d3a26;  /* pressed/dark accent */
+  --color-accent-bg:     #dfead6;  /* accent fill bg (tinted) */
+  --color-ox:            #8a1d10;  /* urgency-high, loss */
+  --color-ox-dark:       #4a0a06;  /* urgency-now */
+  --color-ox-bg:         #f4dbd6;  /* oxblood tinted fill */
+  --color-ember:         #c47114;  /* urgency-med, warn */
+  --color-ember-bg:      #f7e6cf;  /* ember tinted fill */
+  --color-stamp-blue:    #1f4a6a;  /* informational accent */
+
+  /* Semantic aliases */
+  --color-bg:            var(--color-paper);
+  --color-surface:       var(--color-paper-2);
+  --color-surface-sunk:  var(--color-paper);
+  --color-surface-elevated: var(--color-paper-3);
+  --color-border:        var(--color-rule);
+  --color-border-strong: var(--color-rule-strong);
+
+  --color-text:          var(--color-ink);
+  --color-text-muted:    var(--color-muted);
+  --color-text-inverse:  var(--color-paper);
+
+  --color-good:    var(--color-accent);
+  --color-good-bg: var(--color-accent-bg);
+  --color-warn:    var(--color-ember);
+  --color-warn-bg: var(--color-ember-bg);
+  --color-bad:     var(--color-ox);
+  --color-bad-bg:  var(--color-ox-bg);
+  --color-info:    var(--color-stamp-blue);
+  --color-info-bg: #dbe3ec;
+
+  /* Urgency ramp — low > 24h, med 2-24h, high < 2h, now < 15m */
+  --color-urgency-low:  var(--color-muted);
+  --color-urgency-med:  var(--color-ember);
+  --color-urgency-high: var(--color-ox);
+  --color-urgency-now:  var(--color-ox-dark);
+
+  /* Deal-score ramp — 5 buckets, applied as left-border color on lot card */
+  --color-deal-0: var(--color-rule);
+  --color-deal-1: #d6dabd;
+  --color-deal-2: #a7c290;
+  --color-deal-3: #5e9a52;
+  --color-deal-4: var(--color-accent);
+
+  /* Legacy gray aliases — kept temporarily so unmigrated component CSS
+   * referring to var(--gray-50) etc still resolves to a paper neutral.
+   * Removed once nothing references them. */
+  --color-gray-0:   var(--color-paper-3);
+  --color-gray-50:  var(--color-paper);
+  --color-gray-100: var(--color-paper-2);
+  --color-gray-200: var(--color-rule);
+  --color-gray-300: var(--color-rule-strong);
+  --color-gray-500: var(--color-muted);
+  --color-gray-700: var(--color-ink-soft);
+  --color-gray-900: var(--color-ink);
+  --color-ink-900:  var(--color-ink);
+  --color-amber-500: var(--color-ember);
+  --color-amber-100: var(--color-ember-bg);
+  --color-red-600:   var(--color-ox);
+  --color-red-100:   var(--color-ox-bg);
+  --color-green-700: var(--color-accent);
+  --color-green-100: var(--color-accent-bg);
+  --color-blue-600:  var(--color-stamp-blue);
+  --color-blue-100:  #dbe3ec;
+
+  /* ── Spacing — 4pt scale, slightly tighter card padding ─────────── */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 24px;
+  --spacing-6: 32px;
+  --spacing-7: 48px;
+  --spacing-8: 64px;
+
+  /* ── Radii — Direction A leans crisp; small radii on cards/chips ── */
+  --radius-sm:   2px;
+  --radius-md:   4px;
+  --radius-lg:   8px;
+  --radius-pill: 999px;
+
+  /* ── Shadows — paper-soft, never glossy ─────────────────────────── */
+  --shadow-sm:  0 1px 0 rgba(20, 17, 13, 0.04), 0 1px 2px rgba(20, 17, 13, 0.06);
+  --shadow-md:  0 2px 4px rgba(20, 17, 13, 0.06), 0 4px 12px rgba(20, 17, 13, 0.08);
+  --shadow-pop: 0 8px 24px rgba(20, 17, 13, 0.14);
+
+  /* ── Typography — Fraunces + Inter + JetBrains Mono ─────────────── */
+  --font-sans:    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Fraunces", "Iowan Old Style", "Georgia", serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Tighter ramp than current — Direction A is denser. */
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-base: 14px;
+  --text-md:   17px;
+  --text-lg:   24px;
+  --text-xl:   32px;
+
+  --font-weight-reg:  400;
+  --font-weight-med:  500;
+  --font-weight-sbd:  600;
+  --font-weight-bold: 700;
+
+  /* ── Layout ─────────────────────────────────────────────────────── */
+  --container-max:    1280px;
+  --container-narrow: 880px;
+  --container-pad:    var(--spacing-4);
+  --topnav-h:         48px;
+  --tap-target:       44px;
+}
+
+/* Bridge: old token names → new Tailwind-prefixed names.
+ *
+ * The previously hand-authored component CSS files reference vars like
+ * --space-3, --fs-base, --fw-sbd, --gray-50. Tailwind's @theme expects
+ * --spacing-3, --text-base, --font-weight-sbd, --color-gray-50 to wire
+ * utility classes (p-3, text-base, font-sbd, bg-gray-50). This block
+ * makes the old names valid as plain CSS custom properties, scoped to
+ * the same :root, so existing component CSS works unchanged.
+ *
+ * Each component migrating to utility classes can drop its dependency
+ * on these aliases; once nothing references them, the block goes too. */
+:root {
+  /* Spacing */
+  --space-1: var(--spacing-1);
+  --space-2: var(--spacing-2);
+  --space-3: var(--spacing-3);
+  --space-4: var(--spacing-4);
+  --space-5: var(--spacing-5);
+  --space-6: var(--spacing-6);
+  --space-7: var(--spacing-7);
+  --space-8: var(--spacing-8);
+
+  /* Type sizes */
+  --fs-xs:   var(--text-xs);
+  --fs-sm:   var(--text-sm);
+  --fs-base: var(--text-base);
+  --fs-md:   var(--text-md);
+  --fs-lg:   var(--text-lg);
+  --fs-xl:   var(--text-xl);
+  --lh-tight: 1.2;
+  --lh-base:  1.45;
+
+  /* Font weights */
+  --fw-reg:  var(--font-weight-reg);
+  --fw-med:  var(--font-weight-med);
+  --fw-sbd:  var(--font-weight-sbd);
+  --fw-bold: var(--font-weight-bold);
+
+  /* Old unprefixed gray-* tokens used by component CSS */
+  --gray-0:   var(--color-gray-0);
+  --gray-50:  var(--color-gray-50);
+  --gray-100: var(--color-gray-100);
+  --gray-200: var(--color-gray-200);
+  --gray-300: var(--color-gray-300);
+  --gray-500: var(--color-gray-500);
+  --gray-700: var(--color-gray-700);
+  --gray-900: var(--color-gray-900);
+
+  /* Old --ink-900 alias */
+  --ink-900: var(--color-ink-900);
+
+  /* Old amber/red/green/blue without --color- prefix */
+  --amber-100: var(--color-amber-100);
+  --amber-500: var(--color-amber-500);
+  --red-100:   var(--color-red-100);
+  --red-600:   var(--color-red-600);
+  --green-100: var(--color-green-100);
+  --green-700: var(--color-green-700);
+  --blue-100:  var(--color-blue-100);
+  --blue-600:  var(--color-blue-600);
+
+  /* Urgency + deal aliases */
+  --urgency-low:  var(--color-urgency-low);
+  --urgency-med:  var(--color-urgency-med);
+  --urgency-high: var(--color-urgency-high);
+  --urgency-now:  var(--color-urgency-now);
+
+  --deal-0: var(--color-deal-0);
+  --deal-1: var(--color-deal-1);
+  --deal-2: var(--color-deal-2);
+  --deal-3: var(--color-deal-3);
+  --deal-4: var(--color-deal-4);
+}
+
+/* Existing hand-authored component CSS. Tailwind compiles these into the
+ * single output file; relative paths resolve from this file's location. */
+@import "./base.css";
+@import "./utilities.css";
+@import "./layout.css";
+@import "./components/lot-card.css";
+@import "./components/countdown.css";
+@import "./components/flag.css";
+@import "./components/money.css";
+@import "./components/range-bar.css";
+@import "./components/photo-strip.css";
+@import "./components/htmx-states.css";
+@import "./components/filter-bar.css";
+@import "./components/lot-detail.css";
+
+/* Legacy classes from the original 13-line app.css — kept for pages that
+ * haven't been migrated to the component vocabulary. Each subsequent
+ * template migration replaces a legacy class (.card → structured
+ * component, .tag → .flag, etc.) and a corresponding block here gets
+ * deleted once unused. */
+main {
+  display: block;
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-4);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.muted { color: var(--color-text-muted); }
+
+.tag {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  background: var(--color-surface-sunk);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  margin-right: var(--space-1);
+  color: var(--color-text);
+}
+.tag.rare { background: var(--amber-100); color: var(--color-warn); }
+.tag.deal { background: var(--color-good-bg); color: var(--color-good); }

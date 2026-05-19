@@ -1,0 +1,49 @@
+/* Money — Auction House Ledger.
+ *
+ * JetBrains Mono, tabular nums + slashed zero. The mono face is the
+ * single most expressive choice of the ledger metaphor — currency
+ * columns in stacked cards align like a real account ledger. The $
+ * symbol is muted via ::first-letter so the eye lands on the digits.
+ *
+ * Variants: --main (oversize, semibold — primary card number),
+ * --large (lot-detail headline), --empty (em-dash for null).
+ */
+
+.money {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-weight: var(--fw-med);
+  letter-spacing: -0.02em;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+.money::first-letter {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-reg);
+}
+
+.money--main {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-sbd);
+}
+
+.money--large {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-sbd);
+  letter-spacing: -0.03em;
+}
+
+.money--empty {
+  color: var(--color-text-muted);
+  font-weight: var(--fw-reg);
+}
+
+/* Flash animation for live bid updates (paired with hx-swap or SSE). */
+.money--just-changed {
+  animation: money-flash 1.2s ease-out;
+}
+@keyframes money-flash {
+  0%   { background: var(--color-info-bg); }
+  100% { background: transparent; }
+}

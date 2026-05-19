@@ -1,27 +1,100 @@
-<form
+{# Feed filter bar — sticky, multi-row.
+   Row 1: free-text search + sort
+   Row 2: quick-filter preset chips (horizontally scrollable on phone)
+   Row 3: province toggle chips + "More filters" popover (deal-score
+          range, rarity range, exclude-not-interested)
+   Row 4: active-filter summary chips (only if anything is set)
+
+   All inputs swap #lot-list via HTMX. hx-include on the form picks up
+   every named input, so any change reissues the full query — simplest
+   and most reliable for a single-user dev tool. #}
+<form id="feed-filters" class="filter-bar"
   hx-get="/"
   hx-target="#lot-list"
   hx-swap="innerHTML"
-  hx-trigger="change from:select, change from:input[type='checkbox'], keyup changed delay:300ms from:input[type='number'], submit"
-  hx-push-url="true"
-  class="card"
->
-  <label>Province
-    <select name="province" multiple>
+  hx-trigger="change, keyup changed delay:300ms from:input[type='search'], keyup changed delay:300ms from:input[type='number']"
+  hx-push-url="true">
+  {# Hidden preset slot — preset chips POST their value here via hx-vals
+     so the server can interpret canonical preset names. #}
+  <input type="hidden" name="preset" value="{{ filters.preset or '' }}">
+
+  <div class="filter-bar__row filter-bar__row--main">
+    <div class="filter-bar__search">
+      <svg viewBox="0 0 16 16" aria-hidden="true" class="filter-bar__search-icon">
+        <path fill="currentColor" d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.868-3.834zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+      </svg>
+      <input type="search" name="q" value="{{ filters.q or '' }}"
+             placeholder="Search make, model, VIN…" aria-label="Search">
+    </div>
+    <label class="filter-bar__sort">
+      <span class="visually-hidden">Sort by</span>
+      <select name="sort">
+        <option value="deal"     {% if filters.sort == 'deal' %}selected{% endif %}>Best deal %</option>
+        <option value="closing"  {% if filters.sort == 'closing' %}selected{% endif %}>Closing soonest</option>
+        <option value="newest"   {% if filters.sort == 'newest' %}selected{% endif %}>Newest listing</option>
+        <option value="rarity"   {% if filters.sort == 'rarity' %}selected{% endif %}>Rarest</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="filter-bar__row filter-bar__row--presets">
+    {% set presets = [
+      ('closing_24h',  'Closing < 24h'),
+      ('under_10k',    'Under $10k'),
+      ('deal_25',      '25%+ under'),
+      ('watched',      'Watched'),
+      ('no_showstop',  'No showstoppers'),
+      ('rare',         'Rare ★★★+'),
+    ] %}
+    {% for value, label in presets %}
+      <button type="button" class="preset-chip"
+              data-active="{{ 'true' if filters.preset == value else 'false' }}"
+              hx-get="{{ preset_chip_urls[value] }}" hx-target="#lot-list" hx-push-url="true">
+        {{ label }}
+      </button>
+    {% endfor %}
+  </div>
+
+  <div class="filter-bar__row filter-bar__row--secondary">
+    <div class="province-chips" role="group" aria-label="Province">
       {% for p in ["AB", "BC", "SK", "MB"] %}
-        <option value="{{ p }}" {% if p in filters.province %}selected{% endif %}>{{ p }}</option>
+        <label class="province-chip">
+          <input type="checkbox" name="province" value="{{ p }}"
+                 {% if p in filters.province %}checked{% endif %}>
+          <span>{{ p }}</span>
+        </label>
       {% endfor %}
-    </select>
-  </label>
-  <label>Min deal score
-    <input type="number" name="min_score" step="0.01" min="0" max="1" value="{{ filters.min_score }}">
-  </label>
-  <label>Min rarity score
-    <input type="number" name="min_rarity" step="0.5" min="0" max="5" value="{{ filters.min_rarity }}">
-  </label>
-  <label>
-    <input type="checkbox" name="exclude_not_interested" value="true"
-      {% if filters.exclude_not_interested %}checked{% endif %}>
-    Exclude not-interested
-  </label>
+    </div>
+
+    <details class="filter-bar__more">
+      <summary>More filters</summary>
+      <div class="filter-bar__more-panel">
+        <label class="filter-bar__slider">
+          <span>Min deal score</span>
+          <input type="number" name="min_score" step="0.05" min="0" max="0.5" value="{{ filters.min_score }}">
+        </label>
+        <label class="filter-bar__slider">
+          <span>Min rarity</span>
+          <input type="number" name="min_rarity" step="0.5" min="0" max="5" value="{{ filters.min_rarity }}">
+        </label>
+        <label class="filter-bar__toggle">
+          <input type="checkbox" name="exclude_not_interested" value="true"
+                 {% if filters.exclude_not_interested %}checked{% endif %}>
+          <span>Hide passed lots</span>
+        </label>
+      </div>
+    </details>
+  </div>
+
+  {% if filters.active_chips %}
+    <div class="filter-bar__row filter-bar__row--active">
+      {% for chip in filters.active_chips %}
+        <span class="active-chip">
+          {{ chip.label }}
+          <a href="{{ chip.remove_url }}" hx-get="{{ chip.remove_url }}" hx-target="#lot-list" aria-label="Remove {{ chip.label }}">×</a>
+        </span>
+      {% endfor %}
+      <a class="active-chip__clear" href="/" hx-get="/" hx-target="#lot-list">Clear all</a>
+    </div>
+  {% endif %}
 </form>

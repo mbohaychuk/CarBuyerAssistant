@@ -1,7 +1,147 @@
-{% macro money(value) %}
-{%- if value is none -%}—{%- else -%}${{ "{:,.0f}".format(value|float) }}{%- endif -%}
-{% endmacro %}
+{# Shared Jinja macros for the dashboard. #}
 
-{% macro pct(value) %}
+{# Money — $X,XXX kept as one continuous text run so substring tests
+   still match. Currency symbol is muted via CSS ::first-letter on .money.
+   variant: '' | 'main' (card primary) | 'large' (lot-detail headline) #}
+{% macro money(value, variant='') -%}
+{%- if value is none -%}
+<span class="money money--empty">—</span>
+{%- else -%}
+<span class="money{% if variant %} money--{{ variant }}{% endif %}">${{ "{:,.0f}".format(value|float) }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro pct(value) -%}
 {%- if value is none -%}—{%- else -%}{{ "{:.1%}".format(value|float) }}{%- endif -%}
-{% endmacro %}
+{%- endmacro %}
+
+{# Deal bucket — 0..4 emphasis for the lot-card left-border accent. #}
+{% macro deal_bucket(score) -%}
+{%- if score is none or score < 0 -%}0
+{%- elif score < 0.08 -%}1
+{%- elif score < 0.15 -%}2
+{%- elif score < 0.25 -%}3
+{%- else -%}4
+{%- endif -%}
+{%- endmacro %}
+
+{# Compute urgency tier + label from a scheduled_end_at datetime.
+   Returns a (tier, label) tuple. Tiers: low > 24h, med 2-24h,
+   high < 2h, now < 15m, closed (past), unknown (None). #}
+{% macro _urgency(scheduled_end_at, now=None) -%}
+{%- if scheduled_end_at is none -%}unknown:—
+{%- else -%}
+{%- set delta_min = (scheduled_end_at - (now or now_utc())).total_seconds() / 60 -%}
+{%- if delta_min < 0 -%}closed:closed
+{%- elif delta_min < 15 -%}now:{{ (delta_min | int) ~ 'm' }}
+{%- elif delta_min < 120 -%}
+{%- set h = (delta_min // 60) | int -%}{%- set m = (delta_min % 60) | int -%}
+high:{{ (h ~ 'h ' ~ m ~ 'm') if h else (m ~ 'm') }}
+{%- elif delta_min < 24 * 60 -%}med:{{ ((delta_min / 60) | int) ~ 'h' }}
+{%- else -%}
+{%- set days = ((delta_min / 60 / 24) | int) -%}
+low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{# Countdown chip — time-to-close visual with urgency tier and optional
+   bid-velocity dot. minutes_since_last_bid is the freshness signal: a
+   filled dot pulses if there's been any bid within the last 10 minutes,
+   regardless of urgency tier. Pure CSS + SVG. Reads cleanly even when
+   data is sparse (no bid history). #}
+{% macro countdown_chip(scheduled_end_at, minutes_since_last_bid=None, now=None) -%}
+{%- set result = _urgency(scheduled_end_at, now) | trim -%}
+{%- set parts = result.split(':', 1) -%}
+{%- set tier = parts[0] -%}
+{%- set label = parts[1] -%}
+<span class="countdown" data-urgency="{{ tier }}"
+      {%- if scheduled_end_at %} title="{{ scheduled_end_at | local_dt }}"{% endif %}>
+  <span>{{ label }}</span>
+  {%- if minutes_since_last_bid is not none and minutes_since_last_bid < 10 %}
+  <span class="countdown__pulse" title="bid {{ minutes_since_last_bid }}m ago"></span>
+  {%- endif %}
+</span>
+{%- endmacro %}
+
+{# Flag chip — flag is a dict with at least a `flag` key.
+   variant: 'good' | 'bad' | 'stop' #}
+{% macro flag_chip(flag, variant) -%}
+<span class="flag flag--{{ variant }}" {% if flag.description %}title="{{ flag.description }}"{% endif %}>{{ flag.flag }}</span>
+{%- endmacro %}
+
+{# Range bar — value_low / value_mid / value_high with current_bid marker.
+   Renders nothing if value_low or value_high are missing (no useful range
+   to draw). 'compact' variant omits the labels row for use in narrow card
+   pricing rails; default includes the three price labels under the bar. #}
+{% macro range_bar(value_low, value_mid, value_high, current_bid, variant='') -%}
+{%- if value_low is none or value_high is none or value_low >= value_high -%}
+{%- else -%}
+{%- set span = (value_high | float) - (value_low | float) -%}
+{%- set pos_bid = (((current_bid | float) - (value_low | float)) / span * 100) if current_bid else none -%}
+{%- set pos_mid = (((value_mid | float) - (value_low | float)) / span * 100) if value_mid else none -%}
+{%- set steal = current_bid and (current_bid | float) < (value_low | float) -%}
+<div class="range-bar{% if steal %} range-bar--steal{% endif %}">
+{%- if pos_mid is not none -%}<span class="marker marker--mid" style="left: {{ pos_mid }}%"></span>{%- endif -%}
+{%- if pos_bid is not none -%}<span class="marker" style="left: {{ [[0, pos_bid] | max, 100] | min }}%"></span>{%- endif -%}
+</div>
+{%- if variant != 'compact' -%}
+<div class="range-bar__labels">
+<span>{{ money(value_low) }}</span>
+{%- if value_mid is not none -%}<span>{{ money(value_mid) }}</span>{%- endif -%}
+<span>{{ money(value_high) }}</span>
+</div>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{# State pill — surfaces user_action ('interested' | 'bid_placed' |
+   'purchased' | 'passed' | None). Compact, color-coded by state.
+   Used on watchlist and on lot detail. #}
+{% macro state_pill(user_action) -%}
+{%- if not user_action -%}
+{%- else -%}
+<span class="state-pill" data-state="{{ user_action }}">{{ user_action | replace('_', ' ') }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{# Action buttons row — Watch / Bid placed / Pass.
+
+   `target` defaults to the card's outer element (`#lot-{{ lot_id }}`) so
+   feed-card clicks swap the whole card. The mobile bid console passes a
+   different target (its own wrapper id) so the bid-console clicks update
+   the bid console, not the desktop rail buried elsewhere on the page.
+
+   `current_state` is the user_action value the buttons should compare
+   against. Defaults to the lot's stored value; the mark endpoint passes
+   the *clicked* action explicitly after a transition so the in-flight
+   UI reflects the user's intent. (Until the 4-state workflow migration
+   lands, bid_placed and purchased alias to interested in the DB; the
+   immediate post-click render uses the user's intent so the button they
+   clicked appears active.) #}
+{% macro action_buttons(lot_id, current_state, size='sm', target=None) -%}
+{% set hx_target = target or ('#lot-' ~ lot_id) %}
+<div class="lot-actions" data-size="{{ size }}" hx-target="{{ hx_target }}" hx-swap="outerHTML">
+  <button class="lot-actions__btn" data-action="interested"
+          data-active="{{ 'true' if current_state == 'interested' else 'false' }}"
+          hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"interested"}'
+          aria-label="Mark interested">
+    <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14">
+      <path fill="currentColor" d="M8 14l-1-.91C3.4 9.84 1 7.67 1 5a3.5 3.5 0 0 1 6-2.45A3.5 3.5 0 0 1 15 5c0 2.67-2.4 4.84-6 8.09L8 14z"/>
+    </svg>
+    Watch
+  </button>
+  <button class="lot-actions__btn lot-actions__btn--primary" data-action="bid_placed"
+          data-active="{{ 'true' if current_state == 'bid_placed' else 'false' }}"
+          hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"bid_placed"}'
+          aria-label="Mark bid placed">
+    Bid placed
+  </button>
+  <button class="lot-actions__btn" data-action="passed"
+          data-active="{{ 'true' if current_state == 'passed' or current_state == 'not_interested' else 'false' }}"
+          hx-post="/lots/{{ lot_id }}/mark" hx-vals='{"action":"passed"}'
+          aria-label="Pass on this lot">
+    Pass
+  </button>
+</div>
+{%- endmacro %}
