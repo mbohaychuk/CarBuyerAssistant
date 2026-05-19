@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.bid_poller import poller as poller_mod
 from carbuyer.apps.bid_poller.poller import (  # pyright: ignore[reportPrivateUsage]
     _poll_one,
+    _verify_pollers_registered,
     _write_observation,
 )
 from carbuyer.db.enums import LotStatus, ValuationStatus
@@ -537,3 +538,26 @@ async def test_load_open_lot_refs_polls_mcdougall_shape_in_active_window(
     )
     await session.refresh(lot)
     assert lot.lot_status == LotStatus.OPEN
+
+
+# ── _verify_pollers_registered ──────────────────────────────────────────────
+
+
+def test_verify_pollers_registered_accepts_any_non_empty_set() -> None:
+    """The startup check must accept arbitrary registered plugin sets so adding
+    plugin #3 doesn't require editing the check. Two plugins (the current
+    state), one plugin, or three+ plugins all pass."""
+    _verify_pollers_registered({"hibid": _FakePoller()})
+    _verify_pollers_registered({
+        "hibid": _FakePoller(),
+        "mcdougall": _FakePoller(),
+        "ritchie_bros": _FakePoller(),
+    })
+
+
+def test_verify_pollers_registered_raises_on_empty() -> None:
+    """Zero registered pollers means every plugin import at the top of
+    poller.py silently failed to call register(). Raise rather than spinning
+    forever on an empty poll loop."""
+    with pytest.raises(RuntimeError, match="no BidPoller plugins registered"):
+        _verify_pollers_registered({})
