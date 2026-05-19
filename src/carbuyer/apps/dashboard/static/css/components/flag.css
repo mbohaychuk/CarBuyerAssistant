@@ -1,15 +1,17 @@
-/* FlagChip — red/green/showstopper indicators on lot cards + detail.
+/* FlagChip — Auction House Ledger.
  *
- * Capped at ~3 red + 2 green per card; overflow becomes a "+N" chip linking
- * to lot detail. Showstoppers always render (and override the cap).
+ * Stamped-paper feel: tinted fill + matching hairline border at low
+ * opacity, slight uppercase tracking. Reads like a stamp on a catalog
+ * page rather than a Bootstrap badge.
  */
 
 .flag {
   display: inline-block;
   font-size: var(--fs-xs);
-  padding: 2px 6px;
+  padding: 1px 6px;
   border-radius: var(--radius-sm);
   font-weight: var(--fw-med);
+  letter-spacing: 0.01em;
   line-height: 1.4;
   white-space: nowrap;
 }
@@ -17,17 +19,20 @@
 .flag--good {
   color: var(--color-good);
   background: var(--color-good-bg);
+  border: 1px solid color-mix(in srgb, var(--color-good) 22%, transparent);
 }
 
 .flag--bad {
   color: var(--color-bad);
   background: var(--color-bad-bg);
+  border: 1px solid color-mix(in srgb, var(--color-bad) 22%, transparent);
 }
 
-/* Showstopper — uses solid color rather than tint to break visual rhythm. */
+/* Showstopper — solid oxblood. Always renders, even past the cap. */
 .flag--stop {
-  color: var(--color-text-inverse);
+  color: var(--color-paper);
   background: var(--color-bad);
+  border: 1px solid var(--color-ox-dark);
   font-weight: var(--fw-sbd);
 }
 

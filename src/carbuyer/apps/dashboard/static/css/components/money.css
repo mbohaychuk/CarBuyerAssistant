@@ -1,19 +1,20 @@
-/* Money — currency rendering primitive.
+/* Money — Auction House Ledger.
  *
- * Tabular numerics so values align when stacked vertically. The currency
- * symbol is muted via ::first-letter so the eye lands on the digits;
- * keeping the text as one continuous run inside .money (rather than a
- * nested .money__sym span) preserves substring-based test assertions and
- * lets the symbol blend with the surrounding text in flowing copy.
+ * JetBrains Mono, tabular nums + slashed zero. The mono face is the
+ * single most expressive choice of the ledger metaphor — currency
+ * columns in stacked cards align like a real account ledger. The $
+ * symbol is muted via ::first-letter so the eye lands on the digits.
  *
- * Variants: --main (oversize, semibold — the primary number on a card),
- * --large (lot detail headline), --empty (em-dash for null).
+ * Variants: --main (oversize, semibold — primary card number),
+ * --large (lot-detail headline), --empty (em-dash for null).
  */
 
 .money {
   display: inline-block;
-  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums slashed-zero;
   font-weight: var(--fw-med);
+  letter-spacing: -0.02em;
   color: var(--color-text);
   white-space: nowrap;
 }
@@ -30,6 +31,7 @@
 .money--large {
   font-size: var(--fs-xl);
   font-weight: var(--fw-sbd);
+  letter-spacing: -0.03em;
 }
 
 .money--empty {

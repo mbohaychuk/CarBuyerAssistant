@@ -1,13 +1,10 @@
-/* LotCard — the workhorse component.
+/* LotCard — Auction House Ledger.
  *
- * Layout: stacked on phone, photo-left/content-right above 560px (via container
- * query — the card reflows independently of viewport, so it works correctly
- * even inside narrow kanban columns).
- *
- * The left border accent encodes deal score (0-4 buckets) so the eye can scan
- * down a feed and spot good deals without parsing numbers.
- *
- * Hover lifts via shadow rather than border-color so it works on dark/light.
+ * Cream paper card on a cream paper page, hairline rule under the heading,
+ * deal-score-colored left edge, slight photo desaturation so rough auction
+ * shots read as documentary rather than fighting for attention. Container
+ * query reflows from stacked-mobile to photo-left at 560px so the card
+ * works inside narrow kanban columns and wide feed grids alike.
  */
 
 .lot-card {
@@ -16,33 +13,34 @@
   gap: var(--space-3);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-left: 4px solid var(--color-border);
+  border-left: 3px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-3);
-  transition: box-shadow 120ms ease, transform 120ms ease;
+  transition: background 140ms ease, box-shadow 140ms ease;
   container-type: inline-size;
 }
 .lot-card:hover {
-  box-shadow: var(--shadow-md);
-}
-
-/* Deal-score-as-emphasis: bucket via data-deal="0..4". Bucket 4 also picks up
- * a stronger shadow so the best deals stand out at-a-glance. */
-.lot-card[data-deal="0"] { border-left-color: var(--deal-0); }
-.lot-card[data-deal="1"] { border-left-color: var(--deal-1); }
-.lot-card[data-deal="2"] { border-left-color: var(--deal-2); }
-.lot-card[data-deal="3"] { border-left-color: var(--deal-3); }
-.lot-card[data-deal="4"] {
-  border-left-color: var(--deal-4);
+  background: var(--color-surface-elevated);
   box-shadow: var(--shadow-sm);
 }
 
-/* Photo slot. Aspect-ratio is fixed so missing-photo placeholders don't
- * collapse the layout. */
+/* Deal-score-as-emphasis: bucket via data-deal="0..4". Bucket 4 gets the
+ * full accent green plus a faint shadow lift so the best deals stand out
+ * at a feed-scan glance. */
+.lot-card[data-deal="0"] { border-left-color: var(--color-deal-0); }
+.lot-card[data-deal="1"] { border-left-color: var(--color-deal-1); }
+.lot-card[data-deal="2"] { border-left-color: var(--color-deal-2); }
+.lot-card[data-deal="3"] { border-left-color: var(--color-deal-3); }
+.lot-card[data-deal="4"] {
+  border-left-color: var(--color-deal-4);
+  box-shadow: var(--shadow-sm);
+}
+
 .lot-card__photo {
   display: block;
-  aspect-ratio: 16 / 10;
-  background: var(--color-surface-sunk);
+  aspect-ratio: 4 / 3;
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   overflow: hidden;
   position: relative;
@@ -51,42 +49,65 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* Subtle desaturation matches the documentary-evidence treatment of
+   * Direction A — rough yard photos shouldn't fight for attention. */
+  filter: saturate(0.92);
 }
 .lot-card__photo--empty {
   display: grid;
   place-items: center;
   color: var(--color-text-muted);
-  font-size: var(--fs-xs);
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  font-style: italic;
+  letter-spacing: 0.02em;
   height: 100%;
 }
 
-.lot-card__body { min-width: 0; /* enables truncation in nested children */ }
+.lot-card__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
+/* Hairline rule under the heading — signature of the ledger metaphor. */
 .lot-card__title {
+  font-family: var(--font-display);
   font-size: var(--fs-md);
   font-weight: var(--fw-sbd);
+  letter-spacing: -0.01em;
   line-height: var(--lh-tight);
   margin: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .lot-card__title a {
   color: var(--color-text);
   text-decoration: none;
 }
-.lot-card__title a:hover { color: var(--color-info); text-decoration: none; }
+.lot-card__title a:hover {
+  color: var(--color-accent);
+  text-decoration: none;
+}
 
 .lot-card__location {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
   color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Container query: above 560px parent width, switch to photo-left layout. */
 @container (min-width: 560px) {
   .lot-card {
-    grid-template-columns: 200px 1fr;
-    gap: var(--space-4);
-  }
-  .lot-card__photo {
-    aspect-ratio: 4 / 3;
+    grid-template-columns: 160px 1fr;
+    gap: var(--space-3);
+    padding: var(--space-3);
   }
 }
 

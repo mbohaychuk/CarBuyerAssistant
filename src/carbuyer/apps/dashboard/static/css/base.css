@@ -14,16 +14,22 @@ body {
   font: var(--fw-reg) var(--fs-base) / var(--lh-base) var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
-  /* Tabular numerics on by default so all rendered numbers align. The
-     handful of places where proportional digits look better (running text)
-     can opt out with .t-proportional. */
-  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Tabular nums + slashed zero everywhere — the Auction House Ledger
+     style depends on stacked money columns reading like a real ledger.
+     Opt out with .t-proportional for running prose. */
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
+/* Headings use Fraunces (slab-serif, catalog feel). Slight negative
+ * letter-spacing tightens the optical rhythm at large sizes. */
 h1, h2, h3, h4, h5, h6 {
   margin: 0;
+  font-family: var(--font-display);
   font-weight: var(--fw-sbd);
   line-height: var(--lh-tight);
+  letter-spacing: -0.01em;
   color: var(--color-text);
 }
 
