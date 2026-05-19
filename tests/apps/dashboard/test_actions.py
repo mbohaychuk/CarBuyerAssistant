@@ -76,6 +76,80 @@ async def test_mark_endpoint_404_when_lot_missing(_patch_deps: AsyncSession) -> 
 
 
 @pytest.mark.asyncio
+async def test_mark_toggle_off_clears_user_action(_patch_deps: AsyncSession) -> None:
+    """Clicking the already-active button clears the state to NULL.
+    The macro sends `currently_active=true` from the button's own
+    data-active attribute; the server treats that as a toggle-off."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.user_action = UserAction.INTERESTED.value
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "interested", "currently_active": "true"},
+        )
+    assert r.status_code == 204  # noqa: PLR2004
+
+    fresh = await session.get(AuctionLot, lot_id)
+    assert fresh is not None
+    await session.refresh(fresh)
+    assert fresh.user_action is None
+
+
+@pytest.mark.asyncio
+async def test_mark_passed_then_toggle_off(_patch_deps: AsyncSession) -> None:
+    """Same toggle semantics apply to Pass: click once to set
+    NOT_INTERESTED, click again with currently_active=true to clear."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.user_action = UserAction.NOT_INTERESTED.value
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "passed", "currently_active": "true"},
+        )
+    assert r.status_code == 204  # noqa: PLR2004
+
+    fresh = await session.get(AuctionLot, lot_id)
+    assert fresh is not None
+    await session.refresh(fresh)
+    assert fresh.user_action is None
+
+
+@pytest.mark.asyncio
+async def test_mark_htmx_toggle_off_renders_no_active_button(
+    _patch_deps: AsyncSession,
+) -> None:
+    """The HTMX fragment returned after a toggle-off must not flag any
+    button as active — otherwise the user clicks and the UI still shows
+    the state they tried to clear."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.user_action = UserAction.INTERESTED.value
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "interested", "currently_active": "true"},
+            headers={"HX-Request": "true"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    # No button should have data-active="true" in the rendered fragment.
+    assert 'data-active="true"' not in r.text
+
+
+@pytest.mark.asyncio
 async def test_mark_endpoint_rejects_invalid_action(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
     lot = _seed_lot(session)
