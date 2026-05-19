@@ -53,7 +53,7 @@ for svc in carbuyer-postgres carbuyer-bot carbuyer-dashboard \
   sudo systemctl enable "${svc}.service"
 done
 
-for t in carbuyer-ingester carbuyer-vision carbuyer-distiller; do
+for t in carbuyer-ingester carbuyer-vision carbuyer-distiller carbuyer-source-watchdog; do
   sudo systemctl enable "${t}.timer"
 done
 

@@ -1,0 +1,30 @@
+[Unit]
+Description=CarBuyer stale-source watchdog (oneshot)
+After=carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=oneshot
+User=markbohaychuk
+WorkingDirectory=/home/markbohaychuk/repos/CarBuyerAssistant
+EnvironmentFile=-/home/markbohaychuk/repos/CarBuyerAssistant/.env
+ExecStart=/home/markbohaychuk/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.source_watchdog
+StandardOutput=journal
+StandardError=journal
+# Phase 13 H11 sandbox stanza (matches other workers).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/home/markbohaychuk/repos/CarBuyerAssistant
