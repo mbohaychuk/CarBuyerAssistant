@@ -1,0 +1,16 @@
+[Unit]
+Description=Run CarBuyer stale-source watchdog hourly
+After=carbuyer-postgres.service
+
+[Timer]
+OnCalendar=*:0/60
+# Up to 5min jitter so an accidental concurrent run (e.g. operator-triggered
+# while the timer was about to fire) doesn't collide with itself on the
+# alert-state upsert. The singleton lock catches the race regardless, but
+# jitter avoids the noisy lock-contention log.
+RandomizedDelaySec=300
+Persistent=true
+Unit=carbuyer-source-watchdog.service
+
+[Install]
+WantedBy=timers.target

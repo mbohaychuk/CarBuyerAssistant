@@ -170,6 +170,7 @@ uv run python -m carbuyer.apps.dashboard
 | `carbuyer-ingester.timer`     | Multi-source lot ingester  | every 6h (10min after boot) |
 | `carbuyer-vision.timer`       | Nightly vision batch       | daily 02:00 UTC             |
 | `carbuyer-distiller.timer`    | Nightly distiller          | daily 03:00 UTC             |
+| `carbuyer-source-watchdog.timer` | Stale-source alerter    | hourly                      |
 
 `infra/backup.sh` runs daily via crontab and retains 30 days of `pg_dump`s:
 
