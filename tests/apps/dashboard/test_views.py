@@ -106,7 +106,7 @@ async def test_watched_default_tier_interested(_patch_deps: AsyncSession) -> Non
         session, end_at=None, user_action=UserAction.INTERESTED.value, title="WANT",
     )
     _seed_auction_with_lot(
-        session, end_at=None, user_action=UserAction.MAYBE.value, title="PERHAPS",
+        session, end_at=None, user_action=UserAction.PASSED.value, title="PERHAPS",
     )
     await session.commit()
 
@@ -122,7 +122,7 @@ async def test_watched_default_tier_interested(_patch_deps: AsyncSession) -> Non
 async def test_watched_tier_maybe(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
     _seed_auction_with_lot(
-        session, end_at=None, user_action=UserAction.MAYBE.value, title="PERHAPS",
+        session, end_at=None, user_action=UserAction.INTERESTED.value, title="PERHAPS",
     )
     await session.commit()
 

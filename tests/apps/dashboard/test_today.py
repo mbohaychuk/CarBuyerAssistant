@@ -236,7 +236,7 @@ async def test_closing_buckets_excludes_not_interested(
     _seed_lot(
         session, a, source_lot_id="PASSED",
         scheduled_end_at=now + timedelta(minutes=10),
-        user_action=UserAction.NOT_INTERESTED.value,
+        user_action=UserAction.PASSED.value,
     )
     await session.commit()
 
@@ -432,7 +432,7 @@ async def test_best_deals_excludes_closed_statuses(_patch_deps: AsyncSession) ->
     assert "CLOSED_DEAL" not in ids
 
 
-# ── best_deals: thresholding + ordering + NOT_INTERESTED exclusion ──────
+# ── best_deals: thresholding + ordering + PASSED exclusion ──────
 
 
 @pytest.mark.asyncio
@@ -470,7 +470,7 @@ async def test_best_deals_excludes_not_interested(_patch_deps: AsyncSession) -> 
     a = _seed_auction(session, source_id="A1")
     _seed_lot(session, a, source_lot_id="PASSED",
               price_deal_score=0.5,
-              user_action=UserAction.NOT_INTERESTED.value)
+              user_action=UserAction.PASSED.value)
     _seed_lot(session, a, source_lot_id="KEEP", price_deal_score=0.4)
     await session.commit()
 

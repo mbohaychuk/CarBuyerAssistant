@@ -232,14 +232,15 @@ async def feed(  # noqa: PLR0912, PLR0913, PLR0915
             ),
         )
     if watched_only:
-        stmt = stmt.where(
-            AuctionLot.user_action.in_(
-                [UserAction.INTERESTED.value, UserAction.MAYBE.value],
-            ),
-        )
+        _watched = [
+            UserAction.INTERESTED.value,
+            UserAction.BID_PLACED.value,
+            UserAction.PURCHASED.value,
+        ]
+        stmt = stmt.where(AuctionLot.user_action.in_(_watched))
     elif exclude_not_interested:
         stmt = stmt.where(
-            AuctionLot.user_action.is_distinct_from(UserAction.NOT_INTERESTED.value),
+            AuctionLot.user_action.is_distinct_from(UserAction.PASSED.value),
         )
     if hide_showstoppers:
         stmt = stmt.where(

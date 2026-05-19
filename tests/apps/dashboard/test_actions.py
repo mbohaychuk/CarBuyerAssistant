@@ -103,10 +103,10 @@ async def test_mark_toggle_off_clears_user_action(_patch_deps: AsyncSession) -> 
 @pytest.mark.asyncio
 async def test_mark_passed_then_toggle_off(_patch_deps: AsyncSession) -> None:
     """Same toggle semantics apply to Pass: click once to set
-    NOT_INTERESTED, click again with currently_active=true to clear."""
+    PASSED, click again with currently_active=true to clear."""
     session = _patch_deps
     lot = _seed_lot(session)
-    lot.user_action = UserAction.NOT_INTERESTED.value
+    lot.user_action = UserAction.PASSED.value
     await session.commit()
     lot_id = lot.id
 

@@ -5,9 +5,9 @@ assumption — same family as bid-poller and vision-batcher). Reads closed lots 
 than DISTILL_AGE_DAYS, copies relevant fields into HistoricalSale, deletes the lot
 row (cascade-deletes auction_bid_history), and exits.
 
-Watched-lot exception: lots with user_action INTERESTED or MAYBE are retained for
-KEEP_NOTIFIED_DAYS so the user can review the outcome before the row disappears.
-After that window they are distilled the same as any other closed lot.
+Watched-lot exception: lots with user_action INTERESTED/BID_PLACED/PURCHASED are
+retained for KEEP_NOTIFIED_DAYS so the user can review the outcome before the row
+disappears. After that window they are distilled the same as any other closed lot.
 
 Per-lot transaction + try/except: each lot is distilled in its own short transaction.
 One bad lot (corrupt VIN, schema validation failure, etc.) logs an error and continues
@@ -91,7 +91,7 @@ async def distill_lot(session: AsyncSession, lot: AuctionLot, auction: Auction) 
                 lot.extended_notified_at,
             )
         ),
-        was_purchased_by_us=lot.was_purchased_by_us,
+        was_purchased_by_us=(lot.user_action == UserAction.PURCHASED),
         notes=lot.notes,
         schema_version=1,
     )
@@ -113,8 +113,8 @@ async def main(now: datetime | None = None) -> None:
     keep_notified_cutoff = now - timedelta(days=KEEP_NOTIFIED_DAYS)
 
     # Short read tx: collect only IDs so the session closes before iteration.
-    # Lots within the keep window for watched (INTERESTED/MAYBE) lots are
-    # excluded here in SQL to avoid fetching rows we'll immediately skip.
+    # Lots within the keep window for watched (INTERESTED/BID_PLACED/PURCHASED)
+    # lots are excluded here in SQL to avoid fetching rows we'll immediately skip.
     async with get_session() as session:
         stmt = select(AuctionLot.id, AuctionLot.auction_id).where(
             AuctionLot.lot_status.in_(
@@ -127,7 +127,7 @@ async def main(now: datetime | None = None) -> None:
             ),
             AuctionLot.closed_at.is_not(None),
             AuctionLot.closed_at <= cutoff,
-            AuctionLot.was_purchased_by_us.is_(False),
+            AuctionLot.user_action.is_distinct_from("purchased"),
             # Keep watched lots within the retention window. The safe positive
             # form avoids NULL-IN pitfalls: include the lot if user_action is
             # NULL (unreviewed), is not a watched status, or is old enough that
@@ -135,7 +135,7 @@ async def main(now: datetime | None = None) -> None:
             # column silently drops rows where user_action IS NULL.
             or_(
                 AuctionLot.user_action.is_(None),
-                AuctionLot.user_action.not_in([UserAction.INTERESTED, UserAction.MAYBE]),
+                AuctionLot.user_action.not_in(["interested", "bid_placed", "purchased"]),
                 AuctionLot.closed_at <= keep_notified_cutoff,
             ),
         )

@@ -105,7 +105,7 @@ class LotMaybeButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        ok = await _set_user_action(self.lot_id, UserAction.MAYBE)
+        ok = await _set_user_action(self.lot_id, UserAction.INTERESTED)
         msg = (
             f"Marked lot {self.lot_id} as maybe."
             if ok
@@ -140,7 +140,7 @@ class LotNotInterestedButton(
 
     async def callback(self, interaction: Interaction) -> Any:
         await interaction.response.defer(ephemeral=True)
-        ok = await _set_user_action(self.lot_id, UserAction.NOT_INTERESTED)
+        ok = await _set_user_action(self.lot_id, UserAction.PASSED)
         msg = (
             f"Marked lot {self.lot_id} as not interested."
             if ok

@@ -23,26 +23,7 @@ router = APIRouter()
 log = get_logger("dashboard.actions")
 
 
-# The 4-state workflow (interested → bid_placed → purchased → passed) is
-# in flight as a separate migration. Until those values land in the
-# UserAction enum, accept the new names alongside the existing 3-value
-# set so the redesigned LotCard's action buttons can post forward-looking
-# state names without breaking. Map "passed" to the existing
-# "not_interested" value; "bid_placed" / "purchased" alias to
-# "interested" in the DB (the workflow migration replaces this with
-# distinct enum values).
-_ACCEPTED_ACTIONS = frozenset({
-    "interested", "maybe", "not_interested",
-    "bid_placed", "purchased", "passed",
-})
-
-
-def _to_enum_value(action: str) -> str:
-    if action == "passed":
-        return UserAction.NOT_INTERESTED.value
-    if action in {"bid_placed", "purchased"}:
-        return UserAction.INTERESTED.value  # transitional alias
-    return UserAction(action).value
+_ACCEPTED_ACTIONS = frozenset({"interested", "bid_placed", "purchased", "passed"})
 
 
 @router.post("/lots/{lot_id}/mark", response_model=None)
@@ -73,8 +54,7 @@ async def mark_lot(
         lot.user_action = None
         effective_state: str | None = None
     else:
-        db_value = _to_enum_value(action)
-        lot.user_action = db_value
+        lot.user_action = UserAction(action)
         effective_state = action
     await session.commit()
     await session.refresh(lot)
@@ -86,12 +66,6 @@ async def mark_lot(
     if not request.headers.get("HX-Request"):
         return Response(status_code=204)
 
-    # The forward-looking action name (e.g. "bid_placed") survives in the
-    # rendered output via `effective_state`, so the button the user
-    # actually clicked appears active even though the DB stores the
-    # aliased value. A subsequent full page load will revert to the
-    # stored value — known transitional limitation until the workflow
-    # migration ships, documented in [[dashboard-redesign-direction-a]].
     # On a toggle-off, effective_state is None so no button renders active.
     hx_target = request.headers.get("HX-Target", "") or ""
     is_button_fragment_target = (

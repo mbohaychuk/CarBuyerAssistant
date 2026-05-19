@@ -14,9 +14,12 @@ from carbuyer.db.models import Auction, AuctionLot
 
 router = APIRouter()
 
-_VALID_TIERS: frozenset[str] = frozenset(
-    {UserAction.INTERESTED.value, UserAction.MAYBE.value},
-)
+_VALID_TIERS: frozenset[str] = frozenset({
+    UserAction.INTERESTED.value,
+    UserAction.BID_PLACED.value,
+    UserAction.PURCHASED.value,
+    UserAction.PASSED.value,
+})
 _LIMIT = 100
 
 

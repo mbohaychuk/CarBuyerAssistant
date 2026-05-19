@@ -213,7 +213,7 @@ async def test_feed_excludes_not_interested(_patch_deps: AsyncSession) -> None:
     _seed_lot(session, a, source_lot_id="KEEP")
     _seed_lot(
         session, a, source_lot_id="DROP",
-        user_action=UserAction.NOT_INTERESTED.value,
+        user_action=UserAction.PASSED.value,
     )
     await session.commit()
 
@@ -231,7 +231,7 @@ async def test_feed_includes_not_interested_when_disabled(_patch_deps: AsyncSess
     a = _seed_auction(session, source_id="A1", province="AB")
     _seed_lot(
         session, a, source_lot_id="DROP",
-        user_action=UserAction.NOT_INTERESTED.value,
+        user_action=UserAction.PASSED.value,
     )
     await session.commit()
 
