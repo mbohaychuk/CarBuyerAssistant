@@ -234,6 +234,7 @@
 @import "./components/htmx-states.css";
 @import "./components/filter-bar.css";
 @import "./components/lot-detail.css";
+@import "./components/today.css";
 
 /* Legacy classes from the original 13-line app.css — kept for pages that
  * haven't been migrated to the component vocabulary. Each subsequent

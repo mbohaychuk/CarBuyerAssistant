@@ -1,0 +1,54 @@
+{# Today-page specific macros. Kept out of _macros.html because they're
+   only used on one route and the imports there are already large. #}
+
+{% from "_macros.html" import money, countdown_chip, deal_bucket %}
+
+{# Compact row variant of a lot card. Used in alert lists and closing
+   buckets where density matters. Single line on desktop, two on phone.
+
+   `item.lot` and `item.auction` are required. Optional `item.reason`
+   tag prefixes the row in the alerts panel ("New", "Bid moved",
+   "Showstopper"). #}
+{% macro lot_row(item, dense=false) -%}
+{%- set lot = item.lot -%}
+{%- set auction = item.auction -%}
+{%- set ymm_parts = [lot.year, lot.make, lot.model, lot.trim] | select | list -%}
+{%- set heading = (ymm_parts | join(' ')) or lot.title or ('Lot #' ~ lot.id) -%}
+<a class="today-row{% if dense %} today-row--dense{% endif %}"
+   data-deal="{{ deal_bucket(lot.price_deal_score) }}"
+   data-state="{{ lot.user_action or '' }}"
+   href="/lots/{{ lot.id }}">
+  {%- if item.reason %}<span class="today-row__reason" data-reason="{{ item.reason }}">{{ item.reason | replace('_', ' ') }}</span>{% endif -%}
+  <span class="today-row__title">{{ heading }}</span>
+  <span class="today-row__meta">
+    {{ auction.pickup_city or '?' }}, {{ auction.pickup_province or '?' }}
+    {%- if lot.mileage_km %} · <span class="t-num">{{ '{:,}'.format(lot.mileage_km) }} km</span>{% endif %}
+  </span>
+  <span class="today-row__price">{{ money(lot.current_high_bid_cad) }}</span>
+  {%- if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+  <span class="today-row__deal">▼{{ '%.0f' | format(lot.price_deal_score * 100) }}%</span>
+  {%- else %}<span></span>{% endif %}
+  <span class="today-row__time">{{ countdown_chip(item.effective_end if item.effective_end is defined else (lot.scheduled_end_at or auction.scheduled_end_at)) }}</span>
+</a>
+{%- endmacro %}
+
+{# One closing-time bucket section. Renders a header (label + count) and
+   a list of compact rows. dense=true tightens line-height for the Now /
+   Next 2h buckets where the user is scanning urgency. #}
+{% macro bucket_section(items, label, density='normal', empty_hint=None) -%}
+<section class="today-bucket" data-density="{{ density }}">
+  <header class="today-bucket__head">
+    <h2>{{ label }}</h2>
+    <span class="today-bucket__count">{{ items | length }}</span>
+  </header>
+  {%- if items %}
+  <ol class="today-bucket__list">
+    {%- for item in items %}
+    <li>{{ lot_row(item, dense=(density == 'dense')) }}</li>
+    {%- endfor %}
+  </ol>
+  {%- else %}
+  <p class="today-bucket__empty">{{ empty_hint or 'Nothing in this window.' }}</p>
+  {%- endif %}
+</section>
+{%- endmacro %}
