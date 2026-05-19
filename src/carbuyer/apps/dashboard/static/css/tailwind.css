@@ -1,0 +1,235 @@
+/* Tailwind input file — compiles to app.css via `make css`.
+ *
+ * The @theme block holds every design token from the previous
+ * tokens.css; Tailwind v4 picks these up as the source for generated
+ * utility classes (--color-good → bg-good / text-good, --spacing-3 →
+ * p-3, etc).
+ *
+ * The :root bridge keeps the old token names (--space-3, --fs-base,
+ * --gray-50) valid so existing component CSS files don't need to
+ * change as part of this PR. They're deleted incrementally as each
+ * component migrates to utility classes.
+ */
+
+@import "tailwindcss";
+
+@source "../../templates/**/*.html";
+
+@theme {
+  /* ── Colors — primitive scales ───────────────────────────────────── */
+  --color-gray-0:   #ffffff;
+  --color-gray-50:  #fafaf9;
+  --color-gray-100: #f4f3f0;
+  --color-gray-200: #e7e5e0;
+  --color-gray-300: #d4d2cc;
+  --color-gray-500: #8a8881;
+  --color-gray-700: #4a4945;
+  --color-gray-900: #1a1a1a;
+
+  --color-ink-900:   #0f1a24;
+  --color-amber-500: #c9881d;
+  --color-amber-100: #fdf2dc;
+  --color-red-600:   #b3261e;
+  --color-red-100:   #fbe5e3;
+  --color-green-700: #1e7a4f;
+  --color-green-100: #dff1e6;
+  --color-blue-600:  #1f5fa6;
+  --color-blue-100:  #dfeaf7;
+
+  /* ── Colors — semantic aliases ──────────────────────────────────── */
+  --color-bg:            var(--color-gray-50);
+  --color-surface:       var(--color-gray-0);
+  --color-surface-sunk:  var(--color-gray-100);
+  --color-border:        var(--color-gray-200);
+  --color-border-strong: var(--color-gray-300);
+
+  --color-text:          var(--color-gray-900);
+  --color-text-muted:    var(--color-gray-500);
+  --color-text-inverse:  var(--color-gray-50);
+
+  --color-good:    var(--color-green-700);
+  --color-good-bg: var(--color-green-100);
+  --color-warn:    var(--color-amber-500);
+  --color-warn-bg: var(--color-amber-100);
+  --color-bad:     var(--color-red-600);
+  --color-bad-bg:  var(--color-red-100);
+  --color-info:    var(--color-blue-600);
+  --color-info-bg: var(--color-blue-100);
+
+  /* Urgency ramp — low > 24h, med 2-24h, high < 2h, now < 15m */
+  --color-urgency-low:  var(--color-gray-500);
+  --color-urgency-med:  var(--color-amber-500);
+  --color-urgency-high: var(--color-red-600);
+  --color-urgency-now:  #7a0f0a;
+
+  /* Deal score ramp — 5 buckets, applied as left-border color on lot card */
+  --color-deal-0: var(--color-gray-300);
+  --color-deal-1: #b8c8b0;
+  --color-deal-2: #88b079;
+  --color-deal-3: #4a8a3a;
+  --color-deal-4: var(--color-green-700);
+
+  /* ── Spacing — 4pt scale ────────────────────────────────────────── */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-5: 24px;
+  --spacing-6: 32px;
+  --spacing-7: 48px;
+  --spacing-8: 64px;
+
+  /* ── Radii ──────────────────────────────────────────────────────── */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   10px;
+  --radius-pill: 999px;
+
+  /* ── Shadows — restrained, paper-y ──────────────────────────────── */
+  --shadow-sm:  0 1px 0 rgba(15, 26, 36, 0.04), 0 1px 2px rgba(15, 26, 36, 0.06);
+  --shadow-md:  0 2px 4px rgba(15, 26, 36, 0.06), 0 4px 12px rgba(15, 26, 36, 0.08);
+  --shadow-pop: 0 8px 24px rgba(15, 26, 36, 0.14);
+
+  /* ── Typography ─────────────────────────────────────────────────── */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --text-xs:   12px;
+  --text-sm:   13px;
+  --text-base: 15px;
+  --text-md:   17px;
+  --text-lg:   22px;
+  --text-xl:   28px;
+
+  --font-weight-reg:  400;
+  --font-weight-med:  500;
+  --font-weight-sbd:  600;
+  --font-weight-bold: 700;
+
+  /* ── Layout ─────────────────────────────────────────────────────── */
+  --container-max:    1280px;
+  --container-narrow: 880px;
+  --topnav-h:         52px;
+  --tap-target:       44px;
+}
+
+/* Bridge: old token names → new Tailwind-prefixed names.
+ *
+ * The previously hand-authored component CSS files reference vars like
+ * --space-3, --fs-base, --fw-sbd, --gray-50. Tailwind's @theme expects
+ * --spacing-3, --text-base, --font-weight-sbd, --color-gray-50 to wire
+ * utility classes (p-3, text-base, font-sbd, bg-gray-50). This block
+ * makes the old names valid as plain CSS custom properties, scoped to
+ * the same :root, so existing component CSS works unchanged.
+ *
+ * Each component migrating to utility classes can drop its dependency
+ * on these aliases; once nothing references them, the block goes too. */
+:root {
+  /* Spacing */
+  --space-1: var(--spacing-1);
+  --space-2: var(--spacing-2);
+  --space-3: var(--spacing-3);
+  --space-4: var(--spacing-4);
+  --space-5: var(--spacing-5);
+  --space-6: var(--spacing-6);
+  --space-7: var(--spacing-7);
+  --space-8: var(--spacing-8);
+
+  /* Type sizes */
+  --fs-xs:   var(--text-xs);
+  --fs-sm:   var(--text-sm);
+  --fs-base: var(--text-base);
+  --fs-md:   var(--text-md);
+  --fs-lg:   var(--text-lg);
+  --fs-xl:   var(--text-xl);
+  --lh-tight: 1.2;
+  --lh-base:  1.45;
+
+  /* Font weights */
+  --fw-reg:  var(--font-weight-reg);
+  --fw-med:  var(--font-weight-med);
+  --fw-sbd:  var(--font-weight-sbd);
+  --fw-bold: var(--font-weight-bold);
+
+  /* Old unprefixed gray-* tokens used by component CSS */
+  --gray-0:   var(--color-gray-0);
+  --gray-50:  var(--color-gray-50);
+  --gray-100: var(--color-gray-100);
+  --gray-200: var(--color-gray-200);
+  --gray-300: var(--color-gray-300);
+  --gray-500: var(--color-gray-500);
+  --gray-700: var(--color-gray-700);
+  --gray-900: var(--color-gray-900);
+
+  /* Old --ink-900 alias */
+  --ink-900: var(--color-ink-900);
+
+  /* Old amber/red/green/blue without --color- prefix */
+  --amber-100: var(--color-amber-100);
+  --amber-500: var(--color-amber-500);
+  --red-100:   var(--color-red-100);
+  --red-600:   var(--color-red-600);
+  --green-100: var(--color-green-100);
+  --green-700: var(--color-green-700);
+  --blue-100:  var(--color-blue-100);
+  --blue-600:  var(--color-blue-600);
+
+  /* Urgency + deal aliases */
+  --urgency-low:  var(--color-urgency-low);
+  --urgency-med:  var(--color-urgency-med);
+  --urgency-high: var(--color-urgency-high);
+  --urgency-now:  var(--color-urgency-now);
+
+  --deal-0: var(--color-deal-0);
+  --deal-1: var(--color-deal-1);
+  --deal-2: var(--color-deal-2);
+  --deal-3: var(--color-deal-3);
+  --deal-4: var(--color-deal-4);
+}
+
+/* Existing hand-authored component CSS. Tailwind compiles these into the
+ * single output file; relative paths resolve from this file's location. */
+@import "./base.css";
+@import "./utilities.css";
+@import "./layout.css";
+@import "./components/lot-card.css";
+@import "./components/countdown.css";
+@import "./components/flag.css";
+@import "./components/money.css";
+@import "./components/range-bar.css";
+@import "./components/photo-strip.css";
+@import "./components/htmx-states.css";
+
+/* Legacy classes from the original 13-line app.css — kept for pages that
+ * haven't been migrated to the component vocabulary. Each subsequent
+ * template migration replaces a legacy class (.card → structured
+ * component, .tag → .flag, etc.) and a corresponding block here gets
+ * deleted once unused. */
+main {
+  display: block;
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-4);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.muted { color: var(--color-text-muted); }
+
+.tag {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  background: var(--color-surface-sunk);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  margin-right: var(--space-1);
+  color: var(--color-text);
+}
+.tag.rare { background: var(--amber-100); color: var(--color-warn); }
+.tag.deal { background: var(--color-good-bg); color: var(--color-good); }

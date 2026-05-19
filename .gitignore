@@ -62,3 +62,12 @@ Thumbs.db
 
 # Local cache from playwright MCP browser sessions
 .playwright-mcp/
+
+# Tailwind standalone CLI binary — downloaded on demand by
+# scripts/install-tailwind.sh; we commit the script, not the binary.
+/bin/
+
+# Tailwind compiled output — generated from tailwind.css by `make css`.
+# Developers run `make css` once after `uv sync`; CI/deploy runs it
+# before starting the dashboard service.
+/src/carbuyer/apps/dashboard/static/css/app.css
