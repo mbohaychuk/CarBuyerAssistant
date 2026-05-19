@@ -1,0 +1,101 @@
+/* Layout primitives — Container, Stack, Cluster, Grid.
+ *
+ * Compose these to build pages. Avoid per-page custom layout; if a layout
+ * doesn't fit one of these, prefer adding a new primitive over inline CSS.
+ */
+
+.container {
+  max-width: var(--container-max);
+  margin-inline: auto;
+  padding: var(--space-4) var(--container-pad);
+}
+.container--narrow { max-width: var(--container-narrow); }
+
+/* Vertical rhythm — children get a top margin equal to --stack-gap. */
+.stack > * + * { margin-top: var(--stack-gap, var(--space-3)); }
+.stack--xs { --stack-gap: var(--space-1); }
+.stack--sm { --stack-gap: var(--space-2); }
+.stack--md { --stack-gap: var(--space-3); }
+.stack--lg { --stack-gap: var(--space-5); }
+.stack--xl { --stack-gap: var(--space-6); }
+
+/* Horizontal flex group with wrap. Default alignment: vertical centre. */
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--cluster-gap, var(--space-2));
+  align-items: center;
+}
+.cluster--tight { --cluster-gap: var(--space-1); }
+.cluster--sm    { --cluster-gap: var(--space-2); }
+.cluster--md    { --cluster-gap: var(--space-3); }
+.cluster--lg    { --cluster-gap: var(--space-4); }
+.cluster--between { justify-content: space-between; }
+.cluster--baseline { align-items: baseline; }
+
+/* Card grid — auto-fits 1 column on phone, 2 on tablet, 3 on desktop. */
+.grid-cards {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: 1fr;
+}
+@media (min-width: 720px)  { .grid-cards { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1080px) { .grid-cards { grid-template-columns: repeat(3, 1fr); } }
+
+/* Topnav — Auction House Ledger: ink bar with Fraunces brand mark on
+ * the left, segmented links to the right. Horizontally scrolls on phones
+ * rather than wrapping or hiding in a hamburger. */
+.topnav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--color-ink);
+  padding: 0 var(--space-3);
+  height: var(--topnav-h);
+  overflow-x: auto;
+  scrollbar-width: none;          /* Firefox */
+  border-bottom: 1px solid rgba(216, 205, 179, 0.18);
+}
+.topnav::-webkit-scrollbar { display: none; }
+
+.topnav__brand {
+  font-family: var(--font-display);
+  font-weight: var(--fw-sbd);
+  font-size: 15px;
+  letter-spacing: -0.015em;
+  color: var(--color-paper);
+  white-space: nowrap;
+  padding-right: var(--space-3);
+  margin-right: var(--space-2);
+  border-right: 1px solid rgba(216, 205, 179, 0.18);
+  flex-shrink: 0;
+}
+.topnav__brand span {
+  color: var(--color-rule);
+  font-weight: var(--fw-reg);
+}
+
+.topnav a {
+  color: var(--color-rule);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  text-decoration: none;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-med);
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
+  transition: color 120ms ease, background 120ms ease;
+}
+.topnav a:hover {
+  background: rgba(216, 205, 179, 0.08);
+  color: var(--color-paper);
+  text-decoration: none;
+}
+.topnav a[aria-current="page"] {
+  background: rgba(216, 205, 179, 0.16);
+  color: var(--color-paper);
+}

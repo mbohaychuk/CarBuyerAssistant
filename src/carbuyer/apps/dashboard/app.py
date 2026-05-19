@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,12 @@ def _local_dt(dt: datetime | None, fmt: str = "%b %d %H:%M") -> str:
 
 templates.env.filters["local_dt"] = _local_dt
 
+# now_utc() is exposed as a global Jinja callable so macros that need a
+# "right now" anchor (e.g. the countdown chip) can compute relative time
+# without each router having to thread one through their context. Routers
+# may still pass an explicit `now` kwarg for deterministic tests.
+templates.env.globals["now_utc"] = lambda: datetime.now(UTC)
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="CarBuyer Dashboard")
@@ -39,6 +45,8 @@ def create_app() -> FastAPI:
     # them creates a circular import. Tied to create_app's lifecycle anyway.
     from carbuyer.apps.dashboard.routers import (  # noqa: PLC0415
         actions,
+        admin,
+        auctions,
         closing,
         comps,
         feed,
@@ -51,7 +59,7 @@ def create_app() -> FastAPI:
     )
     for router in (
         feed, closing, watched, lots, comps, sold, purchases, health, actions,
-        needs_plugin,
+        needs_plugin, auctions, admin,
     ):
         app.include_router(router.router)
     return app

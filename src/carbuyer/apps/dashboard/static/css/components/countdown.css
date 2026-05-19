@@ -1,0 +1,73 @@
+/* CountdownChip — Auction House Ledger.
+ *
+ * Monospaced (JetBrains Mono), color-only urgency at low/med tiers (no
+ * pill background — keeps the card calm during normal browsing), pill
+ * background only kicks in at high and now tiers when the chip needs
+ * to assert itself. Pure CSS; data-urgency is set server-side from
+ * minutes-to-close. Sub-minute countdowns get a real ticker in the
+ * Bid Console.
+ */
+
+.countdown {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--fw-med);
+  font-size: var(--fs-sm);
+  letter-spacing: -0.02em;
+  color: var(--color-urgency-low);
+  white-space: nowrap;
+}
+
+.countdown[data-urgency="med"] {
+  color: var(--color-urgency-med);
+}
+.countdown[data-urgency="high"] {
+  color: var(--color-urgency-high);
+  font-weight: var(--fw-sbd);
+}
+.countdown[data-urgency="now"] {
+  /* Final-15-minutes treatment: oxblood pill with paper text, gentle
+   * pulse halo. The animation pulls the eye without changing layout. */
+  color: var(--color-paper);
+  background: var(--color-urgency-now);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-weight: var(--fw-sbd);
+  animation: countdown-pulse 2s ease-in-out infinite;
+}
+.countdown[data-urgency="closed"] {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-family: var(--font-display);
+  letter-spacing: 0;
+}
+
+@keyframes countdown-pulse {
+  50% { box-shadow: 0 0 0 4px rgba(74, 10, 6, 0.22); }
+}
+
+/* Bid-velocity dot — appears inside .countdown when a bid landed in
+ * the last 10 minutes. Filled accent-color dot with a soft pulse halo.
+ * Signals "this auction is hot right now" independent of urgency tier.
+ */
+.countdown__pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin-left: 2px;
+  animation: velocity-pulse 1.8s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.countdown[data-urgency="now"] .countdown__pulse {
+  background: var(--color-paper);
+}
+@keyframes velocity-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(31, 90, 58, 0.4); }
+  50%      { box-shadow: 0 0 0 4px rgba(31, 90, 58, 0.0); }
+}

@@ -1,0 +1,44 @@
+/* HTMX interaction states — loading, swap feedback, skeletons.
+ *
+ * HTMX manages these via the htmx-request and htmx-settling classes which
+ * it toggles automatically during requests. The rules below add visual
+ * feedback so a button click is never indistinguishable from a no-op.
+ */
+
+/* Active-request indicator — applied to the element with hx-indicator. */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+/* While a request is in flight, the triggering element is half-faded and
+ * cursor-busy. Provides feedback even without an explicit indicator. */
+.htmx-request[hx-post],
+.htmx-request[hx-get],
+.htmx-request[hx-put],
+.htmx-request[hx-delete] {
+  opacity: 0.6;
+  cursor: progress;
+  pointer-events: none;
+}
+
+/* Skeleton loading — applied to a swap target marked aria-busy=true. */
+[aria-busy="true"] {
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-pulse {
+  50% { background-color: var(--color-surface-sunk); }
+}
+
+/* After a successful swap, the new content briefly tints to acknowledge
+ * the change. Use class="htmx-settling" via hx-swap or apply directly via
+ * the lot-card--flash component class for explicit feedback. */
+.htmx-settling { animation: htmx-flash 600ms ease-out; }
+@keyframes htmx-flash {
+  0%   { background: var(--color-info-bg); }
+  100% { background: transparent; }
+}

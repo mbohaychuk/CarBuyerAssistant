@@ -1,0 +1,32 @@
+/* PhotoStrip — horizontal photo carousel.
+ *
+ * Pure CSS scroll-snap, no JS. On phones the auto-column sizing means
+ * each image takes ~84% of viewport width, so you see the "next one is
+ * over there" affordance without arrow buttons. Above 720px the columns
+ * are fixed at 320px which fits 2-3 photos on screen.
+ */
+
+.photo-strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 84%;
+  gap: var(--space-2);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  padding-bottom: var(--space-2);
+  scrollbar-width: thin;
+}
+
+.photo-strip img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  scroll-snap-align: start;
+  background: var(--color-surface-sunk);
+}
+
+@media (min-width: 720px) {
+  .photo-strip { grid-auto-columns: 320px; }
+}

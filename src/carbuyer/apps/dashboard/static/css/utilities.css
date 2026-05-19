@@ -1,0 +1,27 @@
+/* Single-purpose utility classes.
+ *
+ * Used sparingly inside component templates and Jinja partials. Anything
+ * applied to more than ~5 places should probably become a component class.
+ */
+
+.t-num         { font-variant-numeric: tabular-nums; }
+.t-proportional { font-variant-numeric: proportional-nums; }
+.t-mono        { font-family: var(--font-mono); }
+.t-money       { font-variant-numeric: tabular-nums; font-weight: var(--fw-sbd); }
+.t-meta        { font-size: var(--fs-xs); color: var(--color-text-muted); }
+.t-small       { font-size: var(--fs-sm); }
+.t-muted       { color: var(--color-text-muted); }
+.t-strong      { font-weight: var(--fw-sbd); }
+.t-truncate    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
