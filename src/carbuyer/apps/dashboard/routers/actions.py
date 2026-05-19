@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
@@ -27,12 +27,22 @@ log = get_logger("dashboard.actions")
 # in flight as a separate migration. Until those values land in the
 # UserAction enum, accept the new names alongside the existing 3-value
 # set so the redesigned LotCard's action buttons can post forward-looking
-# state names without breaking. Map legacy "not_interested" form value to
-# the canonical "passed" name once the enum migrates.
+# state names without breaking. Map "passed" to the existing
+# "not_interested" value; "bid_placed" / "purchased" alias to
+# "interested" in the DB (the workflow migration replaces this with
+# distinct enum values).
 _ACCEPTED_ACTIONS = frozenset({
     "interested", "maybe", "not_interested",
     "bid_placed", "purchased", "passed",
 })
+
+
+def _to_enum_value(action: str) -> str:
+    if action == "passed":
+        return UserAction.NOT_INTERESTED.value
+    if action in {"bid_placed", "purchased"}:
+        return UserAction.INTERESTED.value  # transitional alias
+    return UserAction(action).value
 
 
 @router.post("/lots/{lot_id}/mark", response_model=None)
@@ -48,34 +58,49 @@ async def mark_lot(
     lot = await session.get(AuctionLot, lot_id)
     if lot is None:
         raise HTTPException(status_code=404)
-    # Translate forward-looking state names that aren't in the enum yet
-    # to their nearest existing-enum equivalent. Once the 4-state
-    # migration ships these become enum values directly.
-    db_value = action
-    if action == "passed":
-        db_value = UserAction.NOT_INTERESTED.value
-    elif action == "bid_placed":
-        db_value = UserAction.INTERESTED.value  # transitional alias
-    elif action == "purchased":
-        db_value = UserAction.INTERESTED.value  # transitional alias
+    db_value = _to_enum_value(action)
     lot.user_action = db_value
     await session.commit()
     await session.refresh(lot)
     log.info("lot marked", lot_id=lot_id, action=action, stored=db_value)
 
-    # HTMX caller gets the refreshed lot card HTML so the page can swap
-    # outerHTML without a full reload. The data-state attribute on the
-    # card root drives the visual state (left-border color, active
-    # button highlight). Non-HTMX callers get 204 (legacy contract for
-    # the JS-less form path).
-    if request.headers.get("HX-Request"):
-        auction = await session.get(Auction, lot.auction_id)
+    if not request.headers.get("HX-Request"):
+        return Response(status_code=204)
+
+    # The forward-looking action name (e.g. "bid_placed") survives in the
+    # rendered output via `effective_state`, so the button the user
+    # actually clicked appears active even though the DB stores the
+    # aliased value. A subsequent full page load will revert to the
+    # stored value — known transitional limitation until the workflow
+    # migration ships, documented in [[dashboard-redesign-direction-a]].
+    hx_target = request.headers.get("HX-Target", "") or ""
+    is_button_fragment_target = (
+        hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
+    )
+    if is_button_fragment_target:
+        wrapper_class = (
+            "decision-card__actions" if hx_target.endswith("-desktop")
+            else "bid-console__actions"
+        )
         return templates.TemplateResponse(
             request,
-            "partials/lot_card.html",
-            {"item": {"lot": lot, "auction": auction}},
+            "partials/action_buttons_fragment.html",
+            {
+                "lot_id": lot.id,
+                "target_id": hx_target,
+                "wrapper_class": wrapper_class,
+                "effective_state": action,
+            },
         )
-    return Response(status_code=204)
+    auction = await session.get(Auction, lot.auction_id)
+    return templates.TemplateResponse(
+        request,
+        "partials/lot_card.html",
+        {
+            "item": {"lot": lot, "auction": auction},
+            "effective_state": action,
+        },
+    )
 
 
 @router.post("/lots/{lot_id}/notes", status_code=204)

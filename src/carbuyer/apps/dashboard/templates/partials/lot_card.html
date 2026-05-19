@@ -7,10 +7,16 @@
 {% set heading = ymm.strip() or lot.title or ("Lot #" ~ lot.id) %}
 {% set photo = lot.photos[0] if lot.photos else None %}
 {% set photo_count = lot.photos|length if lot.photos else 0 %}
+{# After a workflow-state transition, the mark endpoint passes the user's
+   *clicked* action as `effective_state` so the card immediately reflects
+   intent (the post-swap re-render of a click that's been aliased into the
+   stored enum doesn't otherwise show the action button the user just
+   pressed). Defaults to the stored user_action for normal page loads. #}
+{% set card_state = effective_state if effective_state is defined else lot.user_action %}
 {# Decision-support sub-line: surface the LLM summary if it's short enough
    to read at-a-glance. Gives a "why care" cue without forcing click-through. #}
 {% set tagline = lot.summary if lot.summary and lot.summary|length < 90 else None %}
-<article id="lot-{{ lot.id }}" class="lot-card" data-deal="{{ deal_bucket(lot.price_deal_score) }}" data-state="{{ lot.user_action or '' }}">
+<article id="lot-{{ lot.id }}" class="lot-card" data-deal="{{ deal_bucket(lot.price_deal_score) }}" data-state="{{ card_state or '' }}">
   <a class="lot-card__photo" href="/lots/{{ lot.id }}" aria-label="{{ heading }}">
     {% if photo %}
       <img src="{{ photo }}" loading="lazy" alt="">
@@ -21,8 +27,8 @@
       </span>
     {% endif %}
     {% if photo_count > 1 %}<span class="lot-card__photo-count">{{ photo_count }}</span>{% endif %}
-    {% if lot.user_action %}
-      <span class="lot-card__state-dot" data-state="{{ lot.user_action }}" title="{{ lot.user_action | replace('_',' ') }}"></span>
+    {% if card_state %}
+      <span class="lot-card__state-dot" data-state="{{ card_state }}" title="{{ card_state | replace('_',' ') }}"></span>
     {% endif %}
   </a>
 
@@ -69,6 +75,6 @@
         <div class="lot-card__deal lot-card__deal--suspect" title="bid is below the comp low-end">below low</div>
       {% endif %}
     </div>
-    {{ action_buttons(lot.id, lot.user_action) }}
+    {{ action_buttons(lot.id, card_state) }}
   </aside>
 </article>
