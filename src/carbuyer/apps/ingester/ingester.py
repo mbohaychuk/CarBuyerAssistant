@@ -17,8 +17,8 @@ from collections.abc import Awaitable, Callable
 import structlog
 
 from carbuyer.db.notify import notify
-from carbuyer.db.upserts import upsert_auction, upsert_lot_with_status_cascade
 from carbuyer.db.session import get_session
+from carbuyer.db.upserts import upsert_auction, upsert_lot_with_status_cascade
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
@@ -37,7 +37,7 @@ Strategy = Callable[[], Awaitable[int]]
 # semantics change. Surfaces in AuctionLot.parser_version so stale rows
 # get re-pending'd via the content-cascade in upsert_lot_with_status_cascade.
 _HIBID_PARSER_VERSION = "hibid/v2.0-cross-auction"
-_MCDOUGALL_PARSER_VERSION = "mcdougall/v1.0-catalog-walker"
+_MCDOUGALL_PARSER_VERSION = "mcdougall/v2.0-listing-details"
 
 
 async def _ingest_one_hibid_province(source: HibidSource, province: str) -> int:

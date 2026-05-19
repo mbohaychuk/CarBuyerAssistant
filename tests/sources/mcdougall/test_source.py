@@ -73,7 +73,7 @@ def test_source_version_set() -> None:
     # Version is bumped when the discovery/fetch contract changes; checked
     # against AuctionLot.parser_version in the upsert cascade so stale rows
     # re-pend (see carbuyer.db.upserts.upsert_lot_with_status_cascade).
-    assert McDougallSource.version == "1"
+    assert McDougallSource.version == "2"
 
 
 # ── Context manager guard ────────────────────────────────────────────────────
@@ -242,13 +242,18 @@ async def test_iter_catalog_entries_walks_pagination_until_empty(
 def test_parse_lot_detail_extracts_all_fields_from_real_fixture() -> None:
     # Real fixture captured 2026-05-16: 1987 Chevrolet Monte Carlo, lot 4 of
     # the REGINA MONTHLY AG & INDUSTRIAL EQUIPMENT auction, GUID BD725BF6...
+    # This fixture uses the OLD McDougall layout (Consignor Remarks / span
+    # label structure). The parser now targets the NEW layout (#listing-details
+    # table), so mileage and description are None here — those fields are
+    # exercised by test_new_layout_* against the Focus ST fixture.
+    # Layout-independent fields (title, VIN, bid, photos, auction_guid,
+    # buyer premium) are still verified here.
     html = _load_fixture("lot_detail_monte_carlo.html")
     d = parse_lot_detail(html, lot_guid="36CEF055-34AB-477E-B0F9-80ACDA6EAA17")
 
     assert d.title == "1987 Chevrolet Monte Carlo Luxury Sport Car"
     assert d.auction_guid == "BD725BF6-AD5D-4186-A5CE-1F5B8BCF2918"
     assert d.vin == "1G1GZ11H7HP127810"
-    assert d.mileage_km == 47800  # noqa: PLR2004
     assert d.current_high_bid_cad == Decimal("5400")
     assert d.bid_count_visible == 31  # noqa: PLR2004
     assert d.scheduled_end_at is not None
@@ -258,18 +263,17 @@ def test_parse_lot_detail_extracts_all_fields_from_real_fixture() -> None:
     # assertion intentionally needs an explicit update.
     assert len(d.photos) == 84  # noqa: PLR2004
     assert all(p.startswith("https://") for p in d.photos)
-    assert d.description is not None
-    assert "350cu.i" in d.description
 
     # Buyer premium parsed from page text, not hardcoded.
     assert d.buyer_premium_pct == Decimal("0.15")
     assert d.buyer_premium_max_cad == Decimal("2000")
     assert d.buyer_premium_min_cad == Decimal("20")
 
-    # Extras: secondary fields not yet promoted to canonical RawLot columns.
+    # Extras: old layout exposed engine/transmission via <span> labels; the
+    # parser still picks these up via _text_after_label on old-layout HTML
+    # even though the new layout doesn't use span labels for these fields.
     assert d.extras.get("engine") == "5.7L V8 Gas"
     assert d.extras.get("transmission") == "Automatic"
-    assert d.extras.get("mileage_unverified") is True
 
 
 def test_parse_lot_detail_handles_multi_item_serial_number() -> None:
@@ -467,10 +471,10 @@ async def test_fetch_lot_returns_raw_lot_from_detail_page() -> None:
         )
         raw_lot = await src.fetch_lot(ref)
 
-    # Canonical fields propagated.
+    # Canonical fields propagated. This fixture is old-layout HTML so mileage
+    # and description are None (new layout tests cover those fields).
     assert raw_lot.title == "1987 Chevrolet Monte Carlo Luxury Sport Car"
     assert raw_lot.vin == "1G1GZ11H7HP127810"
-    assert raw_lot.mileage_km == 47800  # noqa: PLR2004
     assert raw_lot.current_high_bid_cad == Decimal("5400")
     assert raw_lot.bid_count_visible == 31  # noqa: PLR2004
     assert raw_lot.scheduled_end_at is not None
@@ -514,3 +518,73 @@ async def test_iter_catalog_entries_respects_max_pages_safety_cap(
         ]
     # 3 pages * 1 lot each.
     assert len(entries) == 3  # noqa: PLR2004
+
+
+# ── New layout (redesigned #listing-details, Focus ST fixture) ───────────────
+
+_FOCUS_ST_GUID = "6E167BBB-02A4-4072-85AC-998753868A13"
+
+
+def test_new_layout_title_still_parses() -> None:
+    # Regression guard: title selector (div.full-product-title h1) is
+    # layout-independent; must survive the #listing-details redesign.
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.title == "2017 Ford Focus ST Car"
+
+
+def test_new_layout_photos_still_parses() -> None:
+    # Regression guard: gallery selector (div.product-gallery a[data-fancybox])
+    # is layout-independent; must survive the #listing-details redesign.
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert len(d.photos) == 63  # noqa: PLR2004
+    assert all(p.startswith("https://") or p.startswith("/") for p in d.photos)
+
+
+def test_new_layout_mileage_parsed() -> None:
+    # Mileage is now in a plain <p> "Mileage (Showing Unverified): 113,860 km"
+    # inside the #listing-details table, not behind a <span>Mileage*:</span>.
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.mileage_km == 113860  # noqa: PLR2004
+
+
+def test_new_layout_description_contains_damage_lines() -> None:
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.description is not None
+    assert "Engine Knocks" in d.description
+    assert "Engine Exhaust Smoke is Blue" in d.description
+    assert "Check Engine Light On" in d.description
+
+
+def test_new_layout_description_contains_features() -> None:
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.description is not None
+    assert "Repo Piece" in d.description
+
+
+def test_new_layout_description_excludes_boilerplate() -> None:
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.description is not None
+    assert "All payments must be made in full" not in d.description
+    assert "no guarantee, representation, or warranty" not in d.description
+    assert "purchaser's sole responsibility" not in d.description
+
+
+def test_new_layout_vin_parsed() -> None:
+    # VIN is in <p><strong>Serial Number:</strong>1FADP3L99HL268764</p>
+    # inside the Lot Overview section — _parse_vin uses <strong>, unchanged.
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.vin == "1FADP3L99HL268764"
+
+
+def test_new_layout_pickup_location_parsed() -> None:
+    # <span>Pick up location:</span> is still present; _text_after_label works.
+    html = _load_fixture("lot_detail_focus_st_new_layout.html")
+    d = parse_lot_detail(html, lot_guid=_FOCUS_ST_GUID)
+    assert d.pickup_location == "800 North Service Road, Emerald Park, SK"

@@ -87,7 +87,7 @@ class McDougallSource(AuctionSource):
 
     name: ClassVar[str] = "mcdougall"
     # Bump when selectors or the discovery/fetch contract changes.
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
 
     @classmethod
     def parse_auction_url(cls, url: str) -> AuctionRef | None:
