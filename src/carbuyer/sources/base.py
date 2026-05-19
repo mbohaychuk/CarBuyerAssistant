@@ -53,8 +53,11 @@ class RawAuction:
 
     3. **`buyer_premium_pct` is a decimal fraction**, not a percentage.
        0.10 means 10%. If the source quotes "15%", emit `Decimal("0.15")`.
-       Leaving this `None` makes `all_in_cost` compute a 0% premium and
-       silently mis-prices every lot from this source.
+       `None` does NOT mean "no premium" — the valuator substitutes
+       `DEFAULT_BUYER_PREMIUM_PCT = Decimal("0.10")` (10%) so unattributed
+       lots still get plausibly priced. If your source's actual premium is
+       not ~10%, leaving this `None` will silently mis-price every lot;
+       emit the real value.
     """
 
     ref: AuctionRef
