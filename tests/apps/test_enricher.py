@@ -18,6 +18,7 @@ from carbuyer.apps.enricher import enricher as enricher_mod
 from carbuyer.apps.enricher.enricher import (
     SPARSE_LISTING_CONFIDENCE_THRESHOLD,
     _apply_to_lot,
+    _catchup_sweep,
     _classify_failure,
     _EnrichmentResult,
     _process_one,
@@ -648,6 +649,92 @@ async def test_process_pending_self_notifies_on_transient_leftover(
     # Self-NOTIFY on enrichment_pending so the listen loop wakes up.
     self_notifies = [n for n in notified if n[0] == "enrichment_pending"]
     assert len(self_notifies) == 1
+
+
+# ─── _catchup_sweep round trip ───
+
+
+@pytest.mark.asyncio
+async def test_catchup_sweep_repends_and_drains_stale_version_lot(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_catchup_sweep must run repend_stale_enrichment_version at startup,
+    before the pending drain. A DONE lot stamped with an old enrichment_version
+    is re-pended, then picked up by the sweep's process_pending loop and
+    re-enriched — ending DONE again, now stamped with the current version.
+    Guards against a refactor dropping or reordering the re-pend call."""
+    session = _patched_get_session
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        return None
+
+    monkeypatch.setattr(enricher_mod, "notify", fake_notify)
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.openai_concurrency", 1,
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.enrichment_batch_size", 10,
+    )
+
+    _, lot = _seed_auction_and_lot(session)
+    lot.enrichment_status = EnrichmentStatus.DONE
+    lot.enrichment_version = "v_stale"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    current_version = enricher_mod.settings.enrichment_version
+    assert lot.enrichment_version != current_version
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_enrichment())
+
+    await _catchup_sweep(provider)
+
+    await session.refresh(lot)
+    # The stale-version DONE lot was re-pended, drained by the sweep, and
+    # re-enriched: status is DONE again but now carries the current version.
+    assert lot.enrichment_status == EnrichmentStatus.DONE
+    assert lot.enrichment_version == current_version
+    assert lot.enrichment_version != "v_stale"
+    provider.describe.assert_awaited()
+    assert lot.id == lot_id
+
+
+@pytest.mark.asyncio
+async def test_catchup_sweep_leaves_current_version_done_lot_untouched(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DONE lot already stamped with the current enrichment_version must not
+    be re-pended or re-enriched by the catchup sweep — the re-pend is scoped to
+    stale versions only, so the provider is never called for it."""
+    session = _patched_get_session
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        return None
+
+    monkeypatch.setattr(enricher_mod, "notify", fake_notify)
+
+    _, lot = _seed_auction_and_lot(session)
+    lot.enrichment_status = EnrichmentStatus.DONE
+    lot.enrichment_version = enricher_mod.settings.enrichment_version
+    session.add(lot)
+    await session.flush()
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_enrichment())
+
+    await _catchup_sweep(provider)
+
+    await session.refresh(lot)
+    assert lot.enrichment_status == EnrichmentStatus.DONE
+    provider.describe.assert_not_awaited()
 
 
 # ─── main() fail-fast ───
