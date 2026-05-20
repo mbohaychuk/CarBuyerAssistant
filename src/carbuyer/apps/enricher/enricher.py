@@ -48,6 +48,7 @@ from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import (
     claim_pending_ids,
     recover_orphans,
+    repend_stale_enrichment_version,
     select_pending_ids,
 )
 from carbuyer.db.session import get_session, get_session_maker
@@ -273,6 +274,8 @@ def _apply_to_lot(
     lot.red_flags = [f.model_dump() for f in out.red_flags]
     lot.green_flags = [f.model_dump() for f in out.green_flags]
     lot.showstopper_flags = [f.model_dump() for f in out.showstopper_flags]
+    lot.llm_concerns = [c.model_dump() for c in out.concerns]
+    lot.mileage_is_verified = nv.mileage_is_verified
     lot.summary = out.summary
     lot.carfax_url = out.carfax_url or raw_carfax_url
     lot.desirable_trim_or_spec = out.rarity.desirable_trim_or_spec
@@ -426,12 +429,26 @@ async def _catchup_sweep(provider: OpenAIProvider) -> None:
 
     Phase 2 design overlay #12 + Phase 3 overlay #3: every continuous worker
     must do this before entering ``LISTEN`` to recover NOTIFYs missed during
-    downtime. Phase 13: prepend orphan recovery — flip IN_PROGRESS rows from
-    a prior crash back to PENDING so claim_pending_ids picks them up.
-    Without this, a SIGKILL between claim and write-completion strands the
-    row forever (Phase 2.5 watchdog is referenced in queue.py:64 but isn't
-    actually implemented yet).
+    downtime. Three steps run before the pending drain, in order: re-pend
+    lots whose enrichment_version is stale (a version bump re-enriches the
+    corpus); then orphan recovery — flip IN_PROGRESS rows from a prior crash
+    back to PENDING so claim_pending_ids picks them up. Without that recovery,
+    a SIGKILL between claim and write-completion strands the row forever
+    (Phase 2.5 watchdog is referenced in queue.py:64 but isn't actually
+    implemented yet).
     """
+    async with get_session() as s, s.begin():
+        repended = await repend_stale_enrichment_version(
+            s, current_version=settings.enrichment_version,
+        )
+    if repended > 0:
+        log.warning(
+            "re-pended stale-enrichment_version lots at startup",
+            count=repended,
+            current_version=settings.enrichment_version,
+        )
+    else:
+        log.info("no stale-enrichment_version lots to re-pend")
     async with get_session() as s, s.begin():
         recovered = await recover_orphans(s, status_field="enrichment_status")
     if recovered > 0:

@@ -141,6 +141,33 @@ async def recover_orphans(
     return int(getattr(result, "rowcount", 0) or 0)
 
 
+async def repend_stale_enrichment_version(
+    session: AsyncSession,
+    *,
+    current_version: str,
+) -> int:
+    """Flip DONE lots whose enrichment_version differs from the current one
+    back to PENDING and return the count.
+
+    Called from the enricher's catchup-sweep at startup so a prompt/taxonomy
+    version bump backfills the existing corpus. Scoping to DONE is mandatory:
+    FAILED lots never get enrichment_version stamped (it is written only on
+    the success path), so an unscoped re-pend would retry every FAILED lot on
+    every startup forever. The operation is idempotent — a re-enriched lot is
+    stamped with current_version and no longer matches.
+    """
+    stmt = (
+        update(AuctionLot)
+        .where(
+            AuctionLot.enrichment_status == EnrichmentStatus.DONE,
+            AuctionLot.enrichment_version.is_distinct_from(current_version),
+        )
+        .values(enrichment_status=EnrichmentStatus.PENDING)
+    )
+    result = await session.execute(stmt)
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 async def select_pending_ids(
     session: AsyncSession,
     *,

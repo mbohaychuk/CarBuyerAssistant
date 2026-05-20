@@ -69,6 +69,183 @@ async def test_lot_detail_renders(_patch_deps: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lot_detail_renders_flag_evidence(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.showstopper_flags = [
+        {"flag": "frame_rust", "evidence": "perforated frame rail near cab mount"},
+    ]
+    lot.red_flags = [
+        {"flag": "engine_light", "evidence": "check-engine light on per listing", "weight": 3},
+    ]
+    lot.green_flags = [
+        {"flag": "service_records", "evidence": "binder of receipts included", "weight": 2},
+    ]
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "perforated frame rail near cab mount" in r.text
+    assert "check-engine light on per listing" in r.text
+    assert "binder of receipts included" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_renders_listing_description(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.description = "Runs and drives. Some rust on the box.\nSold as-is."
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Listing description" in r.text
+    assert "Runs and drives. Some rust on the box." in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_description_section_when_absent(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Listing description" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_sparse_condition_qualifier(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.condition_categorical = "decent"
+    lot.condition_inferred_from_sparse_listing = True
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "inferred from a sparse listing" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_sparse_qualifier_for_confident_condition(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.condition_categorical = "decent"
+    lot.condition_inferred_from_sparse_listing = False
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "inferred from a sparse listing" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_renders_analyst_concerns(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.llm_concerns = [
+        {"text": "blue smoke on cold start suggests worn valve seals", "severity": "serious"},
+        {"text": "aftermarket exhaust may mask a deeper issue", "severity": "minor"},
+    ]
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Analyst notes" in r.text
+    assert "blue smoke on cold start suggests worn valve seals" in r.text
+    assert "aftermarket exhaust may mask a deeper issue" in r.text
+    assert "concern--serious" in r.text
+    assert "concern--minor" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_analyst_notes_when_no_concerns(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Analyst notes" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_unverified_mileage_marker(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.mileage_is_verified = False
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "(unverified)" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_unverified_marker_when_verified(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    lot.mileage_is_verified = True
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "(unverified)" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_no_unverified_marker_when_provenance_unknown(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "(unverified)" not in r.text
+
+
+@pytest.mark.asyncio
 async def test_lot_detail_404_when_missing(_patch_deps: AsyncSession) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

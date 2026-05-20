@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from carbuyer.llm.schemas import (
     CarfaxFindings,
+    Concern,
     EnrichmentOutput,
     FlagInstance,
     NormalizedVehicle,
@@ -18,6 +19,7 @@ def _valid_payload() -> dict:
             "year": 2010, "make": "Ford", "model": "F-150",
             "trim": None, "engine": "5.4L V8", "transmission": "automatic",
             "drivetrain": "4wd", "mileage_km": 250000, "vin": None,
+            "mileage_is_verified": None,
         },
         "title_status": "NORMAL",
         "condition_categorical": "decent",
@@ -25,6 +27,7 @@ def _valid_payload() -> dict:
         "red_flags": [],
         "green_flags": [],
         "showstopper_flags": [],
+        "concerns": [],
         "carfax_url": None,
         "summary": "an older F-150",
         "description_quality": "adequate",
@@ -80,9 +83,40 @@ def test_normalized_vehicle_transmission_unknown_allowed() -> None:
     nv = NormalizedVehicle(
         year=None, make=None, model=None, trim=None, engine=None,
         transmission="unknown", drivetrain="unknown",
-        mileage_km=None, vin=None,
+        mileage_km=None, vin=None, mileage_is_verified=None,
     )
     assert nv.transmission == "unknown"
+
+
+def test_concern_validates_text_and_severity() -> None:
+    c = Concern(text="blue smoke on cold start", severity="serious")
+    assert c.severity == "serious"
+
+
+def test_concern_rejects_unknown_severity() -> None:
+    with pytest.raises(ValidationError):
+        Concern(text="something", severity="catastrophic")
+
+
+def test_concern_forbids_extra_keys() -> None:
+    with pytest.raises(ValidationError):
+        Concern.model_validate(
+            {"text": "x", "severity": "minor", "weight": 3}
+        )
+
+
+def test_enrichment_output_requires_concerns() -> None:
+    payload = _valid_payload()
+    del payload["concerns"]
+    with pytest.raises(ValidationError):
+        EnrichmentOutput.model_validate(payload)
+
+
+def test_normalized_vehicle_requires_mileage_is_verified() -> None:
+    payload = _valid_payload()
+    del payload["normalized_vehicle"]["mileage_is_verified"]
+    with pytest.raises(ValidationError):
+        EnrichmentOutput.model_validate(payload)
 
 
 def test_carfax_findings_round_trip() -> None:
