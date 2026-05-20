@@ -382,3 +382,28 @@ def test_flag_score_synthetic_vision_flag_carries_minus_two() -> None:
     _SYNTHETIC_FLAG_WEIGHTS so flag_score still recognizes it."""
     red = [{"flag": "description_oversells_condition", "evidence": "x", "weight": 999}]
     assert flag_score(red, []) == -2  # noqa: PLR2004
+
+
+def test_flag_score_unaffected_by_concerns() -> None:
+    """Advisory `concerns` are explicitly an advisory channel — they never
+    move rankings. flag_score takes only taxonomy flags; a lot carrying
+    populated llm_concerns must score identically to one without. Locking
+    that design decision so a future refactor can't quietly fold concerns
+    into the score."""
+    red = [{"flag": "rust_mentioned", "weight": -1}]
+    green = [{"flag": "service_records", "weight": 2}]
+    severe_concerns = [
+        {"text": "blue smoke on cold start → worn valve seals", "severity": "moderate"},
+        {"text": "seller is a dealer, not the owner", "severity": "minor"},
+        {"text": "no test-drive offered", "severity": "moderate"},
+    ]
+
+    without_concerns = flag_score(red, green)
+    # flag_score has no `concerns` parameter — concerns cannot reach it. The
+    # only inputs are red, green, and description_quality, so an
+    # otherwise-identical call yields the identical score regardless of how
+    # many concerns the enricher attached to the lot row.
+    with_concerns = flag_score(red, green)
+    assert with_concerns == without_concerns
+    assert "concerns" not in flag_score.__code__.co_varnames
+    assert severe_concerns
