@@ -14,7 +14,7 @@
         <span class="lot-detail__sep">·</span>
         <span>{{ auction.auctioneer_name or auction.source }}</span>
         {% if lot.vin %}<span class="lot-detail__sep">·</span><span class="t-mono">VIN {{ lot.vin }}</span>{% endif %}
-        {% if lot.mileage_km %}<span class="lot-detail__sep">·</span><span class="t-mono">{{ "{:,}".format(lot.mileage_km) }} km</span>{% endif %}
+        {% if lot.mileage_km %}<span class="lot-detail__sep">·</span><span class="t-mono">{{ "{:,}".format(lot.mileage_km) }} km</span>{% if lot.mileage_is_verified == False %} <span class="t-meta">(unverified)</span>{% endif %}{% endif %}
       </p>
     </div>
     <a class="lot-detail__source" href="{{ lot.url }}" target="_blank" rel="noopener">View at {{ auction.source }} ↗</a>
@@ -47,26 +47,43 @@
         </section>
       {% endif %}
 
+      {# Raw listing description as scraped from the source #}
+      {% if lot.description %}
+        <section class="lot-detail__section">
+          <h2>Listing description</h2>
+          <p class="lot-detail__description">{{ lot.description }}</p>
+        </section>
+      {% endif %}
+
       {# Condition signals — flags grouped #}
-      {% if lot.showstopper_flags or lot.red_flags or lot.green_flags %}
+      {% if lot.showstopper_flags or lot.red_flags or lot.green_flags or lot.llm_concerns %}
         <section class="lot-detail__section">
           <h2>Condition signals</h2>
           {% if lot.showstopper_flags %}
             <div class="lot-detail__flagrow lot-detail__flagrow--stop">
               <h3>Showstoppers</h3>
-              <ul>{% for f in lot.showstopper_flags %}<li>{{ flag_chip(f, 'stop') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+              <ul>{% for f in lot.showstopper_flags %}<li>{{ flag_chip(f, 'stop') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.red_flags %}
             <div class="lot-detail__flagrow">
               <h3>Concerns</h3>
-              <ul>{% for f in lot.red_flags %}<li>{{ flag_chip(f, 'bad') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+              <ul>{% for f in lot.red_flags %}<li>{{ flag_chip(f, 'bad') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.green_flags %}
             <div class="lot-detail__flagrow">
               <h3>Strengths</h3>
-              <ul>{% for f in lot.green_flags %}<li>{{ flag_chip(f, 'good') }} <span class="t-meta">{{ f.description }}</span></li>{% endfor %}</ul>
+              <ul>{% for f in lot.green_flags %}<li>{{ flag_chip(f, 'good') }} <span class="t-meta">{{ f.evidence }}</span></li>{% endfor %}</ul>
+            </div>
+          {% endif %}
+          {% if lot.llm_concerns %}
+            <div class="lot-detail__flagrow">
+              <h3>Analyst notes</h3>
+              <ul>{% for c in lot.llm_concerns %}
+                <li><span class="concern concern--{{ c.severity }}">{{ c.severity }}</span>
+                    <span class="t-meta">{{ c.text }}</span></li>
+              {% endfor %}</ul>
             </div>
           {% endif %}
           {% if lot.vision_contradictions %}
@@ -87,7 +104,7 @@
           {% if lot.drivetrain %}<div><dt>Drivetrain</dt><dd>{{ lot.drivetrain }}</dd></div>{% endif %}
           {% if lot.title_status %}<div><dt>Title</dt><dd>{{ lot.title_status }}</dd></div>{% endif %}
           {% if lot.province_of_origin %}<div><dt>Origin</dt><dd>{{ lot.province_of_origin }}</dd></div>{% endif %}
-          {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}</dd></div>{% endif %}
+          {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}{% if lot.condition_inferred_from_sparse_listing %} <span class="t-meta">— inferred from a sparse listing</span>{% endif %}</dd></div>{% endif %}
           {% if auction.pickup_window_text %}<div><dt>Pickup</dt><dd>{{ auction.pickup_window_text }}</dd></div>{% endif %}
           {% if auction.terms_text %}<div><dt>Terms</dt><dd class="t-meta">{{ auction.terms_text }}</dd></div>{% endif %}
         </dl>

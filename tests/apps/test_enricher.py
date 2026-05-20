@@ -18,6 +18,7 @@ from carbuyer.apps.enricher import enricher as enricher_mod
 from carbuyer.apps.enricher.enricher import (
     SPARSE_LISTING_CONFIDENCE_THRESHOLD,
     _apply_to_lot,
+    _catchup_sweep,
     _classify_failure,
     _EnrichmentResult,
     _process_one,
@@ -28,6 +29,7 @@ from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.llm.schemas import (
     CarfaxFindings,
+    Concern,
     EnrichmentOutput,
     FlagInstance,
     NormalizedVehicle,
@@ -47,13 +49,15 @@ def _enrichment(
     classic: bool = False,
     summary: str = "ok",
     carfax_url: str | None = None,
+    concerns: list[Concern] | None = None,
+    mileage_is_verified: bool | None = None,
 ) -> EnrichmentOutput:
     return EnrichmentOutput(
         normalized_vehicle=NormalizedVehicle(
             year=2010, make="Ford", model="F-150", trim=None,
             engine="5.4L", transmission=transmission,  # type: ignore[arg-type]
             drivetrain=drivetrain,  # type: ignore[arg-type]
-            mileage_km=200000, vin=None,
+            mileage_km=200000, mileage_is_verified=mileage_is_verified, vin=None,
         ),
         title_status="NORMAL",
         condition_categorical=condition,  # type: ignore[arg-type]
@@ -61,6 +65,7 @@ def _enrichment(
         red_flags=red_flags or [],
         green_flags=[],
         showstopper_flags=[],
+        concerns=concerns or [],
         carfax_url=carfax_url,
         summary=summary,
         description_quality=description_quality,  # type: ignore[arg-type]
@@ -128,7 +133,43 @@ async def test_apply_to_lot_writes_all_enrichment_fields(
     assert lot.condition_inferred_from_sparse_listing is False
     assert len(lot.red_flags) == 1
     assert lot.carfax_url == "https://www.carfax.ca/vhr/abc"
-    assert lot.enrichment_version == "v1"
+    assert lot.enrichment_version == "v2"
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_writes_concerns_and_mileage_provenance(
+    session: AsyncSession,
+) -> None:
+    """Advisory concerns and mileage-verification provenance are persisted
+    onto the lot row alongside the taxonomy flags."""
+    _, lot = _seed_auction_and_lot(session)
+    session.add(lot)
+    await session.flush()
+
+    result = _EnrichmentResult(
+        output=_enrichment(
+            concerns=[
+                Concern(
+                    text="blue smoke on cold start + 240k km → worn valve seals",
+                    severity="moderate",
+                ),
+                Concern(text="seller is a dealer, not the owner", severity="minor"),
+            ],
+            mileage_is_verified=False,
+        ),
+        carfax_findings=None,
+    )
+    _apply_to_lot(lot, result, raw_carfax_url=None)
+    await session.flush()
+
+    assert lot.llm_concerns == [
+        {
+            "text": "blue smoke on cold start + 240k km → worn valve seals",
+            "severity": "moderate",
+        },
+        {"text": "seller is a dealer, not the owner", "severity": "minor"},
+    ]
+    assert lot.mileage_is_verified is False
 
 
 @pytest.mark.asyncio
@@ -608,6 +649,92 @@ async def test_process_pending_self_notifies_on_transient_leftover(
     # Self-NOTIFY on enrichment_pending so the listen loop wakes up.
     self_notifies = [n for n in notified if n[0] == "enrichment_pending"]
     assert len(self_notifies) == 1
+
+
+# ─── _catchup_sweep round trip ───
+
+
+@pytest.mark.asyncio
+async def test_catchup_sweep_repends_and_drains_stale_version_lot(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_catchup_sweep must run repend_stale_enrichment_version at startup,
+    before the pending drain. A DONE lot stamped with an old enrichment_version
+    is re-pended, then picked up by the sweep's process_pending loop and
+    re-enriched — ending DONE again, now stamped with the current version.
+    Guards against a refactor dropping or reordering the re-pend call."""
+    session = _patched_get_session
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        return None
+
+    monkeypatch.setattr(enricher_mod, "notify", fake_notify)
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.openai_concurrency", 1,
+    )
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.enrichment_batch_size", 10,
+    )
+
+    _, lot = _seed_auction_and_lot(session)
+    lot.enrichment_status = EnrichmentStatus.DONE
+    lot.enrichment_version = "v_stale"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    current_version = enricher_mod.settings.enrichment_version
+    assert lot.enrichment_version != current_version
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_enrichment())
+
+    await _catchup_sweep(provider)
+
+    await session.refresh(lot)
+    # The stale-version DONE lot was re-pended, drained by the sweep, and
+    # re-enriched: status is DONE again but now carries the current version.
+    assert lot.enrichment_status == EnrichmentStatus.DONE
+    assert lot.enrichment_version == current_version
+    assert lot.enrichment_version != "v_stale"
+    provider.describe.assert_awaited()
+    assert lot.id == lot_id
+
+
+@pytest.mark.asyncio
+async def test_catchup_sweep_leaves_current_version_done_lot_untouched(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DONE lot already stamped with the current enrichment_version must not
+    be re-pended or re-enriched by the catchup sweep — the re-pend is scoped to
+    stale versions only, so the provider is never called for it."""
+    session = _patched_get_session
+
+    async def fake_notify(_session: object, channel: str, payload: str) -> None:
+        return None
+
+    monkeypatch.setattr(enricher_mod, "notify", fake_notify)
+
+    _, lot = _seed_auction_and_lot(session)
+    lot.enrichment_status = EnrichmentStatus.DONE
+    lot.enrichment_version = enricher_mod.settings.enrichment_version
+    session.add(lot)
+    await session.flush()
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_enrichment())
+
+    await _catchup_sweep(provider)
+
+    await session.refresh(lot)
+    assert lot.enrichment_status == EnrichmentStatus.DONE
+    provider.describe.assert_not_awaited()
 
 
 # ─── main() fail-fast ───
