@@ -346,3 +346,48 @@ async def test_lot_detail_decision_card_shows_max_bid(
     # separately rather than a literal cross-span substring.
     assert "decision-card__max-bid" in r.text
     assert "$4,250" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_renders_activity_timeline(
+    _patch_deps: AsyncSession,
+) -> None:
+    from carbuyer.db.lot_state import apply_user_action
+
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.flush()
+    apply_user_action(session, lot, UserAction.INTERESTED, source="dashboard")
+    apply_user_action(
+        session, lot, UserAction.BID_PLACED,
+        max_bid_cad=Decimal("3500"), source="dashboard",
+    )
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Activity" in r.text
+    # Template renders "bid placed" (underscore replaced with space).
+    assert "bid placed" in r.text
+    assert "$3,500" in r.text
+    assert "dashboard" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_activity_empty_state(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Activity" in r.text
+    assert "No recorded activity" in r.text
