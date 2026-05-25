@@ -416,7 +416,7 @@ async def test_mark_from_watchlist_returns_board_fragment(
             data={"action": "passed"},
             headers={"HX-Request": "true", "HX-Target": "watchlist-board"},
         )
-    assert r.status_code == 200
+    assert r.status_code == 200  # noqa: PLR2004
     assert 'id="watchlist-board"' in r.text
     # The lot is now in the Passed column, not Interested.
     assert r.text.count("Passed") >= 1
