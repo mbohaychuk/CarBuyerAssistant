@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
 from carbuyer.db.enums import LotStatus, UserAction
+from carbuyer.db.lot_state import apply_user_action
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 
 
@@ -352,8 +353,6 @@ async def test_lot_detail_decision_card_shows_max_bid(
 async def test_lot_detail_renders_activity_timeline(
     _patch_deps: AsyncSession,
 ) -> None:
-    from carbuyer.db.lot_state import apply_user_action
-
     session = _patch_deps
     lot = _seed_lot(session)
     await session.flush()
@@ -372,6 +371,7 @@ async def test_lot_detail_renders_activity_timeline(
     assert "Activity" in r.text
     # Template renders "bid placed" (underscore replaced with space).
     assert "bid placed" in r.text
+    assert 'data-state="bid_placed"' in r.text
     assert "$3,500" in r.text
     assert "dashboard" in r.text
 
