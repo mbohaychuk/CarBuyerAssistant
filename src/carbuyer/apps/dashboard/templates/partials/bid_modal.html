@@ -2,7 +2,7 @@
    DOM after an HTMX swap into #modal-slot. The Cancel button and
    backdrop are hx-gets that swap empty content back in. #}
 <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bid-modal-title">
-  <a class="modal__backdrop"
+  <a class="modal__backdrop" href="/modal/dismiss"
      hx-get="/modal/dismiss" hx-target="#modal-slot" hx-swap="innerHTML"
      aria-label="Close"></a>
   <div class="modal__panel">
@@ -23,7 +23,7 @@
                autofocus>
       </label>
       <div class="modal__actions">
-        <a class="modal__cancel"
+        <a class="modal__cancel" href="/modal/dismiss"
            hx-get="/modal/dismiss"
            hx-target="#modal-slot" hx-swap="innerHTML">Cancel</a>
         <button type="submit" class="modal__submit">
