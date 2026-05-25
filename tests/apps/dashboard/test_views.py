@@ -418,3 +418,27 @@ async def test_base_layout_has_modal_slot(
         r = await c.get("/")
     assert r.status_code == 200  # noqa: PLR2004
     assert 'id="modal-slot"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_bid_button_opens_modal_not_post(
+    _patch_deps: AsyncSession,
+) -> None:
+    """The Bid placed button is now an hx-get against the modal route,
+    not an hx-post against /mark. Watch and Pass stay as hx-posts."""
+    session = _patch_deps
+    lot = _seed_auction_with_lot(session, end_at=None, title="BID-MODAL-LOT")
+    lot.price_deal_score = Decimal("0.20")
+    lot.lot_status = LotStatus.OPEN.value
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/")
+    assert r.status_code == 200  # noqa: PLR2004
+    # Bid button: hx-get the modal targeting #modal-slot
+    assert 'data-action="bid_placed"' in r.text
+    assert 'hx-get="/lots/' in r.text and "/bid-modal?return_target=" in r.text
+    # Watch + Pass still hx-post /mark
+    assert 'data-action="interested"' in r.text
+    assert 'hx-post="/lots/' in r.text
