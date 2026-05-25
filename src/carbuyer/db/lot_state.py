@@ -114,6 +114,9 @@ async def lot_action_history(
 
     Reader co-located with apply_user_action (the writer for the same
     table). Uses the (lot_id, changed_at) index for ordered scan.
+
+    Returns [] both for lots with no history AND for nonexistent lot_id —
+    callers must verify lot existence separately if they need to distinguish.
     """
     stmt = (
         select(LotActionHistory)
