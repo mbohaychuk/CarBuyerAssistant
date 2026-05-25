@@ -250,7 +250,7 @@ async def test_feed_card_actions_still_target_card(
     # section, which is the only place the feed renders full lot_card.html
     # partials (closing buckets render compact lot_row links, not cards).
     lot = _seed_auction_with_lot(session, end_at=None, title="DEAL-LOT")
-    lot.price_deal_score = Decimal("0.20")
+    lot.price_deal_score = 0.20
     lot.lot_status = LotStatus.OPEN.value
     await session.commit()
 
@@ -434,7 +434,7 @@ async def test_bid_button_opens_modal_not_post(
     not an hx-post against /mark. Watch and Pass stay as hx-posts."""
     session = _patch_deps
     lot = _seed_auction_with_lot(session, end_at=None, title="BID-MODAL-LOT")
-    lot.price_deal_score = Decimal("0.20")
+    lot.price_deal_score = 0.20
     lot.lot_status = LotStatus.OPEN.value
     await session.commit()
 
