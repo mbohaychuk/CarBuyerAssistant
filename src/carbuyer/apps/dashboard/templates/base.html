@@ -14,6 +14,41 @@
   <link rel="stylesheet" href="/static/css/app.css">
   <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/vendor/chart.umd.js" defer></script>
+  <script>
+    // ── htmx:responseError ───────────────────────────────────────
+    // HTMX 2.x doesn't swap on 4xx/5xx by default. Without a handler,
+    // server errors are invisible to the user. Show a brief banner so
+    // failed bid submissions and other action errors are not silent.
+    document.body.addEventListener("htmx:responseError", function (e) {
+      var toast = document.getElementById("toast-slot");
+      if (!toast) return;
+      toast.textContent = "Something went wrong. Please try again.";
+      toast.classList.add("toast--visible");
+      setTimeout(function () { toast.classList.remove("toast--visible"); }, 4000);
+    });
+
+    // ── Modal focus + inert ──────────────────────────────────────
+    // The CSS-only modal lives in #modal-slot. When the slot is
+    // populated, move focus to its first input and mark <main> inert
+    // so keyboard/screen-reader users can't Tab past the backdrop.
+    // When the slot becomes empty (Cancel, backdrop, or OOB clear),
+    // release inert.
+    function syncModalState() {
+      var slot = document.getElementById("modal-slot");
+      var main = document.querySelector("main.container");
+      if (!slot || !main) return;
+      var hasModal = slot.querySelector(".modal") !== null;
+      if (hasModal) {
+        main.setAttribute("inert", "");
+        var firstInput = slot.querySelector("input, select, textarea");
+        if (firstInput) firstInput.focus();
+      } else {
+        main.removeAttribute("inert");
+      }
+    }
+    document.body.addEventListener("htmx:afterSwap", syncModalState);
+    document.body.addEventListener("htmx:oobAfterSwap", syncModalState);
+  </script>
 </head>
 <body>
   {# Topnav: sticky, horizontally scrolling segmented bar — same shape on
@@ -30,6 +65,7 @@
   </nav>
   <main class="container">{% block content %}{% endblock %}</main>
   <div id="modal-slot"></div>
+  <div id="toast-slot" aria-live="polite"></div>
   {% block nav %}{% endblock %}
 </body>
 </html>

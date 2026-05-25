@@ -149,3 +149,27 @@
   font-weight: 600;
   cursor: pointer;
 }
+
+/* Error toast — appears on htmx:responseError. Auto-hides after
+   4s via the JS handler in base.html. */
+#toast-slot {
+  position: fixed;
+  top: var(--space-3, 1rem);
+  right: var(--space-3, 1rem);
+  z-index: 200;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+  background: var(--color-ox);
+  color: white;
+  padding: var(--space-2, 0.75rem) var(--space-3, 1rem);
+  border-radius: 0.3rem;
+  box-shadow: 0 4px 12px rgba(20, 17, 13, 0.25);
+  font-weight: 600;
+}
+#toast-slot.toast--visible {
+  opacity: 1;
+}
+#toast-slot:empty {
+  display: none;
+}
