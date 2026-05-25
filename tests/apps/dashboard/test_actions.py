@@ -1,6 +1,7 @@
 """Phase 11 Task 48 — action endpoints (mark / notes / admin rescore)."""
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -418,8 +419,14 @@ async def test_mark_from_watchlist_returns_board_fragment(
         )
     assert r.status_code == 200  # noqa: PLR2004
     assert 'id="watchlist-board"' in r.text
-    # The lot is now in the Passed column, not Interested.
-    assert r.text.count("Passed") >= 1
+    assert f'<article id="lot-{lot_id}"' in r.text
+    # The lot's <article> tag carries data-state="passed" after transition.
+    # Match the data-state on the same article id, not on a column header.
+    article_match = re.search(
+        rf'<article id="lot-{lot_id}"[^>]*data-state="passed"',
+        r.text,
+    )
+    assert article_match is not None, "Lot's article should carry data-state=passed after transition"
 
 
 @pytest.mark.asyncio
@@ -462,9 +469,7 @@ async def test_bid_modal_prefills_in_raise_max_mode(
 
 
 @pytest.mark.asyncio
-async def test_modal_dismiss_returns_empty(
-    _patch_deps: AsyncSession,
-) -> None:
+async def test_modal_dismiss_returns_empty() -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.get("/modal/dismiss")
@@ -491,8 +496,7 @@ async def test_mark_bid_placed_response_clears_modal_oob(
             headers={"HX-Request": "true", "HX-Target": f"lot-{lot_id}"},
         )
     assert r.status_code == 200  # noqa: PLR2004
-    assert 'id="modal-slot"' in r.text
-    assert 'hx-swap-oob="true"' in r.text
+    assert '<div id="modal-slot" hx-swap-oob="true">' in r.text
 
 
 @pytest.mark.asyncio
