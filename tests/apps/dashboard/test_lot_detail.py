@@ -369,6 +369,7 @@ async def test_lot_detail_renders_activity_timeline(
         r = await c.get(f"/lots/{lot_id}")
     assert r.status_code == 200  # noqa: PLR2004
     assert "Activity" in r.text
+    assert 'class="activity-timeline"' in r.text
     # Template renders "bid placed" (underscore replaced with space).
     assert "bid placed" in r.text
     assert 'data-state="bid_placed"' in r.text
