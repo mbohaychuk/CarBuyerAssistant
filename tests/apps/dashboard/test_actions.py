@@ -398,6 +398,31 @@ async def test_toggle_off_clears_all_bound_fields(
 
 
 @pytest.mark.asyncio
+async def test_mark_from_watchlist_returns_board_fragment(
+    _patch_deps: AsyncSession,
+) -> None:
+    """A click on a card sitting in the Interested column transitions
+    it to bid_placed; the response is the whole board partial so the
+    card reappears in the Bid placed column."""
+    session = _patch_deps
+    lot = _seed_lot(session, user_action="interested")
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "passed"},
+            headers={"HX-Request": "true", "HX-Target": "watchlist-board"},
+        )
+    assert r.status_code == 200
+    assert 'id="watchlist-board"' in r.text
+    # The lot is now in the Passed column, not Interested.
+    assert r.text.count("Passed") >= 1
+
+
+@pytest.mark.asyncio
 async def test_rescore_emits_valuation_pending_notify(
     _patch_deps: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

@@ -15,6 +15,7 @@ from carbuyer.apps.dashboard.deps import (
     get_session,
     require_admin,
 )
+from carbuyer.apps.dashboard.routers.watched import build_watchlist_buckets
 from carbuyer.db.enums import UserAction, ValuationStatus
 from carbuyer.db.lot_state import apply_user_action
 from carbuyer.db.models import Auction, AuctionLot
@@ -93,6 +94,14 @@ async def mark_lot(
                 "wrapper_class": wrapper_class,
                 "effective_state": effective_state,
             },
+        )
+
+    if hx_target == "watchlist-board":
+        buckets = await build_watchlist_buckets(session)
+        return templates.TemplateResponse(
+            request,
+            "partials/watchlist_board.html",
+            {"buckets": buckets},
         )
 
     auction = await session.get(Auction, lot.auction_id)
