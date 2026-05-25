@@ -438,7 +438,7 @@ async def test_bid_button_opens_modal_not_post(
     assert r.status_code == 200  # noqa: PLR2004
     # Bid button: hx-get the modal targeting #modal-slot
     assert 'data-action="bid_placed"' in r.text
-    assert 'hx-get="/lots/' in r.text and "/bid-modal?return_target=" in r.text
+    assert f'hx-get="/lots/{lot.id}/bid-modal?return_target=' in r.text
     # Watch + Pass still hx-post /mark
     assert 'data-action="interested"' in r.text
     assert 'hx-post="/lots/' in r.text
