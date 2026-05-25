@@ -496,11 +496,11 @@ async def test_mark_bid_placed_response_clears_modal_oob(
 
 
 @pytest.mark.asyncio
-async def test_mark_non_bid_response_has_no_oob_clear(
+async def test_mark_non_htmx_returns_204_no_oob(
     _patch_deps: AsyncSession,
 ) -> None:
-    """Watch / Pass / toggle-off responses do not include the OOB
-    modal clear — there is no modal to dismiss."""
+    """Non-HTMX callers (no HX-Request header) receive a bare 204 with
+    no body, so no OOB clear is emitted regardless of the action."""
     session = _patch_deps
     lot = _seed_lot(session)
     await session.commit()
@@ -511,10 +511,9 @@ async def test_mark_non_bid_response_has_no_oob_clear(
         r = await c.post(
             f"/lots/{lot_id}/mark",
             data={"action": "interested"},
-            headers={"HX-Request": "true", "HX-Target": f"lot-{lot_id}"},
         )
-    assert r.status_code == 200  # noqa: PLR2004
-    assert 'hx-swap-oob' not in r.text
+    assert r.status_code == 204  # noqa: PLR2004
+    assert r.text == ""
 
 
 @pytest.mark.asyncio
