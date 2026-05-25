@@ -24,15 +24,16 @@ def _seed_lot(
     session: AsyncSession,
     *,
     user_action: str | None = None,
+    source_lot_id: str = "L1",
 ) -> AuctionLot:
     a = Auction(
-        source="hibid", source_auction_id="A1", url="https://x",
+        source="hibid", source_auction_id=f"A-{source_lot_id}", url="https://x",
         canonical_url="https://x", auction_subtype="estate",
         first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
     )
     session.add(a)
     lot = AuctionLot(
-        auction=a, source_lot_id="L1", url="https://x/lot/L1",
+        auction=a, source_lot_id=source_lot_id, url=f"https://x/lot/{source_lot_id}",
         title="Test",
     )
     if user_action is not None:
@@ -205,9 +206,8 @@ async def test_watched_renders_watchlist_board(
     _patch_deps: AsyncSession,
 ) -> None:
     session = _patch_deps
-    lot = _seed_lot(session, user_action="interested")
+    _seed_lot(session, user_action="interested")
     await session.commit()
-    _ = lot
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
