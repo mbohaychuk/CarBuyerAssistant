@@ -15,8 +15,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
+from carbuyer.apps.dashboard.routers.watched import build_watchlist_buckets
 from carbuyer.db.enums import LotStatus, UserAction
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale, Purchase
+
+
+def _seed_lot(
+    session: AsyncSession,
+    *,
+    user_action: str | None = None,
+) -> AuctionLot:
+    a = Auction(
+        source="hibid", source_auction_id="A1", url="https://x",
+        canonical_url="https://x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    lot = AuctionLot(
+        auction=a, source_lot_id="L1", url="https://x/lot/L1",
+        title="Test",
+    )
+    if user_action is not None:
+        lot.user_action = UserAction(user_action)
+    session.add(lot)
+    return lot
 
 
 @pytest.fixture
@@ -138,6 +160,62 @@ async def test_watched_excludes_null_user_action_lots(_patch_deps: AsyncSession)
         r = await client.get("/watched")
     assert r.status_code == 200  # noqa: PLR2004
     assert "UNTAGGED" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_build_watchlist_buckets_groups_by_state(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    a = Auction(
+        source="hibid", source_auction_id="A1", url="https://x",
+        canonical_url="https://x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    for sa, ua in [
+        ("L1", UserAction.INTERESTED),
+        ("L2", UserAction.BID_PLACED),
+        ("L3", UserAction.PURCHASED),
+        ("L4", UserAction.PASSED),
+    ]:
+        lot = AuctionLot(
+            auction=a, source_lot_id=sa, url=f"https://x/{sa}",
+            title=sa, user_action=ua,
+        )
+        if ua == UserAction.BID_PLACED:
+            lot.max_bid_cad = Decimal("5000")
+            lot.bid_placed_at = datetime.now(UTC)
+        if ua == UserAction.PURCHASED:
+            lot.won_at = datetime.now(UTC)
+        session.add(lot)
+    await session.commit()
+
+    buckets = await build_watchlist_buckets(session)
+    assert set(buckets) == {
+        "interested", "bid_placed", "purchased", "passed",
+    }
+    assert len(buckets["interested"]) == 1
+    assert len(buckets["bid_placed"]) == 1
+    assert buckets["interested"][0]["lot"].source_lot_id == "L1"
+
+
+@pytest.mark.asyncio
+async def test_watched_renders_watchlist_board(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session, user_action="interested")
+    await session.commit()
+    _ = lot
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'id="watchlist-board"' in r.text
+    for label in ("Interested", "Bid placed", "Purchased", "Passed"):
+        assert label in r.text
 
 
 # ─── /comps ───
