@@ -423,6 +423,56 @@ async def test_mark_from_watchlist_returns_board_fragment(
 
 
 @pytest.mark.asyncio
+async def test_bid_modal_renders_form(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get(
+            f"/lots/{lot.id}/bid-modal?return_target=lot-{lot.id}",
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'name="max_bid_cad"' in r.text
+    assert 'name="action"' in r.text and "bid_placed" in r.text
+    assert f'hx-target="#lot-{lot.id}"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_bid_modal_prefills_in_raise_max_mode(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(
+        session, user_action="bid_placed", max_bid_cad=Decimal("4200"),
+        bid_placed_at=datetime.now(UTC),
+    )
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get(
+            f"/lots/{lot.id}/bid-modal?return_target=lot-{lot.id}",
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'value="4200"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_modal_dismiss_returns_empty(
+    _patch_deps: AsyncSession,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/modal/dismiss")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert r.text == ""
+
+
+@pytest.mark.asyncio
 async def test_rescore_emits_valuation_pending_notify(
     _patch_deps: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
