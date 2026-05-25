@@ -23,12 +23,15 @@ _BUCKET_STATES = (
 _PER_BUCKET_LIMIT = 100
 
 
-@router.get("/watched", response_class=HTMLResponse)
-async def watched(
-    request: Request,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> HTMLResponse:
-    """4-bucket flat list. Kanban polish is the follow-up PR."""
+async def build_watchlist_buckets(
+    session: AsyncSession,
+) -> dict[str, list[dict[str, Any]]]:
+    """Group watched lots by user_action, oldest-closing first.
+
+    Per-bucket cap is _PER_BUCKET_LIMIT. Buckets are returned in the
+    canonical order Interested → Bid placed → Purchased → Passed so the
+    template can iterate dict items if it wants to.
+    """
     stmt = (
         select(AuctionLot, Auction)
         .join(Auction, Auction.id == AuctionLot.auction_id)
@@ -37,14 +40,23 @@ async def watched(
     )
     rows = (await session.execute(stmt)).all()
 
-    buckets: dict[str, list[dict[str, Any]]] = {s.value: [] for s in _BUCKET_STATES}
+    buckets: dict[str, list[dict[str, Any]]] = {
+        s.value: [] for s in _BUCKET_STATES
+    }
     for lot, auc in rows:
         key = lot.user_action.value if lot.user_action else None
         if key in buckets and len(buckets[key]) < _PER_BUCKET_LIMIT:
             buckets[key].append({"lot": lot, "auction": auc})
+    return buckets
 
+
+@router.get("/watched", response_class=HTMLResponse)
+async def watched(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> HTMLResponse:
+    """4-column kanban over the four user_action states."""
+    buckets = await build_watchlist_buckets(session)
     return templates.TemplateResponse(
-        request,
-        "pages/watched.html",
-        {"buckets": buckets},
+        request, "pages/watched.html", {"buckets": buckets},
     )
