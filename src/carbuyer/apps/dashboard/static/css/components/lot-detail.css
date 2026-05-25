@@ -503,7 +503,7 @@
   justify-self: end;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 640px) {
   .activity-timeline__entry {
     grid-template-columns: 1fr auto;
     row-gap: 0.25rem;
