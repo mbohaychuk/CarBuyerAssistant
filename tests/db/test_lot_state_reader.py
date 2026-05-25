@@ -1,4 +1,4 @@
-"""Reader for the lot_action_history audit table."""
+"""Tests for lot_action_history."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
