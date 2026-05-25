@@ -75,6 +75,6 @@
         <div class="lot-card__deal lot-card__deal--suspect" title="bid is below the comp low-end">below low</div>
       {% endif %}
     </div>
-    {{ action_buttons(lot.id, card_state) }}
+    {{ action_buttons(lot.id, card_state, target=action_target if action_target is defined else None) }}
   </aside>
 </article>
