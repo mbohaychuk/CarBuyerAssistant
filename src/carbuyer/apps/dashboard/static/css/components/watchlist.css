@@ -65,8 +65,10 @@
     grid-template-columns: repeat(4, 1fr);
     grid-auto-columns: auto;
     overflow-x: visible;
+    scroll-snap-type: none;
   }
   .watchlist-board__column {
     min-height: 70vh;
+    scroll-snap-align: none;
   }
 }
