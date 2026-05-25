@@ -25,6 +25,8 @@ def _seed_lot(
     *,
     user_action: str | None = None,
     source_lot_id: str = "L1",
+    max_bid_cad: Decimal | None = None,
+    bid_placed_at: datetime | None = None,
 ) -> AuctionLot:
     a = Auction(
         source="hibid", source_auction_id=f"A-{source_lot_id}", url="https://x",
@@ -38,6 +40,10 @@ def _seed_lot(
     )
     if user_action is not None:
         lot.user_action = UserAction(user_action)
+    if max_bid_cad is not None:
+        lot.max_bid_cad = max_bid_cad
+    if bid_placed_at is not None:
+        lot.bid_placed_at = bid_placed_at
     session.add(lot)
     return lot
 
@@ -442,3 +448,25 @@ async def test_bid_button_opens_modal_not_post(
     # Watch + Pass still hx-post /mark
     assert 'data-action="interested"' in r.text
     assert 'hx-post="/lots/' in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_card_shows_max_bid_on_bid_placed(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    _seed_lot(
+        session, user_action="bid_placed", max_bid_cad=Decimal("4250"),
+        bid_placed_at=datetime.now(UTC),
+    )
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    # money macro wraps the amount in a span, so the literal "max
+    # $4,250" doesn't substring-match. Assert the class we add + the
+    # rendered amount separately.
+    assert "lot-card__max-bid" in r.text
+    assert "$4,250" in r.text

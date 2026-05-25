@@ -125,6 +125,9 @@
           {{ countdown_chip(auction.scheduled_end_at) }}
         </div>
         <div class="decision-card__price">{{ money(lot.current_high_bid_cad, variant='large') }}</div>
+        {% if lot.user_action and lot.user_action.value == "bid_placed" and lot.max_bid_cad %}
+          <div class="decision-card__max-bid t-meta">max {{ money(lot.max_bid_cad) }}</div>
+        {% endif %}
         {% if lot.all_in_at_current_bid_cad %}
           <div class="decision-card__meta">all-in {{ money(lot.all_in_at_current_bid_cad) }}</div>
         {% endif %}
