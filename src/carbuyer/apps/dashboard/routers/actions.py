@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -157,7 +157,7 @@ async def rescore_all(
 async def bid_modal(
     request: Request,
     lot_id: int,
-    return_target: str,
+    return_target: Annotated[str, Query(min_length=1)],
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[CurrentUser, Depends(current_user)],
 ) -> HTMLResponse:
