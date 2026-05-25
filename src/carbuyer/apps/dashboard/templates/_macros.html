@@ -152,6 +152,7 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
           data-active="{{ 'true' if bid_on else 'false' }}"
           hx-get="/lots/{{ lot_id }}/bid-modal?return_target={{ bid_modal_return }}"
           hx-target="#modal-slot" hx-swap="innerHTML"
+          hx-sync="this:abort"
           aria-label="Place bid / raise max">
     Bid placed
   </button>

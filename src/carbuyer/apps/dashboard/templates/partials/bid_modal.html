@@ -26,7 +26,7 @@
         <a class="modal__cancel" href="/modal/dismiss"
            hx-get="/modal/dismiss"
            hx-target="#modal-slot" hx-swap="innerHTML">Cancel</a>
-        <button type="submit" class="modal__submit">
+        <button type="submit" class="modal__submit" hx-disabled-elt="this">
           {% if lot.max_bid_cad %}Update max{% else %}Place bid{% endif %}
         </button>
       </div>
