@@ -76,10 +76,10 @@ async def mark_lot(
     if not request.headers.get("HX-Request"):
         return Response(status_code=204)
 
-    hx_target = request.headers.get("HX-Target", "") or ""
     include_modal_oob_clear = (
-        action == "bid_placed" and not currently_active
+        request.headers.get("HX-Request") == "true"
     )
+    hx_target = request.headers.get("HX-Target", "") or ""
     is_button_fragment_target = (
         hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
     )
