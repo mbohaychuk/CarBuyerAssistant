@@ -28,3 +28,6 @@
     </section>
   {% endfor %}
 </div>
+{% if include_modal_oob_clear %}
+<div id="modal-slot" hx-swap-oob="true"></div>
+{% endif %}
