@@ -402,8 +402,8 @@ async def test_mark_from_watchlist_returns_board_fragment(
     _patch_deps: AsyncSession,
 ) -> None:
     """A click on a card sitting in the Interested column transitions
-    it to bid_placed; the response is the whole board partial so the
-    card reappears in the Bid placed column."""
+    it to passed; the response is the whole board partial so the
+    card reappears in the Passed column."""
     session = _patch_deps
     lot = _seed_lot(session, user_action="interested")
     await session.commit()
