@@ -426,7 +426,21 @@ async def test_mark_from_watchlist_returns_board_fragment(
         rf'<article id="lot-{lot_id}"[^>]*data-state="passed"',
         r.text,
     )
-    assert article_match is not None, "Lot's article should carry data-state=passed after transition"
+    assert article_match is not None, (
+        "Lot's article should carry data-state=passed after transition"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bid_modal_404_when_lot_missing(
+    _patch_deps: AsyncSession,
+) -> None:
+    """GET /lots/{nonexistent_id}/bid-modal returns 404. Guards against
+    a future regression that drops the explicit lot-existence check."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/lots/9999/bid-modal?return_target=lot-9999")
+    assert r.status_code == 404  # noqa: PLR2004
 
 
 @pytest.mark.asyncio
@@ -496,6 +510,56 @@ async def test_mark_bid_placed_response_clears_modal_oob(
             headers={"HX-Request": "true", "HX-Target": f"lot-{lot_id}"},
         )
     assert r.status_code == 200  # noqa: PLR2004
+    assert '<div id="modal-slot" hx-swap-oob="true">' in r.text
+
+
+@pytest.mark.asyncio
+async def test_mark_bid_placed_on_watchlist_board_includes_oob(
+    _patch_deps: AsyncSession,
+) -> None:
+    """A bid_placed transition originating from the watchlist board
+    returns the full board re-render PLUS the OOB modal-clear. Exercises
+    the watchlist_board.html OOB block specifically."""
+    session = _patch_deps
+    lot = _seed_lot(session, user_action="interested")
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "bid_placed", "max_bid_cad": "5000"},
+            headers={"HX-Request": "true", "HX-Target": "watchlist-board"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'id="watchlist-board"' in r.text
+    assert '<div id="modal-slot" hx-swap-oob="true">' in r.text
+
+
+@pytest.mark.asyncio
+async def test_mark_bid_placed_on_button_fragment_includes_oob(
+    _patch_deps: AsyncSession,
+) -> None:
+    """A bid_placed transition originating from the lot-detail desktop
+    rail returns the action_buttons_fragment PLUS the OOB modal-clear.
+    Exercises the action_buttons_fragment.html OOB block specifically."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "bid_placed", "max_bid_cad": "5000"},
+            headers={"HX-Request": "true", "HX-Target": f"lot-{lot_id}-desktop"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    # The buttons-fragment template's outer wrapper carries the same id
+    # as HX-Target so HTMX's outerHTML swap replaces in place.
+    assert f'id="lot-{lot_id}-desktop"' in r.text
     assert '<div id="modal-slot" hx-swap-oob="true">' in r.text
 
 
