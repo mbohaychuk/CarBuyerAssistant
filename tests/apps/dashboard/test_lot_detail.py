@@ -391,3 +391,25 @@ async def test_lot_detail_activity_empty_state(
     assert r.status_code == 200  # noqa: PLR2004
     assert "Activity" in r.text
     assert "No recorded activity" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_activity_renders_cleared_state(
+    _patch_deps: AsyncSession,
+) -> None:
+    """Toggle-off (apply_user_action with action=None) writes a history
+    row with user_action=NULL. The timeline renders it as 'Cleared'."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.flush()
+    apply_user_action(session, lot, UserAction.INTERESTED, source="dashboard")
+    apply_user_action(session, lot, None, source="dashboard")
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get(f"/lots/{lot_id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Cleared" in r.text
+    assert 'data-state="cleared"' in r.text
