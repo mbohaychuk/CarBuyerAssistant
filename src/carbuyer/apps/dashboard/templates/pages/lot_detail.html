@@ -115,6 +115,31 @@
         <h2>Comparable sales</h2>
         <p class="t-meta">Loading comps…</p>
       </section>
+
+      {# User action history — every apply_user_action call appends
+         a row. Newest first. Empty for lots that predate the audit
+         table or were never actioned. #}
+      <section class="lot-detail__section lot-detail__activity">
+        <h2>Activity</h2>
+        {% if history %}
+          <ol class="activity-timeline">
+            {% for row in history %}
+              <li class="activity-timeline__entry" data-state="{{ row.user_action.value if row.user_action else 'cleared' }}">
+                <time class="activity-timeline__time t-meta">{{ row.changed_at | local_dt }}</time>
+                <span class="activity-timeline__state">
+                  {% if row.user_action %}{{ row.user_action.value | replace('_', ' ') }}{% else %}Cleared{% endif %}
+                </span>
+                {% if row.max_bid_cad %}
+                  <span class="activity-timeline__bid t-meta">max {{ money(row.max_bid_cad) }}</span>
+                {% endif %}
+                <span class="activity-timeline__source t-meta">via {{ row.source }}</span>
+              </li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          <p class="t-meta">No recorded activity.</p>
+        {% endif %}
+      </section>
     </div>
 
     {# Right rail — sticky decision card #}
@@ -125,6 +150,9 @@
           {{ countdown_chip(auction.scheduled_end_at) }}
         </div>
         <div class="decision-card__price">{{ money(lot.current_high_bid_cad, variant='large') }}</div>
+        {% if lot.user_action and lot.user_action.value == "bid_placed" and lot.max_bid_cad %}
+          <div class="decision-card__max-bid t-meta">max {{ money(lot.max_bid_cad) }}</div>
+        {% endif %}
         {% if lot.all_in_at_current_bid_cad %}
           <div class="decision-card__meta">all-in {{ money(lot.all_in_at_current_bid_cad) }}</div>
         {% endif %}

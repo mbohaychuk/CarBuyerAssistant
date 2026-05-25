@@ -1,0 +1,33 @@
+{# 4-column watchlist board. Included by pages/watched.html and returned
+   by /lots/{id}/mark when the click came from the watchlist (HX-Target
+   "watchlist-board"). action_target tells nested lot cards to retarget
+   their action buttons at the whole board so re-renders relocate the
+   card to its new column. #}
+{% set action_target = "#watchlist-board" %}
+<div id="watchlist-board" class="watchlist-board">
+  {% for state, label in [
+    ("interested", "Interested"),
+    ("bid_placed", "Bid placed"),
+    ("purchased", "Purchased"),
+    ("passed", "Passed"),
+  ] %}
+    <section class="watchlist-board__column" data-state="{{ state }}">
+      <h2 class="watchlist-board__heading">
+        {{ label }}
+        <span class="watchlist-board__count">{{ buckets[state] | length }}</span>
+      </h2>
+      {% if buckets[state] %}
+        <ul class="watchlist-board__list">
+          {% for item in buckets[state] %}
+            <li>{% include "partials/lot_card.html" %}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="watchlist-board__empty">No lots.</p>
+      {% endif %}
+    </section>
+  {% endfor %}
+</div>
+{% if include_modal_oob_clear %}
+<div id="modal-slot" hx-swap-oob="true"></div>
+{% endif %}

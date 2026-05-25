@@ -15,8 +15,37 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
+from carbuyer.apps.dashboard.routers.watched import build_watchlist_buckets
 from carbuyer.db.enums import LotStatus, UserAction
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale, Purchase
+
+
+def _seed_lot(
+    session: AsyncSession,
+    *,
+    user_action: str | None = None,
+    source_lot_id: str = "L1",
+    max_bid_cad: Decimal | None = None,
+    bid_placed_at: datetime | None = None,
+) -> AuctionLot:
+    a = Auction(
+        source="hibid", source_auction_id=f"A-{source_lot_id}", url="https://x",
+        canonical_url="https://x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    lot = AuctionLot(
+        auction=a, source_lot_id=source_lot_id, url=f"https://x/lot/{source_lot_id}",
+        title="Test",
+    )
+    if user_action is not None:
+        lot.user_action = UserAction(user_action)
+    if max_bid_cad is not None:
+        lot.max_bid_cad = max_bid_cad
+    if bid_placed_at is not None:
+        lot.bid_placed_at = bid_placed_at
+    session.add(lot)
+    return lot
 
 
 @pytest.fixture
@@ -138,6 +167,98 @@ async def test_watched_excludes_null_user_action_lots(_patch_deps: AsyncSession)
         r = await client.get("/watched")
     assert r.status_code == 200  # noqa: PLR2004
     assert "UNTAGGED" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_build_watchlist_buckets_groups_by_state(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    a = Auction(
+        source="hibid", source_auction_id="A1", url="https://x",
+        canonical_url="https://x", auction_subtype="estate",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+    )
+    session.add(a)
+    for sa, ua in [
+        ("L1", UserAction.INTERESTED),
+        ("L2", UserAction.BID_PLACED),
+        ("L3", UserAction.PURCHASED),
+        ("L4", UserAction.PASSED),
+    ]:
+        lot = AuctionLot(
+            auction=a, source_lot_id=sa, url=f"https://x/{sa}",
+            title=sa, user_action=ua,
+        )
+        if ua == UserAction.BID_PLACED:
+            lot.max_bid_cad = Decimal("5000")
+            lot.bid_placed_at = datetime.now(UTC)
+        if ua == UserAction.PURCHASED:
+            lot.won_at = datetime.now(UTC)
+        session.add(lot)
+    await session.commit()
+
+    buckets = await build_watchlist_buckets(session)
+    assert set(buckets) == {
+        "interested", "bid_placed", "purchased", "passed",
+    }
+    assert len(buckets["interested"]) == 1
+    assert len(buckets["bid_placed"]) == 1
+    assert buckets["interested"][0]["lot"].source_lot_id == "L1"
+
+
+@pytest.mark.asyncio
+async def test_watched_renders_watchlist_board(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    _seed_lot(session, user_action="interested")
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'id="watchlist-board"' in r.text
+    for label in ("Interested", "Bid placed", "Purchased", "Passed"):
+        assert label in r.text
+
+
+@pytest.mark.asyncio
+async def test_watched_card_actions_target_board(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    _seed_lot(session, user_action="interested")
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'hx-target="#watchlist-board"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_feed_card_actions_still_target_card(
+    _patch_deps: AsyncSession,
+) -> None:
+    """Outside the watchlist, action buttons target the card directly
+    (lot-{id}) — this is the pre-existing default and must not regress."""
+    session = _patch_deps
+    # Seed a lot with a deal score high enough to appear in the "Best deals"
+    # section, which is the only place the feed renders full lot_card.html
+    # partials (closing buckets render compact lot_row links, not cards).
+    lot = _seed_auction_with_lot(session, end_at=None, title="DEAL-LOT")
+    lot.price_deal_score = 0.20
+    lot.lot_status = LotStatus.OPEN.value
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/")
+    # The feed renders cards with the default action target.
+    assert 'hx-target="#lot-' in r.text
 
 
 # ─── /comps ───
@@ -289,3 +410,63 @@ async def test_health_counts_seeded_data(_patch_deps: AsyncSession) -> None:
     assert "Auctions tracked: 1" in r.text
     assert "Open lots: 1" in r.text
     assert "Historical sales: 1" in r.text
+
+
+# ─── Layout ───
+
+
+@pytest.mark.asyncio
+async def test_base_layout_has_modal_slot(
+    _patch_deps: AsyncSession,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'id="modal-slot"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_bid_button_opens_modal_not_post(
+    _patch_deps: AsyncSession,
+) -> None:
+    """The Bid placed button is now an hx-get against the modal route,
+    not an hx-post against /mark. Watch and Pass stay as hx-posts."""
+    session = _patch_deps
+    lot = _seed_auction_with_lot(session, end_at=None, title="BID-MODAL-LOT")
+    lot.price_deal_score = 0.20
+    lot.lot_status = LotStatus.OPEN.value
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/")
+    assert r.status_code == 200  # noqa: PLR2004
+    # Bid button: hx-get the modal targeting #modal-slot
+    assert 'data-action="bid_placed"' in r.text
+    assert f'hx-get="/lots/{lot.id}/bid-modal?return_target=' in r.text
+    # Watch + Pass still hx-post /mark
+    assert 'data-action="interested"' in r.text
+    assert 'hx-post="/lots/' in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_card_shows_max_bid_on_bid_placed(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    _seed_lot(
+        session, user_action="bid_placed", max_bid_cad=Decimal("4250"),
+        bid_placed_at=datetime.now(UTC),
+    )
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    # money macro wraps the amount in a span, so the literal "max
+    # $4,250" doesn't substring-match. Assert the class we add + the
+    # rendered amount separately.
+    assert "lot-card__max-bid" in r.text
+    assert "$4,250" in r.text

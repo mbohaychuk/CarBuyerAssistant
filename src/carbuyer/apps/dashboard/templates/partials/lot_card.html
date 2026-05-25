@@ -59,6 +59,9 @@
     <div class="lot-card__price-block">
       <div class="lot-card__price-label">Current bid</div>
       <div class="lot-card__price">{{ money(lot.current_high_bid_cad) }}</div>
+      {% if lot.user_action and lot.user_action.value == "bid_placed" and lot.max_bid_cad %}
+        <div class="lot-card__max-bid t-meta">max {{ money(lot.max_bid_cad) }}</div>
+      {% endif %}
       {% if lot.all_in_at_current_bid_cad %}
         <div class="lot-card__price-meta">all-in {{ money(lot.all_in_at_current_bid_cad) }}</div>
       {% endif %}
@@ -75,6 +78,9 @@
         <div class="lot-card__deal lot-card__deal--suspect" title="bid is below the comp low-end">below low</div>
       {% endif %}
     </div>
-    {{ action_buttons(lot.id, card_state) }}
+    {{ action_buttons(lot.id, card_state, target=action_target if action_target is defined else None) }}
   </aside>
 </article>
+{% if include_modal_oob_clear %}
+<div id="modal-slot" hx-swap-oob="true"></div>
+{% endif %}

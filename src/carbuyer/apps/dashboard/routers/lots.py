@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
 from carbuyer.apps.dashboard.deps import OPEN_STATUSES, get_session
+from carbuyer.db.lot_state import lot_action_history
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 
 router = APIRouter()
@@ -30,10 +31,11 @@ async def lot_detail(
     if lot is None:
         raise HTTPException(status_code=404)
     auction = await session.get(Auction, lot.auction_id)
+    history = await lot_action_history(session, lot_id)
     return templates.TemplateResponse(
         request,
         "pages/lot_detail.html",
-        {"lot": lot, "auction": auction},
+        {"lot": lot, "auction": auction, "history": history},
     )
 
 

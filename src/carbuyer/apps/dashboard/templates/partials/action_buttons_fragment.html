@@ -6,3 +6,6 @@
 <div id="{{ target_id }}" class="{{ wrapper_class }}">
   {{ action_buttons(lot_id, effective_state, target='#' ~ target_id) }}
 </div>
+{% if include_modal_oob_clear %}
+<div id="modal-slot" hx-swap-oob="true"></div>
+{% endif %}

@@ -1,0 +1,175 @@
+/* Watchlist kanban — 4 columns side-by-side on desktop, horizontal
+   scroll-snap on mobile (one column at a time, next column peeks). */
+
+.watchlist-board {
+  display: grid;
+  gap: var(--space-3, 0.75rem);
+  /* Mobile-first: a single horizontally scrolling row. */
+  grid-auto-flow: column;
+  grid-auto-columns: 85vw;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding-bottom: var(--space-2, 0.5rem);
+}
+
+.watchlist-board__column {
+  scroll-snap-align: start;
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  border-radius: 0.5rem;
+  padding: var(--space-2, 0.5rem);
+  min-height: 60vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.watchlist-board__heading {
+  font-family: "Fraunces", serif;
+  font-size: 1rem;
+  margin: 0 0 var(--space-2, 0.5rem) 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+
+.watchlist-board__count {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.8em;
+  color: var(--color-muted);
+  background: var(--color-paper);
+  border-radius: 999px;
+  padding: 0.1em 0.6em;
+}
+
+.watchlist-board__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.watchlist-board__empty {
+  color: var(--color-muted);
+  font-style: italic;
+  margin: 0;
+}
+
+/* Desktop: 4-up grid, columns share viewport. */
+@media (min-width: 900px) {
+  .watchlist-board {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(4, 1fr);
+    grid-auto-columns: auto;
+    overflow-x: visible;
+    scroll-snap-type: none;
+  }
+  .watchlist-board__column {
+    min-height: 70vh;
+    scroll-snap-align: none;
+  }
+}
+
+/* Place-bid modal — CSS-only overlay. Visible because it exists in the
+   DOM after an HTMX swap into #modal-slot; dismissed by swapping
+   empty content back in. */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+}
+.modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 17, 13, 0.55);
+  cursor: pointer;
+}
+.modal__panel {
+  position: relative;
+  z-index: 1;
+  background: var(--color-paper-3);
+  border: 1px solid var(--color-rule-strong);
+  border-radius: 0.5rem;
+  box-shadow: 0 12px 32px rgba(20, 17, 13, 0.25);
+  padding: var(--space-3, 1rem);
+  min-width: min(20rem, 90vw);
+  max-width: 28rem;
+}
+.modal__title {
+  font-family: "Fraunces", serif;
+  margin: 0 0 0.25rem 0;
+}
+.modal__sub {
+  margin: 0 0 var(--space-2, 0.75rem) 0;
+}
+.modal__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.75rem);
+}
+.modal__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.modal__field input {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1.1rem;
+  min-height: 2.5rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: 0.3rem;
+  background: var(--color-paper);
+}
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2, 0.75rem);
+}
+.modal__cancel {
+  color: var(--color-muted);
+  cursor: pointer;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+}
+.modal__submit {
+  min-height: 2.75rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-accent-ink);
+  background: var(--color-accent);
+  color: white;
+  border-radius: 0.3rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Error toast — appears on htmx:responseError. Auto-hides after
+   4s via the JS handler in base.html. */
+#toast-slot {
+  position: fixed;
+  top: var(--space-3, 1rem);
+  right: var(--space-3, 1rem);
+  z-index: 200;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+  background: var(--color-ox);
+  color: white;
+  padding: var(--space-2, 0.75rem) var(--space-3, 1rem);
+  border-radius: 0.3rem;
+  box-shadow: 0 4px 12px rgba(20, 17, 13, 0.25);
+  font-weight: 600;
+}
+#toast-slot.toast--visible {
+  opacity: 1;
+}
+#toast-slot:empty {
+  display: none;
+}

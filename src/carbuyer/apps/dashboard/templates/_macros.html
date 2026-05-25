@@ -142,11 +142,18 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
     </svg>
     Watch
   </button>
+  {# Bid placed opens the place-bid modal (which captures max_bid_cad)
+     rather than posting /mark directly. The modal posts /mark on
+     submit, targeting `return_target` so the originating region
+     (card / board / fragment) gets the success swap. `return_target`
+     is the id of the macro's hx_target with the leading '#' stripped. #}
+  {% set bid_modal_return = hx_target.lstrip('#') %}
   <button class="lot-actions__btn lot-actions__btn--primary" data-action="bid_placed"
           data-active="{{ 'true' if bid_on else 'false' }}"
-          hx-post="/lots/{{ lot_id }}/mark"
-          hx-vals='{"action":"bid_placed","currently_active":"{{ 'true' if bid_on else 'false' }}"}'
-          aria-label="Mark bid placed">
+          hx-get="/lots/{{ lot_id }}/bid-modal?return_target={{ bid_modal_return }}"
+          hx-target="#modal-slot" hx-swap="innerHTML"
+          hx-sync="this:abort"
+          aria-label="Place bid / raise max">
     Bid placed
   </button>
   <button class="lot-actions__btn" data-action="passed"
