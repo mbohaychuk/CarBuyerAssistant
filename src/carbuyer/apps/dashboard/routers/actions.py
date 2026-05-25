@@ -146,3 +146,32 @@ async def rescore_all(
     await session.commit()
     log.info("rescore triggered")
     return Response(status_code=204)
+
+
+@router.get("/lots/{lot_id}/bid-modal", response_class=HTMLResponse)
+async def bid_modal(
+    request: Request,
+    lot_id: int,
+    return_target: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[CurrentUser, Depends(current_user)],
+) -> HTMLResponse:
+    """Render the place-bid modal. `return_target` is the element id
+    (without leading '#') that the form should swap on submit — the
+    caller (action_buttons macro) computes it from its own hx-target so
+    the modal posts back into the right region (card / board / fragment).
+    """
+    lot = await session.get(AuctionLot, lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "partials/bid_modal.html",
+        {"lot": lot, "return_target": return_target},
+    )
+
+
+@router.get("/modal/dismiss", response_class=HTMLResponse)
+async def modal_dismiss() -> HTMLResponse:
+    """Empty body. Cancel + backdrop swap this into #modal-slot."""
+    return HTMLResponse("")

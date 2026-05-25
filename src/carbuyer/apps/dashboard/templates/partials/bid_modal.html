@@ -1,0 +1,35 @@
+{# Place-bid modal. CSS-only overlay: visible because it exists in the
+   DOM after an HTMX swap into #modal-slot. The Cancel button and
+   backdrop are hx-gets that swap empty content back in. #}
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="bid-modal-title">
+  <a class="modal__backdrop"
+     hx-get="/modal/dismiss" hx-target="#modal-slot" hx-swap="innerHTML"
+     aria-label="Close"></a>
+  <div class="modal__panel">
+    <h2 id="bid-modal-title" class="modal__title">
+      {% if lot.max_bid_cad %}Raise max bid{% else %}Place bid{% endif %}
+    </h2>
+    <p class="modal__sub t-meta">{{ lot.title or ("Lot #" ~ lot.id) }}</p>
+    <form class="modal__form"
+          hx-post="/lots/{{ lot.id }}/mark"
+          hx-target="#{{ return_target }}"
+          hx-swap="outerHTML">
+      <input type="hidden" name="action" value="bid_placed">
+      <label class="modal__field">
+        <span>Your max bid (CAD)</span>
+        <input type="number" name="max_bid_cad"
+               min="1" step="1" required
+               {% if lot.max_bid_cad %}value="{{ lot.max_bid_cad|int }}"{% endif %}
+               autofocus>
+      </label>
+      <div class="modal__actions">
+        <a class="modal__cancel"
+           hx-get="/modal/dismiss"
+           hx-target="#modal-slot" hx-swap="innerHTML">Cancel</a>
+        <button type="submit" class="modal__submit">
+          {% if lot.max_bid_cad %}Update max{% else %}Place bid{% endif %}
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
