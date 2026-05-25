@@ -77,6 +77,9 @@ async def mark_lot(
         return Response(status_code=204)
 
     hx_target = request.headers.get("HX-Target", "") or ""
+    include_modal_oob_clear = (
+        action == "bid_placed" and not currently_active
+    )
     is_button_fragment_target = (
         hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
     )
@@ -93,6 +96,7 @@ async def mark_lot(
                 "target_id": hx_target,
                 "wrapper_class": wrapper_class,
                 "effective_state": effective_state,
+                "include_modal_oob_clear": include_modal_oob_clear,
             },
         )
 
@@ -101,7 +105,7 @@ async def mark_lot(
         return templates.TemplateResponse(
             request,
             "partials/watchlist_board.html",
-            {"buckets": buckets},
+            {"buckets": buckets, "include_modal_oob_clear": include_modal_oob_clear},
         )
 
     auction = await session.get(Auction, lot.auction_id)
@@ -111,6 +115,7 @@ async def mark_lot(
         {
             "item": {"lot": lot, "auction": auction},
             "effective_state": effective_state,
+            "include_modal_oob_clear": include_modal_oob_clear,
         },
     )
 

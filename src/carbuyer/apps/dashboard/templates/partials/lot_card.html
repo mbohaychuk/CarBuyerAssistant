@@ -78,3 +78,6 @@
     {{ action_buttons(lot.id, card_state, target=action_target if action_target is defined else None) }}
   </aside>
 </article>
+{% if include_modal_oob_clear %}
+<div id="modal-slot" hx-swap-oob="true"></div>
+{% endif %}

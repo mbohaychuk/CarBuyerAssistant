@@ -473,6 +473,51 @@ async def test_modal_dismiss_returns_empty(
 
 
 @pytest.mark.asyncio
+async def test_mark_bid_placed_response_clears_modal_oob(
+    _patch_deps: AsyncSession,
+) -> None:
+    """A successful bid_placed transition includes an out-of-band
+    element that empties #modal-slot, dismissing the modal."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "bid_placed", "max_bid_cad": "5000"},
+            headers={"HX-Request": "true", "HX-Target": f"lot-{lot_id}"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'id="modal-slot"' in r.text
+    assert 'hx-swap-oob="true"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_mark_non_bid_response_has_no_oob_clear(
+    _patch_deps: AsyncSession,
+) -> None:
+    """Watch / Pass / toggle-off responses do not include the OOB
+    modal clear — there is no modal to dismiss."""
+    session = _patch_deps
+    lot = _seed_lot(session)
+    await session.commit()
+    lot_id = lot.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post(
+            f"/lots/{lot_id}/mark",
+            data={"action": "interested"},
+            headers={"HX-Request": "true", "HX-Target": f"lot-{lot_id}"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'hx-swap-oob' not in r.text
+
+
+@pytest.mark.asyncio
 async def test_rescore_emits_valuation_pending_notify(
     _patch_deps: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
