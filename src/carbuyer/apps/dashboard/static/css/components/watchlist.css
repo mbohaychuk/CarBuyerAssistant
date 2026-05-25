@@ -72,3 +72,80 @@
     scroll-snap-align: none;
   }
 }
+
+/* Place-bid modal — CSS-only overlay. Visible because it exists in the
+   DOM after an HTMX swap into #modal-slot; dismissed by swapping
+   empty content back in. */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+}
+.modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 17, 13, 0.55);
+  cursor: pointer;
+}
+.modal__panel {
+  position: relative;
+  z-index: 1;
+  background: var(--color-paper-3);
+  border: 1px solid var(--color-rule-strong);
+  border-radius: 0.5rem;
+  box-shadow: 0 12px 32px rgba(20, 17, 13, 0.25);
+  padding: var(--space-3, 1rem);
+  min-width: min(20rem, 90vw);
+  max-width: 28rem;
+}
+.modal__title {
+  font-family: "Fraunces", serif;
+  margin: 0 0 0.25rem 0;
+}
+.modal__sub {
+  margin: 0 0 var(--space-2, 0.75rem) 0;
+}
+.modal__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.75rem);
+}
+.modal__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.modal__field input {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 1.1rem;
+  min-height: 2.5rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: 0.3rem;
+  background: var(--color-paper);
+}
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2, 0.75rem);
+}
+.modal__cancel {
+  color: var(--color-muted);
+  cursor: pointer;
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+}
+.modal__submit {
+  min-height: 2.75rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-accent-ink);
+  background: var(--color-accent);
+  color: white;
+  border-radius: 0.3rem;
+  font-weight: 600;
+  cursor: pointer;
+}

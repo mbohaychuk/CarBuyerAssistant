@@ -10,11 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
-from carbuyer.db.enums import LotStatus
+from carbuyer.db.enums import LotStatus, UserAction
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 
 
-def _seed_lot(session: AsyncSession, *, source_lot_id: str = "L1") -> AuctionLot:
+def _seed_lot(
+    session: AsyncSession,
+    *,
+    source_lot_id: str = "L1",
+    user_action: str | None = None,
+    max_bid_cad: Decimal | None = None,
+    bid_placed_at: datetime | None = None,
+) -> AuctionLot:
     a = Auction(
         source="hibid",
         source_auction_id="A1",
@@ -40,6 +47,12 @@ def _seed_lot(session: AsyncSession, *, source_lot_id: str = "L1") -> AuctionLot
         current_high_bid_cad=Decimal("8000"),
         lot_status=LotStatus.OPEN.value,
     )
+    if user_action is not None:
+        lot.user_action = UserAction(user_action)
+    if max_bid_cad is not None:
+        lot.max_bid_cad = max_bid_cad
+    if bid_placed_at is not None:
+        lot.bid_placed_at = bid_placed_at
     session.add(lot)
     return lot
 
@@ -312,3 +325,24 @@ async def test_lot_comps_includes_sold_match(_patch_deps: AsyncSession) -> None:
         r = await client.get(f"/lots/{lot.id}/comps")
     assert r.status_code == 200  # noqa: PLR2004
     assert "$9,500" in r.text
+
+
+@pytest.mark.asyncio
+async def test_lot_detail_decision_card_shows_max_bid(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    lot = _seed_lot(
+        session, user_action="bid_placed", max_bid_cad=Decimal("4250"),
+        bid_placed_at=datetime.now(UTC),
+    )
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get(f"/lots/{lot.id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    # money macro wraps the amount in a span — assert class + amount
+    # separately rather than a literal cross-span substring.
+    assert "decision-card__max-bid" in r.text
+    assert "$4,250" in r.text
