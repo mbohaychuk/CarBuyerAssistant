@@ -218,6 +218,43 @@ async def test_watched_renders_watchlist_board(
         assert label in r.text
 
 
+@pytest.mark.asyncio
+async def test_watched_card_actions_target_board(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    _seed_lot(session, user_action="interested")
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'hx-target="#watchlist-board"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_feed_card_actions_still_target_card(
+    _patch_deps: AsyncSession,
+) -> None:
+    """Outside the watchlist, action buttons target the card directly
+    (lot-{id}) — this is the pre-existing default and must not regress."""
+    session = _patch_deps
+    # Seed a lot with a deal score high enough to appear in the "Best deals"
+    # section, which is the only place the feed renders full lot_card.html
+    # partials (closing buckets render compact lot_row links, not cards).
+    lot = _seed_auction_with_lot(session, end_at=None, title="DEAL-LOT")
+    lot.price_deal_score = Decimal("0.20")
+    lot.lot_status = LotStatus.OPEN.value
+    await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/")
+    # The feed renders cards with the default action target.
+    assert 'hx-target="#lot-' in r.text
+
+
 # ─── /comps ───
 
 
