@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from carbuyer.apps.dashboard.deps import (
     get_session,
     require_admin,
 )
+from carbuyer.apps.dashboard.routers.watched import build_watchlist_buckets
 from carbuyer.db.enums import UserAction, ValuationStatus
 from carbuyer.db.lot_state import apply_user_action
 from carbuyer.db.models import Auction, AuctionLot
@@ -75,6 +76,9 @@ async def mark_lot(
     if not request.headers.get("HX-Request"):
         return Response(status_code=204)
 
+    include_modal_oob_clear = (
+        request.headers.get("HX-Request") == "true"
+    )
     hx_target = request.headers.get("HX-Target", "") or ""
     is_button_fragment_target = (
         hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
@@ -92,7 +96,16 @@ async def mark_lot(
                 "target_id": hx_target,
                 "wrapper_class": wrapper_class,
                 "effective_state": effective_state,
+                "include_modal_oob_clear": include_modal_oob_clear,
             },
+        )
+
+    if hx_target == "watchlist-board":
+        buckets = await build_watchlist_buckets(session)
+        return templates.TemplateResponse(
+            request,
+            "partials/watchlist_board.html",
+            {"buckets": buckets, "include_modal_oob_clear": include_modal_oob_clear},
         )
 
     auction = await session.get(Auction, lot.auction_id)
@@ -102,6 +115,7 @@ async def mark_lot(
         {
             "item": {"lot": lot, "auction": auction},
             "effective_state": effective_state,
+            "include_modal_oob_clear": include_modal_oob_clear,
         },
     )
 
@@ -137,3 +151,32 @@ async def rescore_all(
     await session.commit()
     log.info("rescore triggered")
     return Response(status_code=204)
+
+
+@router.get("/lots/{lot_id}/bid-modal", response_class=HTMLResponse)
+async def bid_modal(
+    request: Request,
+    lot_id: int,
+    return_target: Annotated[str, Query(min_length=1)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[CurrentUser, Depends(current_user)],
+) -> HTMLResponse:
+    """Render the place-bid modal. `return_target` is the element id
+    (without leading '#') that the form should swap on submit — the
+    caller (action_buttons macro) computes it from its own hx-target so
+    the modal posts back into the right region (card / board / fragment).
+    """
+    lot = await session.get(AuctionLot, lot_id)
+    if lot is None:
+        raise HTTPException(status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "partials/bid_modal.html",
+        {"lot": lot, "return_target": return_target},
+    )
+
+
+@router.get("/modal/dismiss", response_class=HTMLResponse)
+async def modal_dismiss() -> HTMLResponse:
+    """Empty body. Cancel + backdrop swap this into #modal-slot."""
+    return HTMLResponse("")

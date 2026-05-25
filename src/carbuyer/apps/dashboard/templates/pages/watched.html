@@ -5,30 +5,6 @@
 {% block content %}
 <section class="watched">
   <h1>Watchlist</h1>
-
-  {% for state, label in [
-    ("interested", "Interested"),
-    ("bid_placed", "Bid placed"),
-    ("purchased", "Purchased"),
-    ("passed", "Passed"),
-  ] %}
-    <section class="watched__bucket" data-state="{{ state }}">
-      <h2>
-        {{ label }}
-        <span class="watched__count">{{ buckets[state] | length }}</span>
-      </h2>
-      {% if buckets[state] %}
-        <ul class="watched__list">
-          {% for item in buckets[state] %}
-            <li>
-              {% include "partials/lot_card.html" %}
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="watched__empty">No lots in this bucket.</p>
-      {% endif %}
-    </section>
-  {% endfor %}
+  {% include "partials/watchlist_board.html" %}
 </section>
 {% endblock %}

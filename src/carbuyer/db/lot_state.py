@@ -1,18 +1,23 @@
 """State-machine for AuctionLot.user_action transitions.
 
-Single entry point: apply_user_action. Owns the truth-table from the
-four-state spec — bid/win field stamping, downgrade guard, audit-log
-writes. Callers (dashboard router, Discord bot) commit; this function
-only mutates and stages.
+Two entry points: apply_user_action (writer) and lot_action_history
+(reader). The writer owns the truth-table from the four-state spec —
+bid/win field stamping, downgrade guard, audit-log writes. Callers
+(dashboard router, Discord bot) commit; the writer only mutates and
+stages. The reader returns the audit trail for one lot, newest first.
 
 Lives in db/ (not apps/dashboard/) so the Discord bot can import it
 without pulling FastAPI/Jinja2 through the dashboard package.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.enums import UserAction
 from carbuyer.db.models import AuctionLot, LotActionHistory
@@ -99,3 +104,24 @@ def apply_user_action(
             source=source,
         )
     )
+
+
+async def lot_action_history(
+    session: AsyncSession,
+    lot_id: int,
+) -> Sequence[LotActionHistory]:
+    """Return the audit trail for one lot, newest first.
+
+    Reader co-located with apply_user_action (the writer for the same
+    table). Uses the (lot_id, changed_at) index for ordered scan.
+
+    Returns [] both for lots with no history AND for nonexistent lot_id —
+    callers must verify lot existence separately if they need to distinguish.
+    """
+    stmt = (
+        select(LotActionHistory)
+        .where(LotActionHistory.lot_id == lot_id)
+        .order_by(LotActionHistory.changed_at.desc())
+    )
+    result = await session.execute(stmt)
+    return result.scalars().all()
