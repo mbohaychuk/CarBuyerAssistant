@@ -404,3 +404,17 @@ async def test_health_counts_seeded_data(_patch_deps: AsyncSession) -> None:
     assert "Auctions tracked: 1" in r.text
     assert "Open lots: 1" in r.text
     assert "Historical sales: 1" in r.text
+
+
+# ─── Layout ───
+
+
+@pytest.mark.asyncio
+async def test_base_layout_has_modal_slot(
+    _patch_deps: AsyncSession,
+) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'id="modal-slot"' in r.text

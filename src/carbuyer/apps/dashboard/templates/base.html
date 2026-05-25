@@ -29,6 +29,7 @@
     <a href="/admin"     {% if nav == 'admin'     %}aria-current="page"{% endif %}>Admin</a>
   </nav>
   <main class="container">{% block content %}{% endblock %}</main>
+  <div id="modal-slot"></div>
   {% block nav %}{% endblock %}
 </body>
 </html>
