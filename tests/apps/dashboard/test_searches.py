@@ -182,6 +182,23 @@ async def test_update_search_deactivates_and_notifies(
 
 
 @pytest.mark.asyncio
+async def test_watched_shows_subtab_strip(_patch_deps: AsyncSession) -> None:
+    async with _client() as client:
+        r = await client.get("/watched")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'href="/searches"' in r.text  # sub-tab links to Searches
+    assert 'aria-label="Watchlist views"' in r.text
+
+
+@pytest.mark.asyncio
+async def test_searches_list_shows_subtab_strip(_patch_deps: AsyncSession) -> None:
+    async with _client() as client:
+        r = await client.get("/searches")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert 'href="/watched"' in r.text
+
+
+@pytest.mark.asyncio
 async def test_match_count_excludes_passed(_patch_deps: AsyncSession) -> None:
     """_match_count (surfaced via GET /searches) must not count passed lots."""
     session = _patch_deps
