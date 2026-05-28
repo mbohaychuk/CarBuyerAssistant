@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
@@ -68,24 +68,45 @@ _MATCH_PAGE_SIZE = 20
 
 
 async def _match_count(session: AsyncSession, search_id: int) -> int:
-    rows = (await session.execute(
-        select(SavedSearchMatch.id).where(
+    stmt = (
+        select(func.count())
+        .select_from(SavedSearchMatch)
+        .join(
+            AuctionLot,
+            (AuctionLot.id == SavedSearchMatch.source_id)
+            & (SavedSearchMatch.source_kind == "auction_lot"),
+        )
+        .where(
             SavedSearchMatch.saved_search_id == search_id,
             SavedSearchMatch.dismissed_at.is_(None),
+            (AuctionLot.user_action.is_(None))
+            | (AuctionLot.user_action != UserAction.PASSED.value),
         )
-    )).scalars().all()
-    return len(rows)
+    )
+    return (await session.execute(stmt)).scalar_one()
 
 
 async def _new_count(session: AsyncSession, search: SavedSearch) -> int:
-    """Live matches newer than the last detail-view visit (spec's 'N new')."""
-    stmt = select(SavedSearchMatch.id).where(
-        SavedSearchMatch.saved_search_id == search.id,
-        SavedSearchMatch.dismissed_at.is_(None),
+    """Live matches newer than the last detail-view visit (spec's 'N new'),
+    excluding passed lots so the badge agrees with the detail page."""
+    stmt = (
+        select(func.count())
+        .select_from(SavedSearchMatch)
+        .join(
+            AuctionLot,
+            (AuctionLot.id == SavedSearchMatch.source_id)
+            & (SavedSearchMatch.source_kind == "auction_lot"),
+        )
+        .where(
+            SavedSearchMatch.saved_search_id == search.id,
+            SavedSearchMatch.dismissed_at.is_(None),
+            (AuctionLot.user_action.is_(None))
+            | (AuctionLot.user_action != UserAction.PASSED.value),
+        )
     )
     if search.last_viewed_at is not None:
         stmt = stmt.where(SavedSearchMatch.matched_at > search.last_viewed_at)
-    return len((await session.execute(stmt)).scalars().all())
+    return (await session.execute(stmt)).scalar_one()
 
 
 @router.get("/searches", response_class=HTMLResponse)
@@ -182,8 +203,7 @@ async def search_detail(
         for lot, auc, m in rows[:_MATCH_PAGE_SIZE]
     ]
 
-    # Match-over-time activity log: every match incl. dismissed, newest first.
-    # Excludes passed lots for consistency with the current-matches view.
+    # Match-over-time activity log: every match incl. dismissed, excl. passed, newest first.
     log_rows = (await session.execute(
         select(SavedSearchMatch, AuctionLot.title)
         .join(AuctionLot, (SavedSearchMatch.source_kind == "auction_lot")
@@ -272,7 +292,7 @@ async def dismiss_match(
     if m.dismissed_at is None:
         m.dismissed_at = datetime.now(UTC)
     await session.commit()
-    return Response(status_code=204)
+    return Response("", status_code=200, media_type="text/html")
 
 
 @router.post("/searches/{search_id}/delete")

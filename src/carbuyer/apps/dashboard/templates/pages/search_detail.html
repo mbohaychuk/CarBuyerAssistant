@@ -12,6 +12,7 @@
          hx-target="#modal-slot" hx-swap="innerHTML"
          href="/searches/{{ search.id }}/edit">Edit</a>
       <form hx-post="/searches/{{ search.id }}/delete" hx-confirm="Delete this search?"
+            hx-target="body" hx-swap="outerHTML"
             method="post" action="/searches/{{ search.id }}/delete">
         <button type="submit" class="btn btn--danger">Delete</button>
       </form>
