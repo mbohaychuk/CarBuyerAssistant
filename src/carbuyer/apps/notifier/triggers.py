@@ -78,9 +78,9 @@ def evaluate_triggers(
     *,
     now: datetime,
     rarity_threshold: float,
-    notify_threshold: float,
     rescore_improvement_threshold: float,
     early_warning_min_hours: int,
+    going_cheap_tiers: tuple[tuple[timedelta, float], ...] = GOING_CHEAP_TIERS,
 ) -> list[TriggerResult]:
     out: list[TriggerResult] = []
 
@@ -100,34 +100,32 @@ def evaluate_triggers(
     if state.user_action == "purchased":
         return out  # never alert on lots we already own
 
-    # Going-cheap: price looks good; gate on quality signals. All gates are
-    # block-scoped to this trigger so subsequent triggers (closing_soon,
-    # lot_extended) aren't short-circuited by the going-cheap gates.
+    # Going-cheap: the alert bar drops as close approaches (see cheap_threshold).
+    # All quality gates are block-scoped so later triggers (closing_soon,
+    # lot_extended) aren't short-circuited. user_action is already known to be
+    # one of {interested, bid_placed, None} here — passed/purchased returned
+    # above — so no per-user gate is needed.
     if (
         not state.has_showstopper
         and state.confidence_bucket in {"medium", "high"}
         and (state.flag_score or 0) >= -1
         and state.price_deal_score is not None
-        and state.price_deal_score >= notify_threshold
+        and state.scheduled_end_at is not None
     ):
-        closing_in_24h = (
-            state.scheduled_end_at is not None
-            and state.scheduled_end_at - now <= timedelta(hours=24)
-        )
-        eligible_user = state.user_action in {"interested", "bid_placed", None}
-        fires_for_watched = state.user_action in {"interested", "bid_placed"}
-        fires_for_unflagged = closing_in_24h
-
-        should_fire = False
-        if state.cheap_notified_at is None and (fires_for_watched or fires_for_unflagged):
-            should_fire = True
-        elif state.last_cheap_score is not None and (
-            state.price_deal_score - state.last_cheap_score
-        ) >= rescore_improvement_threshold:
-            should_fire = True
-
-        if should_fire and eligible_user:
-            out.append(TriggerResult("going_cheap", f"score={state.price_deal_score}"))
+        threshold = cheap_threshold(state.scheduled_end_at - now, going_cheap_tiers)
+        if threshold is not None and state.price_deal_score >= threshold:
+            should_fire = state.cheap_notified_at is None or (
+                state.last_cheap_score is not None
+                and (state.price_deal_score - state.last_cheap_score)
+                >= rescore_improvement_threshold
+            )
+            if should_fire:
+                out.append(
+                    TriggerResult(
+                        "going_cheap",
+                        f"score={state.price_deal_score} threshold={threshold}",
+                    )
+                )
 
     # Closing-soon (Phase 13 H6): watched lots within the closing window
     # haven't been closing-notified yet, lot is still active.
