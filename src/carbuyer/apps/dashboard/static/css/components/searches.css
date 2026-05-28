@@ -1,0 +1,84 @@
+.searches__head,
+.search-detail__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  margin-block: var(--spacing-4);
+}
+
+.searches__list { list-style: none; padding: 0; margin: 0; }
+
+.search-card {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3);
+  border-bottom: 1px solid var(--color-rule);
+}
+.search-card__name { font-weight: 600; flex: 1; }
+.search-card__badge {
+  font-size: var(--text-sm);
+  color: var(--color-accent-ink);
+  background: var(--color-accent-bg);
+  padding: 2px var(--spacing-2);
+  border-radius: 999px;
+}
+.search-card__state { font-size: var(--text-sm); color: var(--color-muted); }
+.search-card__state.is-off { color: var(--color-rule-strong); }
+
+.subtabs {
+  display: flex;
+  gap: var(--spacing-2);
+  border-bottom: 1px solid var(--color-rule);
+  margin-bottom: var(--spacing-4);
+}
+.subtabs a {
+  padding: var(--spacing-2) var(--spacing-3);
+  color: var(--color-muted);
+  text-decoration: none;
+}
+.subtabs a[aria-current="page"] {
+  color: var(--color-ink);
+  border-bottom: 2px solid var(--color-accent);
+}
+
+.search-form__row { display: flex; gap: var(--spacing-3); }
+.search-form__advanced { margin-block: var(--spacing-3); }
+.match-row,
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) 0;
+  border-bottom: 1px solid var(--color-rule);
+}
+.activity-row.is-dismissed { opacity: 0.55; }
+.activity-row time { font-variant-numeric: tabular-nums; color: var(--color-muted); }
+
+.search-card__new {
+  font-size: var(--text-sm);
+  color: var(--color-paper-3);
+  background: var(--color-accent);
+  padding: 2px var(--spacing-2);
+  border-radius: 999px;
+}
+
+.pager { display: flex; gap: var(--spacing-4); margin-block: var(--spacing-3); }
+
+/* Button family. The codebase styles modal buttons via .modal__submit /
+   .modal__cancel; page-level controls here use a small shared .btn set. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--spacing-1);
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+  text-decoration: none;
+  cursor: pointer;
+  font: inherit;
+}
+.btn--ghost { border-color: transparent; background: transparent; color: var(--color-muted); }
+.btn--danger { border-color: var(--color-rule-strong); color: var(--color-accent-ink); }
