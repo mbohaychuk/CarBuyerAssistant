@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from carbuyer.db.models import SavedSearch
-from carbuyer.db.saved_searches import MatchableListing, match_listing
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from carbuyer.db.models import Auction, AuctionLot, SavedSearch
+from carbuyer.db.saved_searches import MatchableListing, adapt_auction_lot, match_listing
 
 
 def _listing(**overrides: object) -> MatchableListing:
@@ -32,6 +35,7 @@ def test_make_null_listing_fails_when_filter_set() -> None:
 def test_model_case_insensitive_eq() -> None:
     assert match_listing(_listing(model="MUSTANG"), SavedSearch(name="x", model="mustang")) is True
     assert match_listing(_listing(model="Camaro"), SavedSearch(name="x", model="Mustang")) is False
+    assert match_listing(_listing(model=None), SavedSearch(name="x", model="Mustang")) is False
 
 
 def test_trim_substring_case_insensitive() -> None:
@@ -74,6 +78,7 @@ def test_condition_any_of() -> None:
     s = SavedSearch(name="x", condition_categorical=["good", "excellent"])
     assert match_listing(_listing(condition_categorical="good"), s) is True
     assert match_listing(_listing(condition_categorical="rough"), s) is False
+    assert match_listing(_listing(condition_categorical=None), s) is False
 
 
 def test_province_any_of_case_insensitive() -> None:
@@ -104,3 +109,19 @@ def test_all_filters_and_together() -> None:
     assert match_listing(_listing(), s) is True
     # one field off → no match
     assert match_listing(_listing(province="BC"), s) is False
+
+
+def test_adapt_rounds_all_in_cost_up() -> None:
+    auction = Auction(
+        source="t", source_auction_id="A", url="u", canonical_url="u",
+        auction_subtype="estate", first_seen_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC), pickup_province="AB",
+    )
+    lot = AuctionLot(
+        auction=auction, source_lot_id="L1", url="u1", title="car",
+        make="Ford", all_in_at_current_bid_cad=Decimal("30000.01"),
+    )
+    listing = adapt_auction_lot(lot, auction)
+    expected_ceil = 30_001  # ceil of 30000.01 — not the truncated 30_000
+    assert listing.all_in_cost_cad == expected_ceil
+    assert listing.province == "AB"
