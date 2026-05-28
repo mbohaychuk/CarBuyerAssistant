@@ -155,7 +155,7 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     }.get(trigger)
 
 
-async def _process_one(  # noqa: PLR0912
+async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     lot_id: int, *, http_session: aiohttp.ClientSession,
 ) -> str:
     """Process one claimed lot end-to-end.

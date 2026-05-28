@@ -17,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.notifier import notifier as notifier_mod
 from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
     _embed_data,
+    _in_quiet_hours,
     _process_one,
     process_pending,
 )
 from carbuyer.db.enums import NotificationStatus
 from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.shared.config import settings as cfg
 
 
 def _seed_lot(
@@ -214,8 +216,6 @@ async def test_process_one_post_failure_flips_failed_at_max_attempts(
 ) -> None:
     """After settings.notification_max_attempts unsuccessful attempts, the
     lot stops re-queueing and lands FAILED for ops to investigate."""
-    from carbuyer.shared.config import settings as cfg
-
     session = _patched_get_session
     _, lot = _seed_lot(
         session,
@@ -587,10 +587,6 @@ async def test_embed_data_green_flags_fallback_when_desirability_signals_empty(
 
 
 def test_in_quiet_hours_wraparound_window() -> None:
-    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
-        _in_quiet_hours,
-    )
-
     # Window 22..08 (wraparound at midnight)
     base = datetime(2026, 5, 13, tzinfo=UTC)
     assert _in_quiet_hours(base.replace(hour=22), 22, 8) is True
@@ -605,9 +601,6 @@ def test_in_quiet_hours_wraparound_window() -> None:
 def test_in_quiet_hours_non_wraparound() -> None:
     """Window 9..17 (intuitive non-midnight-crossing case): inclusive start,
     exclusive end."""
-    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
-        _in_quiet_hours,
-    )
     base = datetime(2026, 5, 13, tzinfo=UTC)
     assert _in_quiet_hours(base.replace(hour=9), 9, 17) is True
     assert _in_quiet_hours(base.replace(hour=16), 9, 17) is True
@@ -622,8 +615,6 @@ async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
 ) -> None:
     """price_deal_score >= quiet_hours_override_score (0.30) overrides quiet
     hours — the post fires immediately."""
-    from carbuyer.apps.notifier import notifier as notifier_mod_local
-
     session = _patched_get_session
     near_end = datetime.now(UTC) + timedelta(hours=3)
     _, lot = _seed_lot(
@@ -637,11 +628,13 @@ async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
     )
     await session.flush()
 
-    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+    monkeypatch.setattr(notifier_mod, "_in_quiet_hours", lambda *_: True)
 
     posted: list[object] = []
 
-    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
         posted.append((channel_id, content, lot_id))
         return True
 
@@ -764,8 +757,6 @@ async def test_process_one_quiet_hours_override_fires_closing_in_1h(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Lot closing within 1h fires regardless of quiet hours (T-1h spec)."""
-    from carbuyer.apps.notifier import notifier as notifier_mod_local
-
     session = _patched_get_session
     soon_end = datetime.now(UTC) + timedelta(minutes=30)
     _, lot = _seed_lot(
@@ -779,11 +770,13 @@ async def test_process_one_quiet_hours_override_fires_closing_in_1h(
     )
     await session.flush()
 
-    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
+    monkeypatch.setattr(notifier_mod, "_in_quiet_hours", lambda *_: True)
 
     posted: list[object] = []
 
-    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
         posted.append((channel_id, content, lot_id))
         return True
 
