@@ -92,8 +92,10 @@ code is written.
    `infra/systemd/carbuyer-valuator.service`). Use `infra/systemd/`.
 
 Minor, non-deviating choices: `MatchableListing.all_in_cost_cad` is `int`
-(spec dataclass), so the adapter casts the `Decimal`
-`all_in_at_current_bid_cad` via `int(...)`. `SavedSearchMatch` does **not** use
+(spec dataclass), so the adapter rounds the `Decimal`
+`all_in_at_current_bid_cad` UP via `math.ceil(...)` — a fractional overrun
+(e.g. $30,000.99) must exceed a $30,000 budget cap, so truncation would wrongly
+let it match. `SavedSearchMatch` does **not** use
 `TimestampMixin` (its `matched_at` is its creation timestamp); `SavedSearch`
 does. The `ix_saved_search_matches_active` partial index is keyed
 `(saved_search_id, matched_at)` in the default ASC order, not the spec's
@@ -592,6 +594,7 @@ and every downstream read path stay unchanged.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from carbuyer.db.models import Auction, AuctionLot, SavedSearch
@@ -626,7 +629,7 @@ def adapt_auction_lot(lot: AuctionLot, auction: Auction) -> MatchableListing:
         title_status=lot.title_status,
         condition_categorical=lot.condition_categorical,
         province=auction.pickup_province,
-        all_in_cost_cad=int(all_in) if all_in is not None else None,
+        all_in_cost_cad=math.ceil(all_in) if all_in is not None else None,
         rarity_score=lot.rarity_score,
     )
 
