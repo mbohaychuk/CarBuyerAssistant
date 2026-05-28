@@ -1,0 +1,34 @@
+[Unit]
+Description=CarBuyer saved-search matcher worker
+After=network-online.target carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=simple
+User=markbohaychuk
+WorkingDirectory=/home/markbohaychuk/repos/CarBuyerAssistant
+EnvironmentFile=-/home/markbohaychuk/repos/CarBuyerAssistant/.env
+ExecStart=/home/markbohaychuk/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.search_matcher
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/home/markbohaychuk/repos/CarBuyerAssistant
+
+[Install]
+WantedBy=multi-user.target
