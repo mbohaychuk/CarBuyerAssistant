@@ -125,7 +125,7 @@ async def test_dismiss_sets_dismissed_at(_patch_deps: AsyncSession) -> None:
     await session.commit()
     async with _client() as client:
         r = await client.post(f"/searches/{s.id}/dismiss/{m.id}")
-    assert r.status_code in (200, 204)
+    assert r.status_code == 200  # noqa: PLR2004
     await session.refresh(m)
     assert m.dismissed_at is not None
 
@@ -148,3 +148,73 @@ async def test_delete_cascades(_patch_deps: AsyncSession) -> None:
         select(SavedSearchMatch).where(SavedSearchMatch.saved_search_id == sid)
     )).scalars().all()
     assert remaining == []
+
+
+@pytest.mark.asyncio
+async def test_update_search_deactivates_and_notifies(
+    _patch_deps: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /searches/{id}/update: field changes persist, omitted is_active → False,
+    and a saved_search_changed NOTIFY fires."""
+    session = _patch_deps
+    sent: list[tuple[str, str]] = []
+
+    async def fake_notify(_s: object, channel: str, payload: str = "") -> None:
+        sent.append((channel, payload))
+
+    monkeypatch.setattr(searches_mod, "notify", fake_notify)
+
+    s = SavedSearch(name="Trucks", make="Toyota", is_active=True)
+    session.add(s)
+    await session.commit()
+
+    async with _client() as client:
+        # Omit is_active to simulate an unchecked checkbox.
+        r = await client.post(f"/searches/{s.id}/update", data={
+            "name": "Trucks", "make": "Honda",
+        })
+    assert r.status_code == 303  # noqa: PLR2004
+
+    await session.refresh(s)
+    assert s.make == "Honda"
+    assert s.is_active is False
+    assert any(ch == "saved_search_changed" for ch, _ in sent)
+
+
+@pytest.mark.asyncio
+async def test_match_count_excludes_passed(_patch_deps: AsyncSession) -> None:
+    """_match_count (surfaced via GET /searches) must not count passed lots."""
+    session = _patch_deps
+    a = Auction(
+        source="t", source_auction_id="B", url="u2", canonical_url="u2",
+        auction_subtype="estate", first_seen_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC), pickup_province="BC",
+    )
+    session.add(a)
+    await session.flush()
+    open_lot = AuctionLot(
+        auction=a, source_lot_id="M1", url="u3", title="Open Truck",
+        make="Toyota", model="Tacoma", lot_status="open",
+    )
+    passed_lot = AuctionLot(
+        auction=a, source_lot_id="M2", url="u4", title="Passed Truck",
+        make="Toyota", model="Tacoma", lot_status="open",
+    )
+    session.add_all([open_lot, passed_lot])
+    await session.flush()
+    passed_lot.user_action = UserAction.PASSED
+    s = SavedSearch(name="tacomas", make="Toyota")
+    session.add(s)
+    await session.flush()
+    session.add_all([
+        SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot", source_id=open_lot.id),
+        SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot", source_id=passed_lot.id),
+    ])
+    await session.commit()
+
+    async with _client() as client:
+        r = await client.get("/searches")
+    assert r.status_code == 200  # noqa: PLR2004
+    # Badge should show 1 match (open), not 2 (open + passed).
+    assert "1 match" in r.text
+    assert "2 match" not in r.text
