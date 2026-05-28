@@ -46,6 +46,7 @@ _SEARCH_CHANNEL = "saved_search_changed"
 
 
 async def _active_searches(session: AsyncSession) -> list[SavedSearch]:
+    # Unbounded: tens of active searches at MVP scale. Add pagination here if that grows.
     stmt = select(SavedSearch).where(SavedSearch.is_active.is_(True))
     return list((await session.execute(stmt)).scalars().all())
 
@@ -65,8 +66,8 @@ async def _insert_matches(session: AsyncSession, triples: list[tuple[int, str, i
     if not triples:
         return
     values = [
-        {"saved_search_id": sid, "source_kind": kind, "source_id": sid_src}
-        for sid, kind, sid_src in triples
+        {"saved_search_id": search_id, "source_kind": kind, "source_id": src_id}
+        for search_id, kind, src_id in triples
     ]
     stmt = pg_insert(SavedSearchMatch).values(values).on_conflict_do_nothing(
         index_elements=["saved_search_id", "source_kind", "source_id"],
@@ -130,9 +131,14 @@ async def _lot_loop(channel: str) -> None:
         if not payload:
             continue
         try:
-            await process_lot(int(payload))
+            lot_id = int(payload)
+        except ValueError:
+            log.warning("malformed lot_id payload; skipping", channel=channel, payload=payload)
+            continue
+        try:
+            await process_lot(lot_id)
         except Exception:
-            log.exception("lot match failed; sleeping", channel=channel, payload=payload)
+            log.exception("lot match failed; sleeping", channel=channel, lot_id=lot_id)
             await asyncio.sleep(5)
 
 
@@ -141,9 +147,14 @@ async def _search_loop() -> None:
         if not payload:
             continue
         try:
-            await process_search(int(payload))
+            search_id = int(payload)
+        except ValueError:
+            log.warning("malformed search_id payload; skipping", payload=payload)
+            continue
+        try:
+            await process_search(search_id)
         except Exception:
-            log.exception("search backfill failed; sleeping", payload=payload)
+            log.exception("search backfill failed; sleeping", search_id=search_id)
             await asyncio.sleep(5)
 
 
