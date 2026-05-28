@@ -133,6 +133,7 @@ async def test_process_one_fires_going_cheap(
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         notification_status="in_progress",
     )
     await session.flush()
@@ -179,6 +180,7 @@ async def test_process_one_post_failure_keeps_pending_and_increments_attempts(
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         notification_status="in_progress",
     )
     await session.flush()
@@ -221,6 +223,7 @@ async def test_process_one_post_failure_flips_failed_at_max_attempts(
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         notification_status="in_progress",
     )
     # Simulate cfg.notification_max_attempts - 1 prior failed attempts.
@@ -261,6 +264,7 @@ async def test_process_one_unconfigured_channel_marks_skipped(
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         notification_status="in_progress",
     )
     await session.flush()
@@ -298,21 +302,20 @@ async def test_process_one_partial_success_marks_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two triggers, first succeeds, second fails. Outcome is DONE — at least
-    one message landed, so the lot is notified. Phase 13 contract: 'done'
-    means user got SOMETHING about this lot, not 'every trigger succeeded'."""
+    one message landed. going_cheap + closing_soon are the only pair that can
+    co-fire on one lot after tiering (both at T-1h)."""
     session = _patched_get_session
-    far_end = datetime(2026, 6, 10, tzinfo=UTC)
+    soon_end = datetime.now(UTC) + timedelta(minutes=30)
     _, lot = _seed_lot(
         session,
-        rarity_score=3.0,  # early_warning fires
-        price_deal_score=0.30,  # going_cheap also fires
+        price_deal_score=0.30,  # going_cheap fires at the T-1h tier (>= 0.15)
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
-        scheduled_end_at=far_end,
-        early_warning_notified_at=None,
+        scheduled_end_at=soon_end,
         notification_status="in_progress",
     )
+    lot.lot_status = "closing_soon"  # closing_soon trigger also fires
     await session.flush()
 
     call_count = {"n": 0}
@@ -326,7 +329,7 @@ async def test_process_one_partial_success_marks_done(
     monkeypatch.setattr(notifier_mod, "post_message", fake_post)
     monkeypatch.setattr(
         "carbuyer.apps.notifier.notifier.settings.discord_channels",
-        {"early_warning": 1, "hot_deals": 2, "watchlist": 3},
+        {"hot_deals": 2, "watchlist": 3, "auction_closing": 4},
     )
 
     http = MagicMock()
@@ -424,7 +427,7 @@ async def test_process_pending_claims_and_processes(
         source="test", source_auction_id="A2", url="https://y",
         canonical_url="https://y", auction_subtype="estate",
         first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
-        scheduled_end_at=datetime(2026, 6, 10, tzinfo=UTC),
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         pickup_province="AB",
     )
     session.add(a)
@@ -517,6 +520,7 @@ async def test_process_one_already_notified_cheap_skips(
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         # Pre-stamp: already notified once.
         cheap_notified_at=datetime.now(UTC),
         notification_status="in_progress",
@@ -612,55 +616,6 @@ def test_in_quiet_hours_non_wraparound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_one_defers_during_quiet_hours_for_low_score_going_cheap(
-    _patched_get_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Spec §6e: a going_cheap with price_deal_score below
-    quiet_hours_override_score is suppressed until morning. Outcome =
-    'deferred', status stays PENDING, attempts NOT incremented."""
-    from carbuyer.apps.notifier import notifier as notifier_mod_local
-
-    session = _patched_get_session
-    # Far-out scheduled_end so closing-T-1h doesn't override.
-    far_end = datetime(2099, 1, 1, tzinfo=UTC)
-    _, lot = _seed_lot(
-        session,
-        price_deal_score=0.20,  # >= notify_threshold 0.15, < override 0.30
-        confidence_bucket="high",
-        flag_score=0,
-        user_action="interested",
-        scheduled_end_at=far_end,
-        notification_status="in_progress",
-    )
-    await session.flush()
-
-    # Force "in quiet hours" regardless of current wall-clock.
-    monkeypatch.setattr(notifier_mod_local, "_in_quiet_hours", lambda *_: True)
-
-    posted: list[object] = []
-
-    async def fake_post(channel_id, content, lot_id, *, session=None):  # noqa: ANN001, ANN202
-        posted.append((channel_id, content, lot_id))
-        return True
-
-    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
-    monkeypatch.setattr(
-        "carbuyer.apps.notifier.notifier.settings.discord_channels",
-        {"hot_deals": 9001, "watchlist": 9002},
-    )
-
-    http = MagicMock()
-    outcome = await _process_one(lot.id, http_session=http)
-    assert outcome == "deferred"
-    assert not posted
-
-    await session.refresh(lot)
-    assert lot.notification_status == NotificationStatus.PENDING
-    assert lot.notification_attempts == 0  # NOT incremented — deferral isn't failure
-
-
-@pytest.mark.asyncio
 async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -670,14 +625,14 @@ async def test_process_one_quiet_hours_override_fires_high_score_going_cheap(
     from carbuyer.apps.notifier import notifier as notifier_mod_local
 
     session = _patched_get_session
-    far_end = datetime(2099, 1, 1, tzinfo=UTC)
+    near_end = datetime.now(UTC) + timedelta(hours=3)
     _, lot = _seed_lot(
         session,
         price_deal_score=0.40,  # >= override threshold
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
-        scheduled_end_at=far_end,
+        scheduled_end_at=near_end,
         notification_status="in_progress",
     )
     await session.flush()
@@ -736,6 +691,7 @@ async def test_process_pending_self_notifies_on_transient_failure(
         confidence_bucket="high",
         flag_score=0,
         user_action="interested",
+        scheduled_end_at=datetime.now(UTC) + timedelta(hours=3),
         notification_status="pending",
     )
     await session.flush()
