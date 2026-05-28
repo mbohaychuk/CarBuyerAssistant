@@ -13,6 +13,7 @@ and every downstream read path stay unchanged.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from carbuyer.db.models import Auction, AuctionLot, SavedSearch
@@ -47,7 +48,7 @@ def adapt_auction_lot(lot: AuctionLot, auction: Auction) -> MatchableListing:
         title_status=lot.title_status,
         condition_categorical=lot.condition_categorical,
         province=auction.pickup_province,
-        all_in_cost_cad=int(all_in) if all_in is not None else None,
+        all_in_cost_cad=math.ceil(all_in) if all_in is not None else None,
         rarity_score=lot.rarity_score,
     )
 
@@ -71,7 +72,6 @@ def _any_of_ci(value: str | None, options: list[str] | None) -> bool:
 
 
 def match_listing(listing: MatchableListing, search: SavedSearch) -> bool:
-    # All non-null filters AND together; a NULL listing field never satisfies a set filter.
     year_min_ok = search.year_min is None or (
         listing.year is not None and listing.year >= search.year_min
     )
