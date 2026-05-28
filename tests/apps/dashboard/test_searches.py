@@ -199,6 +199,22 @@ async def test_searches_list_shows_subtab_strip(_patch_deps: AsyncSession) -> No
 
 
 @pytest.mark.asyncio
+async def test_create_htmx_returns_hx_redirect(
+    _patch_deps: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_notify(_s: object, channel: str, payload: str = "") -> None:
+        pass
+    monkeypatch.setattr(searches_mod, "notify", fake_notify)
+    async with _client() as client:
+        r = await client.post(
+            "/searches", data={"name": "HX search", "make": "Ford"},
+            headers={"HX-Request": "true"},
+        )
+    assert r.headers.get("HX-Redirect", "").startswith("/searches/")
+    assert "<html" not in r.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_match_count_excludes_passed(_patch_deps: AsyncSession) -> None:
     """_match_count (surfaced via GET /searches) must not count passed lots."""
     session = _patch_deps

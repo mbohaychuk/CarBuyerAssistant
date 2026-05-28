@@ -13,6 +13,7 @@ from carbuyer.apps.dashboard.deps import (
     CurrentUser,
     current_user,
     get_session,
+    is_htmx,
 )
 from carbuyer.db.enums import UserAction
 from carbuyer.db.models import Auction, AuctionLot, SavedSearch, SavedSearchMatch
@@ -21,6 +22,14 @@ from carbuyer.db.notify import notify
 router = APIRouter()
 
 _SEARCH_CHANNEL = "saved_search_changed"
+
+
+def _redirect_after_mutation(request: Request, url: str) -> Response:
+    """HTMX requests get an HX-Redirect header (clean client-side navigation);
+    non-HTMX form posts get a normal 303 so the no-JS fallback still works."""
+    if is_htmx(request):
+        return Response(status_code=204, headers={"HX-Redirect": url})
+    return RedirectResponse(url, status_code=303)
 
 
 def _clean_str(value: str | None) -> str | None:
@@ -164,7 +173,7 @@ async def create_search(
     await session.flush()
     await notify(session, _SEARCH_CHANNEL, str(search.id))
     await session.commit()
-    return RedirectResponse(f"/searches/{search.id}", status_code=303)
+    return _redirect_after_mutation(request, f"/searches/{search.id}")
 
 
 @router.get("/searches/{search_id}", response_class=HTMLResponse)
@@ -276,7 +285,7 @@ async def update_search(
     )
     await notify(session, _SEARCH_CHANNEL, str(search.id))
     await session.commit()
-    return RedirectResponse(f"/searches/{search.id}", status_code=303)
+    return _redirect_after_mutation(request, f"/searches/{search.id}")
 
 
 @router.post("/searches/{search_id}/dismiss/{match_id}")
@@ -297,6 +306,7 @@ async def dismiss_match(
 
 @router.post("/searches/{search_id}/delete")
 async def delete_search(
+    request: Request,
     search_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[CurrentUser, Depends(current_user)],
@@ -306,4 +316,4 @@ async def delete_search(
         return Response(status_code=404)
     await session.delete(search)  # FK ondelete=CASCADE removes match rows
     await session.commit()
-    return RedirectResponse("/searches", status_code=303)
+    return _redirect_after_mutation(request, "/searches")
