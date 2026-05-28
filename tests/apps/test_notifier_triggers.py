@@ -1,6 +1,11 @@
 from datetime import UTC, datetime, timedelta
 
-from carbuyer.apps.notifier.triggers import LotState, TriggerResult, evaluate_triggers
+from carbuyer.apps.notifier.triggers import (
+    LotState,
+    TriggerResult,
+    cheap_threshold,
+    evaluate_triggers,
+)
 
 NOW = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
 
@@ -291,22 +296,23 @@ def test_passed_suppresses_closing_and_extended() -> None:
 
 
 def test_cheap_threshold_tier_boundaries() -> None:
-    from carbuyer.apps.notifier.triggers import cheap_threshold
-
-    # T-1h tier (<= 1h): 0.15
-    assert cheap_threshold(timedelta(minutes=30)) == 0.15
-    assert cheap_threshold(timedelta(hours=1)) == 0.15
-    # just past T-1h falls to the T-6h tier: 0.30
-    assert cheap_threshold(timedelta(hours=1, minutes=1)) == 0.30
-    assert cheap_threshold(timedelta(hours=6)) == 0.30
-    # just past T-6h falls to the T-24h tier: 0.50
-    assert cheap_threshold(timedelta(hours=6, minutes=1)) == 0.50
-    assert cheap_threshold(timedelta(hours=24)) == 0.50
-    # beyond the widest tier: no alert
-    assert cheap_threshold(timedelta(hours=24, minutes=1)) is None
-    assert cheap_threshold(timedelta(days=3)) is None
-    # already closed: no alert
-    assert cheap_threshold(timedelta(minutes=-5)) is None
+    # (time_to_close, expected threshold). Closest tier wins; beyond the widest
+    # tier or already-closed yields None. Literals live in the table, not in
+    # comparisons, so they document the intended thresholds without tripping
+    # magic-value lint.
+    cases: tuple[tuple[timedelta, float | None], ...] = (
+        (timedelta(minutes=30), 0.15),       # T-1h tier
+        (timedelta(hours=1), 0.15),          # T-1h boundary (inclusive)
+        (timedelta(hours=1, minutes=1), 0.30),   # just past T-1h → T-6h
+        (timedelta(hours=6), 0.30),          # T-6h boundary
+        (timedelta(hours=6, minutes=1), 0.50),   # just past T-6h → T-24h
+        (timedelta(hours=24), 0.50),         # T-24h boundary
+        (timedelta(hours=24, minutes=1), None),  # beyond widest tier
+        (timedelta(days=3), None),
+        (timedelta(minutes=-5), None),       # already closed
+    )
+    for time_to_close, expected in cases:
+        assert cheap_threshold(time_to_close) == expected
 
 
 def test_going_cheap_t24h_needs_screaming_deal() -> None:

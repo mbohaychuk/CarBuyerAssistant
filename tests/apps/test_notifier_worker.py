@@ -109,7 +109,7 @@ async def test_process_one_no_triggers_marks_skipped(
 ) -> None:
     """Lot with no trigger conditions → notification_status='skipped'."""
     session = _patched_get_session
-    # price_deal_score below notify_threshold (0.15), no rarity → no triggers.
+    # price_deal_score below every tier threshold, no rarity → no triggers.
     _, lot = _seed_lot(session, price_deal_score=0.05, notification_status="in_progress")
     await session.flush()
 
@@ -362,7 +362,7 @@ async def test_process_one_fires_early_warning(
     _, lot = _seed_lot(
         session,
         rarity_score=3.0,
-        # price_deal_score below notify_threshold (0.15) so going_cheap won't fire.
+        # price_deal_score below every tier threshold, so going_cheap won't fire.
         price_deal_score=0.05,
         confidence_bucket="high",
         flag_score=0,
