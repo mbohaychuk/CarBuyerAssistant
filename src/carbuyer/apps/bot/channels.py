@@ -8,8 +8,10 @@ embed building) lives elsewhere.
 
 The 0.20 deal-score cutoff (``HOT_DEAL_SCORE_THRESHOLD``) splits
 notify-eligible ``going_cheap`` deals into ``hot_deals`` (>= threshold) and
-``watchlist`` (< threshold). This is independent of ``settings.notify_threshold``,
-which controls whether the ``going_cheap`` notification fires at all.
+``watchlist`` (< threshold). This routing is independent of *whether* a
+``going_cheap`` notification fires at all — that gate is the time-to-close
+tier table (``GOING_CHEAP_TIERS`` / ``cheap_threshold`` in
+``notifier/triggers.py``), not ``settings.notify_threshold``.
 """
 from __future__ import annotations
 

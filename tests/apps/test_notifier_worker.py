@@ -21,6 +21,7 @@ from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUs
     _process_one,
     process_pending,
 )
+from carbuyer.apps.notifier.triggers import TriggerResult
 from carbuyer.db.enums import NotificationStatus
 from carbuyer.db.models import Auction, AuctionLot
 from carbuyer.shared.config import settings as cfg
@@ -335,9 +336,61 @@ async def test_process_one_partial_success_marks_done(
     http = MagicMock()
     outcome = await _process_one(lot.id, http_session=http)
     assert outcome == "done"
+    assert call_count["n"] == 2  # noqa: PLR2004 — both triggers attempted: one posted, one failed
 
     await session.refresh(lot)
     assert lot.notification_status == NotificationStatus.DONE
+
+
+@pytest.mark.asyncio
+async def test_process_one_defers_non_overriding_trigger_in_quiet_hours(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trigger that neither overrides quiet hours nor closes within 1h is
+    deferred: status returns to PENDING, attempts not incremented, nothing
+    posts. Guards the ``return "deferred"`` branch, whose only test was removed
+    when tiering made the natural going_cheap deferral scenario unreachable."""
+    session = _patched_get_session
+    far_end = datetime.now(UTC) + timedelta(hours=12)  # outside the closing-in-1h gate
+    _, lot = _seed_lot(
+        session,
+        price_deal_score=0.10,  # below quiet_hours_override_score (0.30)
+        confidence_bucket="high",
+        flag_score=0,
+        user_action="interested",
+        scheduled_end_at=far_end,
+        notification_status="in_progress",
+    )
+    await session.flush()
+
+    def always_quiet(*_: object) -> bool:
+        return True
+
+    def one_low_going_cheap(*_: object, **__: object) -> list[TriggerResult]:
+        return [TriggerResult("going_cheap", "score=0.10")]
+
+    monkeypatch.setattr(notifier_mod, "_in_quiet_hours", always_quiet)
+    monkeypatch.setattr(notifier_mod, "evaluate_triggers", one_low_going_cheap)
+
+    posted: list[object] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lot_id: int, *, session: object = None,
+    ) -> bool:
+        posted.append((channel_id, content, lot_id))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+
+    http = MagicMock()
+    outcome = await _process_one(lot.id, http_session=http)
+    assert outcome == "deferred"
+    assert posted == []
+
+    await session.refresh(lot)
+    assert lot.notification_status == NotificationStatus.PENDING
+    assert lot.notification_attempts == 0
 
 
 @pytest.mark.asyncio
