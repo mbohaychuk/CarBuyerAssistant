@@ -271,3 +271,25 @@ def test_passed_suppresses_closing_and_extended() -> None:
     )
     out = _run(s)
     assert out == []
+
+
+# ─── PR-1: going-cheap tier table ──────────────────────────────────────────
+
+
+def test_cheap_threshold_tier_boundaries() -> None:
+    from carbuyer.apps.notifier.triggers import cheap_threshold
+
+    # T-1h tier (<= 1h): 0.15
+    assert cheap_threshold(timedelta(minutes=30)) == 0.15
+    assert cheap_threshold(timedelta(hours=1)) == 0.15
+    # just past T-1h falls to the T-6h tier: 0.30
+    assert cheap_threshold(timedelta(hours=1, minutes=1)) == 0.30
+    assert cheap_threshold(timedelta(hours=6)) == 0.30
+    # just past T-6h falls to the T-24h tier: 0.50
+    assert cheap_threshold(timedelta(hours=6, minutes=1)) == 0.50
+    assert cheap_threshold(timedelta(hours=24)) == 0.50
+    # beyond the widest tier: no alert
+    assert cheap_threshold(timedelta(hours=24, minutes=1)) is None
+    assert cheap_threshold(timedelta(days=3)) is None
+    # already closed: no alert
+    assert cheap_threshold(timedelta(minutes=-5)) is None

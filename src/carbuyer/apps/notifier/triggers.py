@@ -35,6 +35,35 @@ class TriggerResult:
     reason: str
 
 
+# Going-cheap thresholds as a function of time-to-close. Tightest window
+# first: a lot 30 min from close uses the T-1h threshold, not T-24h. Beyond
+# the widest tier going-cheap never fires — a nominal opening bid days out is
+# not signal. See docs/specs/2026-05-27-notification-pivot-design.md (PR-1).
+GOING_CHEAP_TIERS: tuple[tuple[timedelta, float], ...] = (
+    (timedelta(hours=1), 0.15),
+    (timedelta(hours=6), 0.30),
+    (timedelta(hours=24), 0.50),
+)
+
+
+def cheap_threshold(
+    time_to_close: timedelta,
+    tiers: tuple[tuple[timedelta, float], ...] = GOING_CHEAP_TIERS,
+) -> float | None:
+    """Minimum price_deal_score for a going-cheap alert at this time-to-close.
+
+    Returns the threshold of the closest (tightest) tier whose window contains
+    time_to_close, or None when the lot is already closed or further out than
+    the widest tier.
+    """
+    if time_to_close < timedelta(0):
+        return None
+    for window, threshold in tiers:
+        if time_to_close <= window:
+            return threshold
+    return None
+
+
 # Phase 13 H6: closing_soon fires once per watched lot when the lot is within
 # this window. Spec calls for T-24h / T-6h / T-1h tiers; this MVP uses a
 # single fire at the most-urgent (T-1h) tier to fit the existing single-column
