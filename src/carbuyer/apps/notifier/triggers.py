@@ -35,6 +35,35 @@ class TriggerResult:
     reason: str
 
 
+# Going-cheap thresholds as a function of time-to-close. Tightest window
+# first: a lot 30 min from close uses the T-1h threshold, not T-24h. Beyond
+# the widest tier going-cheap never fires — a nominal opening bid days out is
+# not signal. See docs/specs/2026-05-27-notification-pivot-design.md (PR-1).
+GOING_CHEAP_TIERS: tuple[tuple[timedelta, float], ...] = (
+    (timedelta(hours=1), 0.15),
+    (timedelta(hours=6), 0.30),
+    (timedelta(hours=24), 0.50),
+)
+
+
+def cheap_threshold(
+    time_to_close: timedelta,
+    tiers: tuple[tuple[timedelta, float], ...] = GOING_CHEAP_TIERS,
+) -> float | None:
+    """Minimum price_deal_score for a going-cheap alert at this time-to-close.
+
+    Returns the threshold of the closest (tightest) tier whose window contains
+    time_to_close, or None when the lot is already closed or further out than
+    the widest tier.
+    """
+    if time_to_close < timedelta(0):
+        return None
+    for window, threshold in tiers:
+        if time_to_close <= window:
+            return threshold
+    return None
+
+
 # Phase 13 H6: closing_soon fires once per watched lot when the lot is within
 # this window. Spec calls for T-24h / T-6h / T-1h tiers; this MVP uses a
 # single fire at the most-urgent (T-1h) tier to fit the existing single-column
@@ -49,9 +78,9 @@ def evaluate_triggers(
     *,
     now: datetime,
     rarity_threshold: float,
-    notify_threshold: float,
     rescore_improvement_threshold: float,
     early_warning_min_hours: int,
+    going_cheap_tiers: tuple[tuple[timedelta, float], ...] = GOING_CHEAP_TIERS,
 ) -> list[TriggerResult]:
     out: list[TriggerResult] = []
 
@@ -71,34 +100,32 @@ def evaluate_triggers(
     if state.user_action == "purchased":
         return out  # never alert on lots we already own
 
-    # Going-cheap: price looks good; gate on quality signals. All gates are
-    # block-scoped to this trigger so subsequent triggers (closing_soon,
-    # lot_extended) aren't short-circuited by the going-cheap gates.
+    # Going-cheap: the alert bar drops as close approaches (see cheap_threshold).
+    # All quality gates are block-scoped so later triggers (closing_soon,
+    # lot_extended) aren't short-circuited. user_action is already known to be
+    # one of {interested, bid_placed, None} here — passed/purchased returned
+    # above — so no per-user gate is needed.
     if (
         not state.has_showstopper
         and state.confidence_bucket in {"medium", "high"}
         and (state.flag_score or 0) >= -1
         and state.price_deal_score is not None
-        and state.price_deal_score >= notify_threshold
+        and state.scheduled_end_at is not None
     ):
-        closing_in_24h = (
-            state.scheduled_end_at is not None
-            and state.scheduled_end_at - now <= timedelta(hours=24)
-        )
-        eligible_user = state.user_action in {"interested", "bid_placed", None}
-        fires_for_watched = state.user_action in {"interested", "bid_placed"}
-        fires_for_unflagged = closing_in_24h
-
-        should_fire = False
-        if state.cheap_notified_at is None and (fires_for_watched or fires_for_unflagged):
-            should_fire = True
-        elif state.last_cheap_score is not None and (
-            state.price_deal_score - state.last_cheap_score
-        ) >= rescore_improvement_threshold:
-            should_fire = True
-
-        if should_fire and eligible_user:
-            out.append(TriggerResult("going_cheap", f"score={state.price_deal_score}"))
+        threshold = cheap_threshold(state.scheduled_end_at - now, going_cheap_tiers)
+        if threshold is not None and state.price_deal_score >= threshold:
+            should_fire = state.cheap_notified_at is None or (
+                state.last_cheap_score is not None
+                and (state.price_deal_score - state.last_cheap_score)
+                >= rescore_improvement_threshold
+            )
+            if should_fire:
+                out.append(
+                    TriggerResult(
+                        "going_cheap",
+                        f"score={state.price_deal_score} threshold={threshold}",
+                    )
+                )
 
     # Closing-soon (Phase 13 H6): watched lots within the closing window
     # haven't been closing-notified yet, lot is still active.

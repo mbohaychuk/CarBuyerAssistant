@@ -155,7 +155,7 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     }.get(trigger)
 
 
-async def _process_one(  # noqa: PLR0912
+async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     lot_id: int, *, http_session: aiohttp.ClientSession,
 ) -> str:
     """Process one claimed lot end-to-end.
@@ -191,7 +191,6 @@ async def _process_one(  # noqa: PLR0912
         state,
         now=now,
         rarity_threshold=settings.early_warning_rarity_threshold,
-        notify_threshold=settings.notify_threshold,
         rescore_improvement_threshold=settings.rescore_improvement_threshold,
         early_warning_min_hours=settings.early_warning_min_hours_to_close,
     )
