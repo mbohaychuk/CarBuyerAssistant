@@ -659,3 +659,67 @@ class SourceAlertState(Base):
     last_alerted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
     )
+
+
+class SavedSearch(Base, TimestampMixin):
+    """A user-defined interest filter. All non-null fields AND together;
+    NULL means wildcard. String scalars are case-insensitive; list fields are
+    ANY-OF. See carbuyer.db.saved_searches.match_listing for the semantics."""
+
+    __tablename__ = "saved_searches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true"),
+    )
+
+    # Vehicle filters (NULL = wildcard).
+    make: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(64))
+    trim: Mapped[str | None] = mapped_column(String(64))
+    year_min: Mapped[int | None] = mapped_column(Integer)
+    year_max: Mapped[int | None] = mapped_column(Integer)
+    mileage_km_max: Mapped[int | None] = mapped_column(Integer)
+    title_status: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    condition_categorical: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+
+    # Location & price filters (NULL = wildcard).
+    province: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    max_all_in_cost_cad: Mapped[int | None] = mapped_column(Integer)
+
+    # Stamped each time the detail view is opened; powers the list's
+    # "N new since last visit" badge (matches with matched_at > last_viewed_at).
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SavedSearchMatch(Base):
+    """A point-in-time fact that a source listing satisfied a saved search.
+    Polymorphic (source_kind + source_id) so a future private-sale source needs
+    no new table. Never retracted; user mutes via dismissed_at."""
+
+    __tablename__ = "saved_search_matches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    saved_search_id: Mapped[int] = mapped_column(
+        ForeignKey("saved_searches.id", ondelete="CASCADE"), nullable=False,
+    )
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    matched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "saved_search_id", "source_kind", "source_id",
+            name="uq_saved_search_matches_search_source",
+        ),
+        Index("ix_saved_search_matches_source", "source_kind", "source_id"),
+        Index(
+            "ix_saved_search_matches_active",
+            "saved_search_id", "matched_at",
+            postgresql_where=text("dismissed_at IS NULL"),
+        ),
+    )
