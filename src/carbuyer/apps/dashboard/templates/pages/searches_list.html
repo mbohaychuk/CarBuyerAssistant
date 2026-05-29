@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block nav %}watchlist{% endblock %}
+{% block title %}Searches — CarBuyer{% endblock %}
+
+{% block content %}
+<section class="searches">
+  {% include "partials/watchlist_subtabs.html" with context %}
+  <div class="searches__head">
+    <h1>Saved searches</h1>
+    <a class="btn" hx-get="/searches/new" hx-target="#modal-slot" hx-swap="innerHTML"
+       href="/searches/new">New search</a>
+  </div>
+  {% if not searches %}
+    <p class="t-meta">No saved searches yet. Create one to get matched against new lots.</p>
+  {% else %}
+  <ul class="searches__list">
+    {% for s in searches %}
+      {% include "partials/search_card.html" with context %}
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

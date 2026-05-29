@@ -1,0 +1,99 @@
+{# Saved-search create/edit modal. Swapped into #modal-slot. `search` is None
+   for create or a SavedSearch for edit. #}
+{% set is_edit = search is not none %}
+{% set post_url = ("/searches/" ~ search.id ~ "/update") if is_edit else "/searches" %}
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="search-modal-title">
+  <a class="modal__backdrop" href="/modal/dismiss"
+     hx-get="/modal/dismiss" hx-target="#modal-slot" hx-swap="innerHTML"
+     aria-label="Close"></a>
+  <div class="modal__panel">
+    <h2 id="search-modal-title" class="modal__title">
+      {{ "Edit search" if is_edit else "New search" }}
+    </h2>
+    <form class="modal__form search-form" method="post" action="{{ post_url }}"
+          hx-post="{{ post_url }}" hx-target="body" hx-swap="outerHTML">
+      <label class="modal__field">
+        <span>Name</span>
+        <input type="text" name="name" required
+               value="{{ search.name if is_edit else '' }}" autofocus>
+      </label>
+      <div class="search-form__row">
+        <label class="modal__field">
+          <span>Make</span>
+          <input type="text" name="make" value="{{ search.make or '' if is_edit else '' }}">
+        </label>
+        <label class="modal__field">
+          <span>Model</span>
+          <input type="text" name="model" value="{{ search.model or '' if is_edit else '' }}">
+        </label>
+      </div>
+      <div class="search-form__row">
+        <label class="modal__field">
+          <span>Year min</span>
+          <input type="number" name="year_min" value="{{ search.year_min or '' if is_edit else '' }}">
+        </label>
+        <label class="modal__field">
+          <span>Year max</span>
+          <input type="number" name="year_max" value="{{ search.year_max or '' if is_edit else '' }}">
+        </label>
+      </div>
+      <label class="modal__field">
+        <span>Provinces</span>
+        <select name="province" multiple size="4">
+          {% for p in ["AB", "SK", "MB", "BC", "ON"] %}
+            <option value="{{ p }}"
+              {% if is_edit and search.province and p in search.province %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <details class="search-form__advanced">
+        <summary>Advanced filters</summary>
+        <label class="modal__field">
+          <span>Trim contains</span>
+          <input type="text" name="trim" value="{{ search.trim or '' if is_edit else '' }}">
+        </label>
+        <label class="modal__field">
+          <span>Max mileage (km)</span>
+          <input type="number" name="mileage_km_max"
+                 value="{{ search.mileage_km_max or '' if is_edit else '' }}">
+        </label>
+        <label class="modal__field">
+          <span>Max all-in cost (CAD)</span>
+          <input type="number" name="max_all_in_cost_cad"
+                 value="{{ search.max_all_in_cost_cad or '' if is_edit else '' }}">
+        </label>
+        <label class="modal__field">
+          <span>Title status</span>
+          <select name="title_status" multiple size="4">
+            {% for t in ["NORMAL", "REBUILT", "SALVAGE", "UNKNOWN"] %}
+              <option value="{{ t }}"
+                {% if is_edit and search.title_status and t in search.title_status %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="modal__field">
+          <span>Condition</span>
+          <select name="condition_categorical" multiple size="4">
+            {% for c in ["excellent", "good", "decent", "rough", "project"] %}
+              <option value="{{ c }}"
+                {% if is_edit and search.condition_categorical and c in search.condition_categorical %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% if is_edit %}
+        <label class="modal__field modal__field--inline">
+          <input type="checkbox" name="is_active" {% if search.is_active %}checked{% endif %}>
+          <span>Active</span>
+        </label>
+        {% endif %}
+      </details>
+      <div class="modal__actions">
+        <a class="modal__cancel" href="/modal/dismiss"
+           hx-get="/modal/dismiss" hx-target="#modal-slot" hx-swap="innerHTML">Cancel</a>
+        <button type="submit" class="modal__submit" hx-disabled-elt="this">
+          {{ "Save" if is_edit else "Create" }}
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # valuator does no LLM I/O, so it can drain larger batches.
     valuation_batch_size: int = 30
     valuation_max_attempts: int = 3
+    search_match_backfill_limit: int = 20_000
     # Phase 13: notifier retry cap. A Discord POST returning False
     # (429-after-retry, 4xx, network blip, missing channel) leaves
     # notification_status=PENDING and increments notification_attempts;

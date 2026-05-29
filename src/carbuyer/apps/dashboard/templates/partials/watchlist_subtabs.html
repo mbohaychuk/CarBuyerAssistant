@@ -1,0 +1,6 @@
+{# Lots/Searches sub-tab strip for the Watchlist section. `active_subtab`
+   ("lots" | "searches") selects the current pill. #}
+<nav class="subtabs" aria-label="Watchlist views">
+  <a href="/watched" {% if active_subtab == 'lots' %}aria-current="page"{% endif %}>Lots</a>
+  <a href="/searches" {% if active_subtab == 'searches' %}aria-current="page"{% endif %}>Searches</a>
+</nav>
