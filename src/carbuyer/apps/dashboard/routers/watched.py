@@ -58,5 +58,5 @@ async def watched(
     """4-column kanban over the four user_action states."""
     buckets = await build_watchlist_buckets(session)
     return templates.TemplateResponse(
-        request, "pages/watched.html", {"buckets": buckets},
+        request, "pages/watched.html", {"buckets": buckets, "active_subtab": "lots"},
     )

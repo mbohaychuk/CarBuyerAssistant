@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block nav %}watchlist{% endblock %}
+{% block title %}{{ search.name }} — CarBuyer{% endblock %}
+
+{% block content %}
+<section class="search-detail">
+  {% include "partials/watchlist_subtabs.html" with context %}
+  <div class="search-detail__head">
+    <h1>{{ search.name }}</h1>
+    <div class="search-detail__actions">
+      <a class="btn" hx-get="/searches/{{ search.id }}/edit"
+         hx-target="#modal-slot" hx-swap="innerHTML"
+         href="/searches/{{ search.id }}/edit">Edit</a>
+      <form hx-post="/searches/{{ search.id }}/delete" hx-confirm="Delete this search?"
+            hx-target="body" hx-swap="outerHTML"
+            method="post" action="/searches/{{ search.id }}/delete">
+        <button type="submit" class="btn btn--danger">Delete</button>
+      </form>
+    </div>
+  </div>
+
+  <p class="t-meta">
+    {{ search.make or "any make" }} ·
+    {{ search.model or "any model" }} ·
+    {% if search.year_min or search.year_max %}{{ search.year_min or "…" }}–{{ search.year_max or "…" }}{% else %}any year{% endif %}
+    {% if search.province %} · {{ search.province | join(", ") }}{% endif %}
+  </p>
+
+  <h2>Current matches{% if page > 1 %} (page {{ page }}){% endif %}</h2>
+  {% if not matches %}
+    <p class="t-meta">No live matches{% if page > 1 %} on this page{% endif %}.</p>
+  {% else %}
+  <ul class="search-detail__matches">
+    {% for row in matches %}
+      <li class="match-row">
+        <a href="/lots/{{ row.lot.id }}">{{ row.lot.title or ("Lot #" ~ row.lot.id) }}</a>
+        <span class="t-meta">{{ row.auction.pickup_province or "" }}</span>
+        <button class="btn btn--ghost"
+                hx-post="/searches/{{ search.id }}/dismiss/{{ row.match.id }}"
+                hx-target="closest .match-row" hx-swap="outerHTML">Dismiss</button>
+      </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <nav class="pager" aria-label="Match pages">
+    {% if page > 1 %}
+      <a href="/searches/{{ search.id }}?page={{ page - 1 }}">← Newer</a>
+    {% endif %}
+    {% if has_next %}
+      <a href="/searches/{{ search.id }}?page={{ page + 1 }}">Older →</a>
+    {% endif %}
+  </nav>
+
+  <h2>Match activity</h2>
+  {% if not activity %}
+    <p class="t-meta">No matches recorded yet.</p>
+  {% else %}
+  <ol class="search-detail__activity">
+    {% for row in activity %}
+      <li class="activity-row {% if row.match.dismissed_at %}is-dismissed{% endif %}">
+        <time datetime="{{ row.match.matched_at.isoformat() }}">
+          {{ row.match.matched_at.strftime("%b %d, %H:%M") }}
+        </time>
+        <a href="/lots/{{ row.match.source_id }}">{{ row.title or ("Lot #" ~ row.match.source_id) }}</a>
+        {% if row.match.dismissed_at %}<span class="t-meta">dismissed</span>{% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</section>
+{% endblock %}

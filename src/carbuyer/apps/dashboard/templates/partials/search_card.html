@@ -1,0 +1,10 @@
+{# Renders one saved-search summary. Expects `s`, `counts`, `new_counts`. #}
+<li class="search-card">
+  <a class="search-card__name" href="/searches/{{ s.id }}">{{ s.name }}</a>
+  {% set new = new_counts.get(s.id, 0) %}
+  {% if new %}<span class="search-card__new">{{ new }} new</span>{% endif %}
+  <span class="search-card__badge">{{ counts.get(s.id, 0) }} matches</span>
+  <span class="search-card__state {% if not s.is_active %}is-off{% endif %}">
+    {{ "active" if s.is_active else "paused" }}
+  </span>
+</li>
