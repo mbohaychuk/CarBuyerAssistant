@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,9 +39,14 @@ def _clean_str(value: str | None) -> str | None:
     return v or None
 
 
-def _clean_int(value: str | None) -> int | None:
+def _clean_int(value: str | None, field: str) -> int | None:
     v = _clean_str(value)
-    return int(v) if v is not None else None
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{field} must be a whole number") from None
 
 
 def _clean_list(values: list[str] | None) -> list[str] | None:
@@ -63,10 +68,10 @@ def _apply_form(
     search.make = _clean_str(make)
     search.model = _clean_str(model)
     search.trim = _clean_str(trim)
-    search.year_min = _clean_int(year_min)
-    search.year_max = _clean_int(year_max)
-    search.mileage_km_max = _clean_int(mileage_km_max)
-    search.max_all_in_cost_cad = _clean_int(max_all_in_cost_cad)
+    search.year_min = _clean_int(year_min, "Year min")
+    search.year_max = _clean_int(year_max, "Year max")
+    search.mileage_km_max = _clean_int(mileage_km_max, "Max mileage")
+    search.max_all_in_cost_cad = _clean_int(max_all_in_cost_cad, "Max all-in cost")
     search.title_status = _clean_list(title_status)
     search.condition_categorical = _clean_list(condition_categorical)
     search.province = _clean_list(province)
@@ -201,7 +206,7 @@ async def search_detail(
             (AuctionLot.user_action.is_(None))
             | (AuctionLot.user_action != UserAction.PASSED.value),
         )
-        .order_by(SavedSearchMatch.matched_at.desc())
+        .order_by(SavedSearchMatch.matched_at.desc(), SavedSearchMatch.id.desc())
     )
     rows = (await session.execute(
         base.offset((page - 1) * _MATCH_PAGE_SIZE).limit(_MATCH_PAGE_SIZE + 1)
@@ -222,7 +227,7 @@ async def search_detail(
             (AuctionLot.user_action.is_(None))
             | (AuctionLot.user_action != UserAction.PASSED.value),
         )
-        .order_by(SavedSearchMatch.matched_at.desc())
+        .order_by(SavedSearchMatch.matched_at.desc(), SavedSearchMatch.id.desc())
         .limit(50)
     )).all()
     activity = [{"match": m, "title": title} for m, title in log_rows]

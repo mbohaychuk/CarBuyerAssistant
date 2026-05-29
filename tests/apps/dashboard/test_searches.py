@@ -215,6 +215,58 @@ async def test_create_htmx_returns_hx_redirect(
 
 
 @pytest.mark.asyncio
+async def test_list_shows_n_new_since_last_visit(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    a = Auction(
+        source="t", source_auction_id="A2", url="u10", canonical_url="u10",
+        auction_subtype="estate", first_seen_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC), pickup_province="AB",
+    )
+    session.add(a)
+    await session.flush()
+    lot_old = AuctionLot(auction=a, source_lot_id="NL1", url="u11", title="Old Ford",
+                         make="Ford", lot_status="open")
+    lot_new = AuctionLot(auction=a, source_lot_id="NL2", url="u12", title="New Ford",
+                         make="Ford", lot_status="open")
+    session.add_all([lot_old, lot_new])
+    await session.flush()
+    s = SavedSearch(name="stangs", make="Ford",
+                    last_viewed_at=datetime(2026, 5, 10, tzinfo=UTC))
+    session.add(s)
+    await session.flush()
+    session.add_all([
+        SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot",
+                         source_id=lot_old.id, matched_at=datetime(2026, 5, 1, tzinfo=UTC)),
+        SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot",
+                         source_id=lot_new.id, matched_at=datetime(2026, 5, 20, tzinfo=UTC)),
+    ])
+    await session.commit()
+    async with _client() as client:
+        r = await client.get("/searches")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "1 new" in r.text    # only the post-last_viewed match counts as new
+    assert "2 matches" in r.text  # both are current matches
+
+
+@pytest.mark.asyncio
+async def test_dismiss_rejects_wrong_search_id(_patch_deps: AsyncSession) -> None:
+    """IDOR guard: dismissing match M via search B's URL must return 404 and leave M intact."""
+    session = _patch_deps
+    search_a = SavedSearch(name="A", make="Ford")
+    search_b = SavedSearch(name="B", make="Honda")
+    session.add_all([search_a, search_b])
+    await session.flush()
+    m = SavedSearchMatch(saved_search_id=search_a.id, source_kind="auction_lot", source_id=99)
+    session.add(m)
+    await session.commit()
+    async with _client() as client:
+        r = await client.post(f"/searches/{search_b.id}/dismiss/{m.id}")
+    assert r.status_code == 404  # noqa: PLR2004
+    await session.refresh(m)
+    assert m.dismissed_at is None
+
+
+@pytest.mark.asyncio
 async def test_match_count_excludes_passed(_patch_deps: AsyncSession) -> None:
     """_match_count (surfaced via GET /searches) must not count passed lots."""
     session = _patch_deps
