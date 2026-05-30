@@ -190,7 +190,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     triggers = evaluate_triggers(
         state,
         now=now,
-        rarity_threshold=settings.early_warning_rarity_threshold,
+        rarity_threshold=settings.long_lead_threshold,
         rescore_improvement_threshold=settings.rescore_improvement_threshold,
         early_warning_min_hours=settings.early_warning_min_hours_to_close,
     )

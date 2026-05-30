@@ -96,6 +96,9 @@ class Auction(Base, TimestampMixin):
     )
     needs_plugin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     routing_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Owned by: auction_digest worker. NULL until the per-auction digest is
+    # sent (or skipped-but-evaluated); the eligibility index filters on NULL.
+    digest_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Indexed for dashboard hrefs / admin lookup; NOT unique — multi-router can
     # produce two rows with the same canonical_url under different `source`
@@ -118,6 +121,11 @@ class Auction(Base, TimestampMixin):
             "source",
             "source_auction_id",
             name="uq_auctions_source_source_auction_id",
+        ),
+        Index(
+            "ix_auctions_digest_eligibility",
+            "scheduled_start_at",
+            postgresql_where=text("digest_sent_at IS NULL AND scheduled_start_at IS NOT NULL"),
         ),
     )
 
