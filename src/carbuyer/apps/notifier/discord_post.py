@@ -133,6 +133,7 @@ async def post_message(
     payload: dict[str, Any] = {
         "content": content,
         "components": _components_for_lot(lot_id),
+        "allowed_mentions": {"parse": []},
     }
     log_kwargs: dict[str, object] = {"channel_id": channel_id, "lot_id": lot_id}
 
@@ -162,7 +163,7 @@ async def post_simple_message(
 
     url = f"{_DISCORD_API}/channels/{channel_id}/messages"
     headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
-    payload: dict[str, Any] = {"content": content}
+    payload: dict[str, Any] = {"content": content, "allowed_mentions": {"parse": []}}
     log_kwargs: dict[str, object] = {"channel_id": channel_id}
 
     if session is not None:

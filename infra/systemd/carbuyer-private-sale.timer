@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CarBuyer private-sale worker every 15 minutes
+After=carbuyer-postgres.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=carbuyer-private-sale.service
+
+[Install]
+WantedBy=timers.target
