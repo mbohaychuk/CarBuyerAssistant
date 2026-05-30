@@ -98,7 +98,6 @@ async def _build_sections(
             AuctionLot.auction_id == auction.id,
             SavedSearchMatch.dismissed_at.is_(None),
             _active_lot_clause(),
-            AuctionLot.year.is_not(None),
         )
         .order_by(SavedSearchMatch.matched_at.desc(), SavedSearchMatch.id.desc())
     )).all()
@@ -149,6 +148,8 @@ async def run_digests(
     try:
         for auction_id in ids:
             try:
+                # Phase 1: read + compose in a short tx; no network I/O here.
+                content: str | None = None
                 async with get_session() as s, s.begin():
                     auction = await s.get(Auction, auction_id)
                     if auction is None or auction.digest_sent_at is not None:
@@ -178,16 +179,25 @@ async def run_digests(
                     )
                     content = compose_digest(header, matches=matches, rare=rare)
                     if content is None:
+                        # Empty digest: stamp inside this tx (no network needed).
                         auction.digest_sent_at = now
                         counts["empty"] += 1
                         continue
-                    ok = await post_simple_message(channel_id, content, session=http)
-                    if ok:
-                        auction.digest_sent_at = now
-                        counts["posted"] += 1
-                    else:
-                        counts["failed"] += 1
-                        log.warning("auction_digest post failed", auction_id=auction_id)
+                # tx is closed; `content` is a plain str.
+
+                # Phase 2: POST outside any transaction.
+                ok = await post_simple_message(channel_id, content, session=http)
+                if not ok:
+                    counts["failed"] += 1
+                    log.warning("auction_digest post failed", auction_id=auction_id)
+                    continue  # leave digest_sent_at NULL -> retried next run
+
+                # Phase 3: stamp in a second short tx, re-checking the marker.
+                async with get_session() as s2, s2.begin():
+                    a2 = await s2.get(Auction, auction_id)
+                    if a2 is not None and a2.digest_sent_at is None:
+                        a2.digest_sent_at = now
+                counts["posted"] += 1
             except Exception:
                 log.exception("auction_digest: auction failed", auction_id=auction_id)
                 counts["failed"] += 1
