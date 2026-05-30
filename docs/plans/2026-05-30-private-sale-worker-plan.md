@@ -205,8 +205,10 @@ async def value_private_listing(session: AsyncSession, listing: PrivateListing) 
     comps = await build_comp_set(session, make=listing.make, model=listing.model,
                                  trim=listing.trim, year=listing.year, mileage_km=listing.mileage_km or 0)
     fv = compute_fair_value(comps, condition=listing.condition_categorical or "decent", sparse=False)
-    listing.value_low_cad, listing.value_mid_cad, listing.value_high_cad = fv.value_low_cad, fv.value_mid_cad, fv.value_high_cad
-    listing.expected_value_cad, listing.comp_count, listing.confidence_bucket = fv.expected_value_cad, fv.comp_count, fv.confidence.value
+    # NB: PrivateListing's valuator-outputs are intentionally leaner than
+    # AuctionLot — it has expected_value_cad + confidence_bucket but NO
+    # value_low/mid/high_cad or comp_count columns. Set only what exists.
+    listing.expected_value_cad, listing.confidence_bucket = fv.expected_value_cad, fv.confidence.value
     hist = await _historical_comp_count(session, make=listing.make, model=listing.model)
     listing.rarity_score = rarity_score(RarityInputs(listing.desirable_trim_or_spec, listing.classic_or_collector, hist, None))
     listing.flag_score = flag_score(listing.red_flags or [], listing.green_flags or [], description_quality=None)
