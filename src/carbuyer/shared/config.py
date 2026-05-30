@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     discord_channels: dict[str, int | str] = Field(default_factory=dict)
     home_province: Province = "AB"
 
+    private_deal_threshold: float = 0.15           # min price_deal_score to alert
+    private_realert_drop_pct: float = 0.10          # re-alert if price drops >= this fraction
+    private_provinces: tuple[str, ...] = ("AB", "SK", "MB")  # Kijiji search scope
+
     notify_threshold: float = 0.15
     # early_warning is the "long-lead / plan a road trip" signal (spec PR-3
     # §3.3): top-rarity lots, far enough out to act. Tightened so it doesn't

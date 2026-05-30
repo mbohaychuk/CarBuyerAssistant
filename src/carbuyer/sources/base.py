@@ -140,6 +140,30 @@ class RawLot:
 
 
 @dataclass(slots=True)
+class RawPrivateListing:
+    """A private-party listing parsed from a classifieds source, ready to upsert
+    into private_listings. No auction fields (no bids, premium, close time).
+    year/make/model are best-effort from the listing; the enricher normalizes."""
+
+    source: str
+    source_listing_id: str
+    url: str
+    title: str | None
+    description: str | None
+    photos: list[str] = field(default_factory=list)
+    year: int | None = None
+    make: str | None = None
+    model: str | None = None
+    trim: str | None = None
+    mileage_km: int | None = None
+    vin: str | None = None
+    ask_price_cad: Decimal | None = None
+    pickup_province: str | None = None
+    pickup_city: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class BidObservation:
     ref: LotRef
     observed_at: datetime
