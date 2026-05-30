@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block nav %}auctions{% endblock %}
+{% block title %}{{ auction.title or auction.source }} — digest preview{% endblock %}
+
+{% block content %}
+<section class="digest-preview">
+  <h1>{{ auction.title or auction.source }}</h1>
+  <p class="t-meta">
+    {{ auction.pickup_city or "" }}{% if auction.pickup_province %}, {{ auction.pickup_province }}{% endif %}
+    {% if auction.scheduled_start_at %} · starts {{ auction.scheduled_start_at.strftime("%a %b %d, %H:%M UTC") }}{% endif %}
+    {% if auction.digest_sent_at %} · digest sent {{ auction.digest_sent_at.strftime("%b %d %H:%M") }}{% endif %}
+  </p>
+
+  {% if (matches | length) > 10 or (rare | length) > 10 %}
+    <p class="t-meta">This preview lists every match for audit; the sent digest
+    caps each section at 10 lots with a "… and N more" link.</p>
+  {% endif %}
+
+  {% if not matches and not rare %}
+    <p class="t-meta">Nothing to digest — no saved-search matches or rare vehicles on this auction.</p>
+  {% endif %}
+
+  {% if matches %}
+  <h2>Your saved searches ({{ matches | length }})</h2>
+  <ul>
+    {% for lot in matches %}
+      <li><a href="/lots/{{ lot.lot_id }}">{{ lot.summary }}</a>
+        {% if lot.search_name %}<span class="t-meta">[{{ lot.search_name }}]</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if rare %}
+  <h2>Rare / special vehicles ({{ rare | length }})</h2>
+  <ul>
+    {% for lot in rare %}
+      <li><a href="/lots/{{ lot.lot_id }}">{{ lot.summary }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

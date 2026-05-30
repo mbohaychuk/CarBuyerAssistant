@@ -7,10 +7,18 @@ this module entirely.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from typing import Annotated
 
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse, Response
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from carbuyer.apps.auction_digest.runner import (
+    _build_sections,  # pyright: ignore[reportPrivateUsage]
+)
 from carbuyer.apps.dashboard.app import templates
+from carbuyer.apps.dashboard.deps import get_session
+from carbuyer.db.models import Auction
 
 router = APIRouter()
 
@@ -30,4 +38,21 @@ async def auctions_placeholder(request: Request) -> HTMLResponse:
             "fallback_label": "Closing soon (current closest view)",
             "fallback_url": "/closing",
         },
+    )
+
+
+@router.get("/auctions/{auction_id}/digest", response_class=HTMLResponse)
+async def auction_digest_preview(
+    request: Request,
+    auction_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    auction = await session.get(Auction, auction_id)
+    if auction is None:
+        return Response("Not found", status_code=404)
+    matches, rare = await _build_sections(session, auction)
+    return templates.TemplateResponse(
+        request,
+        "pages/auction_digest_preview.html",
+        {"auction": auction, "matches": matches, "rare": rare},
     )

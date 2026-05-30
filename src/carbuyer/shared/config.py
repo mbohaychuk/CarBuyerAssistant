@@ -57,8 +57,22 @@ class Settings(BaseSettings):
     home_province: Province = "AB"
 
     notify_threshold: float = 0.15
-    early_warning_rarity_threshold: float = 2.0
-    early_warning_min_hours_to_close: int = 48
+    # early_warning is the "long-lead / plan a road trip" signal (spec PR-3
+    # §3.3): top-rarity lots, far enough out to act. Tightened so it doesn't
+    # duplicate the T-24h digest.
+    #
+    # long_lead_threshold is NEW and is the early_warning rarity gate (~top 5%).
+    # Do NOT reuse early_warning_rarity_threshold for this — that field is also
+    # an input to the valuator's _weights_hash (valuator.py:86), so changing it
+    # would invalidate every cached score and force a mass re-valuation. Leave it
+    # at 2.0; the early_warning trigger reads long_lead_threshold instead (the
+    # notifier passes it — notifier.py).
+    early_warning_rarity_threshold: float = 2.0  # unchanged; valuator scoring-hash input
+    long_lead_threshold: float = 3.0             # NEW: early_warning rarity gate
+    early_warning_min_hours_to_close: int = 168  # was 48; 7 days (long-lead time gate)
+    # The per-auction digest's rare/special section uses the lower bar (the
+    # bulk of interesting cars), caught at T-24h.
+    digest_rarity_threshold: float = 2.0
     rescore_improvement_threshold: float = 0.05
 
     quiet_hours_start: int = 22

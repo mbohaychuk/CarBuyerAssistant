@@ -1,0 +1,32 @@
+[Unit]
+Description=CarBuyer per-auction digest runner (oneshot)
+After=carbuyer-postgres.service
+Requires=carbuyer-postgres.service
+
+[Service]
+Type=oneshot
+User=markbohaychuk
+WorkingDirectory=/home/markbohaychuk/repos/CarBuyerAssistant
+EnvironmentFile=-/home/markbohaychuk/repos/CarBuyerAssistant/.env
+ExecStart=/home/markbohaychuk/repos/CarBuyerAssistant/.venv/bin/python -m carbuyer.apps.auction_digest
+StandardOutput=journal
+StandardError=journal
+# Phase 13 H11: sandboxing. Workers speak TCP to Postgres/OpenAI/Discord and
+# write tempfiles under PrivateTmp; nothing else is needed. Future step:
+# switch to a dedicated 'carbuyer' system user (see README).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/home/markbohaychuk/repos/CarBuyerAssistant
