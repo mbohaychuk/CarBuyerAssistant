@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CarBuyer per-auction digest every 15 minutes
+After=carbuyer-postgres.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=carbuyer-auction-digest.service
+
+[Install]
+WantedBy=timers.target
