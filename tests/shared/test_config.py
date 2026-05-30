@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from carbuyer.shared.config import Settings
 
 DEFAULT_NOTIFY_THRESHOLD = 0.15
-DEFAULT_EARLY_WARNING_HOURS = 48
+DEFAULT_EARLY_WARNING_HOURS = 168
 
 
 def test_settings_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
