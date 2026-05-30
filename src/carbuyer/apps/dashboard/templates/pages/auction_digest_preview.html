@@ -11,6 +11,11 @@
     {% if auction.digest_sent_at %} · digest sent {{ auction.digest_sent_at.strftime("%b %d %H:%M") }}{% endif %}
   </p>
 
+  {% if (matches | length) > 10 or (rare | length) > 10 %}
+    <p class="t-meta">This preview lists every match for audit; the sent digest
+    caps each section at 10 lots with a "… and N more" link.</p>
+  {% endif %}
+
   {% if not matches and not rare %}
     <p class="t-meta">Nothing to digest — no saved-search matches or rare vehicles on this auction.</p>
   {% endif %}
