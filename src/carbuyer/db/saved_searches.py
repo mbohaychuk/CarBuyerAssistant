@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from carbuyer.db.models import Auction, AuctionLot, SavedSearch
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, SavedSearch
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +50,24 @@ def adapt_auction_lot(lot: AuctionLot, auction: Auction) -> MatchableListing:
         province=auction.pickup_province,
         all_in_cost_cad=math.ceil(all_in) if all_in is not None else None,
         rarity_score=lot.rarity_score,
+    )
+
+
+def adapt_private_listing(listing: PrivateListing) -> MatchableListing:
+    all_in = listing.all_in_cost_cad
+    return MatchableListing(
+        source_kind="private_listing",
+        source_id=listing.id,
+        make=listing.make,
+        model=listing.model,
+        year=listing.year,
+        trim=listing.trim,
+        mileage_km=listing.mileage_km,
+        title_status=listing.title_status,
+        condition_categorical=listing.condition_categorical,
+        province=listing.pickup_province,
+        all_in_cost_cad=math.ceil(all_in) if all_in is not None else None,
+        rarity_score=listing.rarity_score,
     )
 
 
