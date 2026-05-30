@@ -57,13 +57,31 @@ def test_truncates_each_section_at_ten() -> None:
     out = compose_digest(_header(), matches=matches, rare=[])
     assert out is not None
     assert "/lots/10" in out
-    assert "/lots/11" not in out      # capped at 10
-    assert "5 more" in out            # "... and 5 more"
+    assert "/lots/11" not in out           # capped at 10
+    assert "5 more" in out                 # "... and 5 more"
+    assert "{auction_url}" not in out      # placeholder must be substituted
+    assert "https://x/auction/1" in out    # real auction URL appears
+
+
+def test_exactly_ten_no_overflow_line() -> None:
+    out = compose_digest(_header(), matches=[_lot(i) for i in range(1, 11)], rare=[])
+    assert out is not None
+    assert "/lots/10" in out
+    assert "more" not in out  # no overflow line at exactly the cap
+
+
+def test_starts_at_none_renders_tbd() -> None:
+    out = compose_digest(_header(starts_at=None), matches=[_lot(1)], rare=[])
+    assert out is not None
+    assert "TBD" in out
 
 
 def test_respects_discord_2000_char_limit() -> None:
+    # title="A" * 1000 produces a message that exceeds 2000 chars before clamping,
+    # so both the length guard and the truncation marker are exercised.
     matches = [_lot(i, search="search") for i in range(1, 11)]
     rare = [_lot(i) for i in range(11, 21)]
-    out = compose_digest(_header(title="A" * 200), matches=matches, rare=rare)
+    out = compose_digest(_header(title="A" * 1000), matches=matches, rare=rare)
     assert out is not None
     assert len(out) <= 2000  # noqa: PLR2004
+    assert out.endswith("…")  # truncation marker confirms the clamp ran
