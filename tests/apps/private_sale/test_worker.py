@@ -407,6 +407,11 @@ async def test_price_drop_realerts(
     assert len(_posted_messages) == 1, f"Expected re-alert, got {len(_posted_messages)}"
     assert counts["alerted"] == 1
 
+    # Verify the second-tx stamp persisted the new baseline.
+    await session.refresh(listing)
+    assert listing.last_alert_price_cad == dropped_ask
+    assert listing.alerted_at == _NOW
+
 
 @pytest.mark.asyncio
 async def test_post_failure_leaves_alerted_at_null(
