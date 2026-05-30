@@ -22,7 +22,7 @@ from carbuyer.apps.auction_digest.composer import (
 )
 from carbuyer.apps.notifier.channel_resolver import resolve_channels
 from carbuyer.apps.notifier.discord_post import post_simple_message
-from carbuyer.db.enums import UserAction
+from carbuyer.db.enums import AuctionStatus, UserAction
 from carbuyer.db.models import Auction, AuctionLot, SavedSearch, SavedSearchMatch
 from carbuyer.db.session import get_session
 from carbuyer.shared.config import settings
@@ -33,7 +33,11 @@ log = get_logger("auction_digest")
 
 _DIGEST_KEY = "auction_digest"
 _FALLBACK_KEY = "early_warning"  # spec §3.4: default to the existing alerts channel
-_SKIP_STATUSES = ("cancelled", "past")
+_SKIP_STATUSES = (
+    AuctionStatus.CANCELLED.value,
+    AuctionStatus.CLOSED.value,
+    AuctionStatus.CLOSING.value,
+)
 _WINDOW_HOURS = 24
 
 
@@ -174,12 +178,12 @@ async def run_digests(
                     )
                     content = compose_digest(header, matches=matches, rare=rare)
                     if content is None:
-                        auction.digest_sent_at = func.now()  # type: ignore[assignment]
+                        auction.digest_sent_at = now
                         counts["empty"] += 1
                         continue
                     ok = await post_simple_message(channel_id, content, session=http)
                     if ok:
-                        auction.digest_sent_at = func.now()  # type: ignore[assignment]
+                        auction.digest_sent_at = now
                         counts["posted"] += 1
                     else:
                         counts["failed"] += 1
