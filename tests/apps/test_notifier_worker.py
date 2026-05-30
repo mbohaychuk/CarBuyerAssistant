@@ -410,11 +410,12 @@ async def test_process_one_fires_early_warning(
 ) -> None:
     """Lot with high rarity + close far out → early_warning fires → DONE."""
     session = _patched_get_session
-    # rarity_score above threshold (2.0), scheduled_end_at 72 h out (>= 48 h).
-    far_end = datetime(2026, 6, 10, tzinfo=UTC)  # well beyond 48 h from test run
+    # rarity above long_lead_threshold (3.0); scheduled_end_at well beyond the
+    # 168 h (7-day) long-lead gate.
+    far_end = datetime(2026, 6, 10, tzinfo=UTC)  # well beyond 7 days from test run
     _, lot = _seed_lot(
         session,
-        rarity_score=3.0,
+        rarity_score=3.5,
         # price_deal_score below every tier threshold, so going_cheap won't fire.
         price_deal_score=0.05,
         confidence_bucket="high",
