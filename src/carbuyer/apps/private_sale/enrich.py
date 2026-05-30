@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from carbuyer.db.enums import EnrichmentStatus
+from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.models import PrivateListing
 from carbuyer.llm.base import DescribeInput, DescribeProvider
 from carbuyer.llm.carfax import find_carfax_url
@@ -109,7 +109,7 @@ async def enrich_private_listing(
         auctioneer_name=None,
         auction_subtype="private",
         pickup_province=listing.pickup_province,
-        raw_carfax_url=find_carfax_url(listing.description),
+        raw_carfax_url=find_carfax_url(listing.description or ""),
         current_high_bid_cad=listing.ask_price_cad,
         bid_increment=None,
         auction_close_at=None,
@@ -120,3 +120,5 @@ async def enrich_private_listing(
     out = await provider.describe(payload)
     _apply_enrichment(listing, out)
     listing.enrichment_status = EnrichmentStatus.DONE.value
+    # Enrichment changed the vehicle facts -> the listing must be (re-)valued.
+    listing.valuation_status = ValuationStatus.PENDING.value

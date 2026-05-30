@@ -13,13 +13,14 @@ Verifies:
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
 from carbuyer.apps.private_sale.enrich import enrich_private_listing
 from carbuyer.db.models import PrivateListing
-from carbuyer.llm.base import DescribeInput
+from carbuyer.llm.base import DescribeInput, DescribeProvider
 from carbuyer.llm.schemas import (
     Concern,
     EnrichmentOutput,
@@ -110,8 +111,10 @@ _UNKNOWN_TITLE_OUTPUT = EnrichmentOutput(
 )
 
 
-class FakeProvider:
+class FakeProvider(DescribeProvider):
     """Captures the DescribeInput passed to describe() for assertion."""
+
+    name = "fake"
 
     def __init__(self) -> None:
         self.received: DescribeInput | None = None
@@ -121,7 +124,9 @@ class FakeProvider:
         return _CANNED_OUTPUT
 
 
-class _UnknownTitleProvider:
+class _UnknownTitleProvider(DescribeProvider):
+    name = "unknown-title-fake"
+
     async def describe(self, payload: DescribeInput) -> EnrichmentOutput:
         return _UNKNOWN_TITLE_OUTPUT
 
@@ -183,6 +188,7 @@ async def test_describe_input_shape() -> None:
     assert inp.lot_id == _LISTING_ID
     assert inp.title == "2018 Toyota Tundra TRD Pro 4x4"
     assert inp.pickup_province == "AB"
+    assert inp.current_year == datetime.now(UTC).year
 
 
 @pytest.mark.asyncio
@@ -252,3 +258,128 @@ async def test_title_status_unknown_not_applied() -> None:
 
     # UNKNOWN must not clobber "SALVAGE"
     assert listing.title_status == "SALVAGE"
+
+
+@pytest.mark.asyncio
+async def test_valuation_status_reset_to_pending() -> None:
+    """valuation_status must be reset to 'pending' after enrichment."""
+    listing = _make_listing()
+    listing.valuation_status = "done"  # type: ignore[attr-defined]
+
+    await enrich_private_listing(listing, provider=FakeProvider())
+
+    assert listing.valuation_status == "pending"  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_year_not_applied() -> None:
+    """LLM returning an implausible year must not overwrite the listing year."""
+    listing = _make_listing()
+    listing.year = _YEAR  # set a known good pre-existing value
+
+    # Build a canned output with an absurd year.
+    bad_nv = NormalizedVehicle(
+        year=1850,
+        make="Toyota",
+        model="Tundra",
+        trim=None,
+        engine=None,
+        transmission="unknown",
+        drivetrain="unknown",
+        mileage_km=None,
+        mileage_is_verified=None,
+        vin=None,
+    )
+    bad_output = EnrichmentOutput(
+        normalized_vehicle=bad_nv,
+        title_status="NORMAL",
+        condition_categorical="good",
+        condition_confidence=0.5,
+        red_flags=[],
+        green_flags=[],
+        showstopper_flags=[],
+        concerns=[],
+        carfax_url=None,
+        summary="",
+        description_quality="thin",
+        rarity=RarityAssessment(
+            desirable_trim_or_spec=False,
+            classic_or_collector=False,
+            desirability_signals=[],
+            desirability_evidence=[],
+        ),
+    )
+
+    class _BadYearProvider(DescribeProvider):
+        name = "bad-year-fake"
+
+        async def describe(self, payload: DescribeInput) -> EnrichmentOutput:
+            return bad_output
+
+    await enrich_private_listing(listing, provider=_BadYearProvider())
+
+    # Guard must reject 1850; pre-existing _YEAR stays intact.
+    assert listing.year == _YEAR
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_mileage_not_applied() -> None:
+    """LLM returning an absurd mileage must not overwrite the listing mileage."""
+    listing = _make_listing()
+    listing.mileage_km = _MILEAGE_KM  # set a known good pre-existing value
+
+    bad_nv = NormalizedVehicle(
+        year=_YEAR,
+        make="Toyota",
+        model="Tundra",
+        trim=None,
+        engine=None,
+        transmission="unknown",
+        drivetrain="unknown",
+        mileage_km=5_000_000,  # way above _MILEAGE_KM_MAX = 1_500_000
+        mileage_is_verified=None,
+        vin=None,
+    )
+    bad_output = EnrichmentOutput(
+        normalized_vehicle=bad_nv,
+        title_status="NORMAL",
+        condition_categorical="good",
+        condition_confidence=0.5,
+        red_flags=[],
+        green_flags=[],
+        showstopper_flags=[],
+        concerns=[],
+        carfax_url=None,
+        summary="",
+        description_quality="thin",
+        rarity=RarityAssessment(
+            desirable_trim_or_spec=False,
+            classic_or_collector=False,
+            desirability_signals=[],
+            desirability_evidence=[],
+        ),
+    )
+
+    class _BadMileageProvider(DescribeProvider):
+        name = "bad-mileage-fake"
+
+        async def describe(self, payload: DescribeInput) -> EnrichmentOutput:
+            return bad_output
+
+    await enrich_private_listing(listing, provider=_BadMileageProvider())
+
+    # Guard must reject 5_000_000; pre-existing _MILEAGE_KM stays intact.
+    assert listing.mileage_km == _MILEAGE_KM
+
+
+@pytest.mark.asyncio
+async def test_photos_none_image_count_zero() -> None:
+    """photos=None must not raise; image_count is 0."""
+    listing = _make_listing()
+    listing.photos = None  # type: ignore[assignment]
+    fake = FakeProvider()
+
+    await enrich_private_listing(listing, provider=fake)
+
+    assert fake.received is not None
+    assert fake.received.image_count == 0
