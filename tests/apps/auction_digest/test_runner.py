@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.auction_digest import runner as runner_mod
 from carbuyer.apps.auction_digest.runner import run_digests
+from carbuyer.db.enums import UserAction
 from carbuyer.db.models import Auction, AuctionLot, SavedSearch, SavedSearchMatch
 
 # starts_at in (NOW, NOW+24h] qualifies as "within 24h"
@@ -181,3 +182,128 @@ async def test_lot_in_both_sections_dedupes_to_matches_only(
 
     assert len(posts) == 1
     assert posts[0].count(f"/lots/{lot.id}") == 1  # appears once (matches), not duplicated in rare
+
+
+@pytest.mark.asyncio
+async def test_yearless_lot_with_match_appears_in_section_1(
+    _patched: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lot with year=None but make/model set and a real SavedSearchMatch must
+    appear in section 1. The year IS NOT NULL filter was incorrectly applied
+    to the match query and silently dropped these lots."""
+    session = _patched
+    posts: list[str] = []
+
+    async def fake_post(channel_id: int, content: str, *, session: object = None) -> bool:
+        posts.append(content)
+        return True
+
+    monkeypatch.setattr(runner_mod, "post_simple_message", fake_post)
+
+    a = _auction(session, sid="A1", starts_at=NOW + timedelta(hours=10))
+    await session.flush()
+    lot = _lot(session, a, sid="L1")
+    lot.year = None  # _lot hardcodes 1968; override to test yearless path
+    s = SavedSearch(name="Any Mustang", make="Ford")
+    session.add(s)
+    await session.flush()
+    session.add(SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot", source_id=lot.id))
+    await session.flush()
+
+    await run_digests(now=NOW)
+
+    assert len(posts) == 1
+    assert f"/lots/{lot.id}" in posts[0]
+
+
+@pytest.mark.asyncio
+async def test_exception_in_first_auction_does_not_abort_second(
+    _patched: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the first auction raises during processing, the second auction must
+    still be processed and the counts must reflect both failure and success."""
+    session = _patched
+    call_count = 0
+    posts: list[str] = []
+
+    async def fake_post(channel_id: int, content: str, *, session: object = None) -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated network failure")
+        posts.append(content)
+        return True
+
+    monkeypatch.setattr(runner_mod, "post_simple_message", fake_post)
+
+    # Two eligible auctions; A1 sorts first (earlier start).
+    a1 = _auction(session, sid="A1", starts_at=NOW + timedelta(hours=5))
+    a2 = _auction(session, sid="A2", starts_at=NOW + timedelta(hours=10))
+    await session.flush()
+    for a, sid in [(a1, "L1"), (a2, "L2")]:
+        lot = _lot(session, a, sid=sid)
+        s = SavedSearch(name=f"search-{sid}", make="Ford")
+        session.add(s)
+        await session.flush()
+        session.add(SavedSearchMatch(
+            saved_search_id=s.id, source_kind="auction_lot", source_id=lot.id,
+        ))
+    await session.flush()
+
+    counts = await run_digests(now=NOW)
+
+    assert counts["failed"] >= 1
+    assert counts["posted"] >= 1
+    assert len(posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_dismissed_match_and_passed_lot_excluded_from_digest(
+    _patched: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dismissed SavedSearchMatch rows must not appear in section 1.
+    A lot with user_action=PASSED must appear in neither section,
+    even when it has a match and a high rarity_score."""
+    session = _patched
+    posts: list[str] = []
+
+    async def fake_post(channel_id: int, content: str, *, session: object = None) -> bool:
+        posts.append(content)
+        return True
+
+    monkeypatch.setattr(runner_mod, "post_simple_message", fake_post)
+
+    a = _auction(session, sid="A1", starts_at=NOW + timedelta(hours=10))
+    await session.flush()
+
+    # (a) Lot with a dismissed match — should be absent from section 1.
+    lot_dismissed = _lot(session, a, sid="D1")
+    # (b) Lot with user_action=PASSED that is also matched and rare — absent from both sections.
+    lot_passed = _lot(session, a, sid="P1", rarity_score=4.0,
+                      user_action=UserAction.PASSED.value)
+    # A visible lot so the digest is non-empty.
+    lot_visible = _lot(session, a, sid="V1")
+    s = SavedSearch(name="any", make="Ford")
+    session.add(s)
+    await session.flush()
+
+    dismissed_match = SavedSearchMatch(
+        saved_search_id=s.id, source_kind="auction_lot", source_id=lot_dismissed.id,
+        dismissed_at=NOW,
+    )
+    passed_match = SavedSearchMatch(
+        saved_search_id=s.id, source_kind="auction_lot", source_id=lot_passed.id,
+    )
+    visible_match = SavedSearchMatch(
+        saved_search_id=s.id, source_kind="auction_lot", source_id=lot_visible.id,
+    )
+    session.add_all([dismissed_match, passed_match, visible_match])
+    await session.flush()
+
+    await run_digests(now=NOW)
+
+    assert len(posts) == 1
+    content = posts[0]
+    assert f"/lots/{lot_visible.id}" in content       # visible lot present
+    assert f"/lots/{lot_dismissed.id}" not in content  # dismissed match absent
+    assert f"/lots/{lot_passed.id}" not in content     # passed lot absent from both sections
