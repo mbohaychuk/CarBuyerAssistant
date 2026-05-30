@@ -731,3 +731,106 @@ class SavedSearchMatch(Base):
             postgresql_where=text("dismissed_at IS NULL"),
         ),
     )
+
+
+class PrivateListing(Base, TimestampMixin):
+    """A private-party vehicle listing (e.g. Kijiji). Separate from AuctionLot:
+    no bids, no buyer premium, no closing time. Enriched + valued + matched by
+    the private_sale worker (PR-2), surfaced in the dashboard (PR-3)."""
+
+    __tablename__ = "private_listings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    # ── source identity (scraper) ──────────────────────────────────────────
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_listing_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    photos: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'::text[]"), nullable=False,
+    )
+    title: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    pickup_province: Mapped[str | None] = mapped_column(String(8))
+    pickup_city: Mapped[str | None] = mapped_column(String(128))
+    ask_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+
+    # ── vehicle identity (scraper on insert; enricher normalizes) ──────────
+    year: Mapped[int | None] = mapped_column(Integer)
+    make: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(64))
+    trim: Mapped[str | None] = mapped_column(String(64))
+    vin: Mapped[str | None] = mapped_column(String(32))
+    mileage_km: Mapped[int | None] = mapped_column(Integer)
+    title_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN",
+    )
+
+    # ── enricher outputs (LLM) ─────────────────────────────────────────────
+    condition_categorical: Mapped[str | None] = mapped_column(String(16))
+    red_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    green_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    showstopper_flags: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False,
+    )
+    rarity_score: Mapped[float | None] = mapped_column()
+    summary: Mapped[str | None] = mapped_column(Text)
+    desirable_trim_or_spec: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    classic_or_collector: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+
+    # ── valuator outputs ───────────────────────────────────────────────────
+    expected_value_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    all_in_cost_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    price_deal_score: Mapped[float | None] = mapped_column()
+    flag_score: Mapped[int | None] = mapped_column(Integer)
+    confidence_bucket: Mapped[str | None] = mapped_column(String(16))
+
+    # ── pipeline status + lifecycle ────────────────────────────────────────
+    enrichment_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending",
+    )
+    valuation_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending",
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_alert_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+
+    # ── dashboard (user) ───────────────────────────────────────────────────
+    user_action: Mapped[UserAction | None] = mapped_column(
+        SAEnum(UserAction, native_enum=False, length=16,
+               values_callable=lambda x: [e.value for e in x]),
+    )
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source", "source_listing_id",
+            name="uq_private_listings_source_listing",
+        ),
+        Index("ix_private_listings_make_model_year", "make", "model", "year"),
+        Index("ix_private_listings_price_deal_score", "price_deal_score"),
+        Index("ix_private_listings_user_action", "user_action"),
+        Index(
+            "ix_private_listings_pending",
+            "id",
+            postgresql_where=text(
+                "enrichment_status = 'pending' OR valuation_status = 'pending'"
+            ),
+        ),
+    )
