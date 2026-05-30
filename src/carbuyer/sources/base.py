@@ -150,7 +150,7 @@ class RawPrivateListing:
     url: str
     title: str | None
     description: str | None
-    photos: list[str] = field(default_factory=list)
+    photos: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     year: int | None = None
     make: str | None = None
     model: str | None = None
@@ -160,7 +160,7 @@ class RawPrivateListing:
     ask_price_cad: Decimal | None = None
     pickup_province: str | None = None
     pickup_city: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
 
 
 @dataclass(slots=True)
