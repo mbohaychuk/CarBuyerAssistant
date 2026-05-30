@@ -87,7 +87,9 @@ def evaluate_triggers(
     if state.user_action == "passed":
         return out
 
-    # Early-warning: rare car, not yet notified, closing far enough out to act.
+    # Early-warning (long-lead): a top-rarity car, not yet notified, far enough
+    # from close to plan a trip. Tightened in PR-3 to the long-lead threshold +
+    # >=7d-to-close (config) so it does not duplicate the T-24h auction digest.
     if (
         state.rarity_score is not None
         and state.rarity_score >= rarity_threshold

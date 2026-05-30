@@ -10,9 +10,9 @@ from carbuyer.apps.notifier.triggers import (
 NOW = datetime(2026, 5, 9, 12, 0, tzinfo=UTC)
 
 # Shared thresholds used across every evaluate_triggers call.
-RARITY_THRESHOLD = 2.0
+RARITY_THRESHOLD = 3.0
 RESCORE_IMPROVEMENT = 0.05
-EARLY_WARNING_MIN_HOURS = 48
+EARLY_WARNING_MIN_HOURS = 168
 
 
 def _state(
@@ -63,7 +63,7 @@ def _run(state: LotState) -> list[TriggerResult]:
 
 
 def test_early_warning_fires() -> None:
-    s = _state(rarity_score=2.5)
+    s = _state(rarity_score=3.5)
     out = _run(s)
     assert any(t.trigger == "early_warning" for t in out)
 
@@ -115,7 +115,7 @@ def test_early_warning_ignores_showstopper() -> None:
     """Showstopper gates going_cheap, not early_warning — a rare car closing
     far out still earns its lead-time alert."""
     s = _state(
-        rarity_score=2.5,
+        rarity_score=3.5,
         has_showstopper=True,
         scheduled_end_at=NOW + timedelta(days=10),
     )
@@ -365,3 +365,17 @@ def test_going_cheap_no_refire_without_improvement() -> None:
         last_cheap_score=0.29,  # delta 0.01 < RESCORE_IMPROVEMENT (0.05)
     )
     assert not any(t.trigger == "going_cheap" for t in _run(s))
+
+
+def test_early_warning_below_long_lead_threshold_does_not_fire() -> None:
+    """A 2.5-rarity lot cleared the old 2.0 bar but not the long-lead 3.0."""
+    s = _state(rarity_score=2.5)
+    assert not any(t.trigger == "early_warning" for t in _run(s))
+
+
+def test_early_warning_requires_seven_days_to_close() -> None:
+    """Long-lead needs >=7d to close; 3d out does not fire even at high rarity."""
+    near = _state(rarity_score=3.5, scheduled_end_at=NOW + timedelta(days=3))
+    far = _state(rarity_score=3.5, scheduled_end_at=NOW + timedelta(days=7, hours=1))
+    assert not any(t.trigger == "early_warning" for t in _run(near))
+    assert any(t.trigger == "early_warning" for t in _run(far))
