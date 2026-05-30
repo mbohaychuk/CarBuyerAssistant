@@ -128,3 +128,56 @@ async def test_already_sent_and_out_of_window_skipped(
 
     await run_digests(now=NOW)
     assert posts == []  # none eligible
+
+
+@pytest.mark.asyncio
+async def test_post_failure_leaves_digest_sent_at_null(
+    _patched: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _patched
+
+    async def fake_post(channel_id: int, content: str, *, session: object = None) -> bool:
+        return False
+
+    monkeypatch.setattr(runner_mod, "post_simple_message", fake_post)
+    a = _auction(session, sid="A1", starts_at=NOW + timedelta(hours=10))
+    await session.flush()
+    lot = _lot(session, a, sid="L1")
+    s = SavedSearch(name="test", make="Ford")
+    session.add(s)
+    await session.flush()
+    session.add(SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot", source_id=lot.id))
+    await session.flush()
+
+    counts = await run_digests(now=NOW)
+
+    assert counts["failed"] == 1
+    await session.refresh(a)
+    assert a.digest_sent_at is None
+
+
+@pytest.mark.asyncio
+async def test_lot_in_both_sections_dedupes_to_matches_only(
+    _patched: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _patched
+    posts: list[str] = []
+
+    async def fake_post(channel_id: int, content: str, *, session: object = None) -> bool:
+        posts.append(content)
+        return True
+
+    monkeypatch.setattr(runner_mod, "post_simple_message", fake_post)
+    a = _auction(session, sid="A1", starts_at=NOW + timedelta(hours=10))
+    await session.flush()
+    lot = _lot(session, a, sid="L1", rarity_score=4.0)  # rare AND matched
+    s = SavedSearch(name="test", make="Ford")
+    session.add(s)
+    await session.flush()
+    session.add(SavedSearchMatch(saved_search_id=s.id, source_kind="auction_lot", source_id=lot.id))
+    await session.flush()
+
+    await run_digests(now=NOW)
+
+    assert len(posts) == 1
+    assert posts[0].count(f"/lots/{lot.id}") == 1  # appears once (matches), not duplicated in rare
