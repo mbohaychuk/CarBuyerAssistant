@@ -293,7 +293,11 @@ async def run_cycle(
         log.info("private_sale: no pending listings")
         return counts
 
-    channel_id = await _resolve_private_channel()
+    try:
+        channel_id = await _resolve_private_channel()
+    except Exception:
+        log.exception("private_sale: channel resolution failed; skipping alerts this cycle")
+        channel_id = None
     if channel_id is None:
         log.warning("private_sale: no Discord channel configured")
 

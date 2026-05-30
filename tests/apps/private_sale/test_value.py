@@ -144,6 +144,29 @@ async def test_value_private_listing_no_make_sets_insufficient(
 
 
 @pytest.mark.asyncio
+async def test_value_private_listing_insufficient_comps(session: AsyncSession) -> None:
+    """Fewer than INSUFFICIENT_COMPS_THRESHOLD comps → status=insufficient, no expected_value
+    or price_deal_score, but landed-cost all_in_cost_cad still computed."""
+    from carbuyer.scoring.fair_value import INSUFFICIENT_COMPS_THRESHOLD  # noqa: PLC0415
+
+    # Seed one fewer comp than the threshold so confidence lands INSUFFICIENT.
+    _seed_comps(session, _COMP_PRICES[: INSUFFICIENT_COMPS_THRESHOLD - 1])
+    listing = _make_enriched_listing()
+    listing.source_listing_id = "value-test-005"
+    session.add(listing)
+    await session.commit()
+
+    await value_private_listing(session, listing)
+    await session.commit()
+
+    assert listing.valuation_status == "insufficient"
+    assert listing.expected_value_cad is None
+    assert listing.price_deal_score is None
+    # Landed cost runs regardless of comp confidence; AB→AB is zero so all_in = ask.
+    assert listing.all_in_cost_cad is not None
+
+
+@pytest.mark.asyncio
 async def test_value_private_listing_no_ask_price(session: AsyncSession) -> None:
     """ask_price_cad=None → expected_value still set, all_in_cost/price_deal_score None."""
     _seed_comps(session, _COMP_PRICES)
