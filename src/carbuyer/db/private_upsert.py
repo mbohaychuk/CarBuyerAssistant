@@ -20,6 +20,11 @@ from carbuyer.sources.base import RawPrivateListing
 from carbuyer.sources.resolver import canonicalize_url
 
 # Fields whose change invalidates enrichment + valuation outputs.
+# Narrower than the auction upsert's trigger set: year/make/model/vin/mileage_km
+# are NOT included because the enricher is the canonical source for those on a
+# private listing (the scraper's raw values are best-effort hints). Only a
+# change to the human-authored content (title/description/photos) or the ask
+# price warrants re-enriching/re-valuing.
 _CONTENT_TRIGGER_FIELDS: tuple[str, ...] = (
     "title", "description", "photos", "ask_price_cad",
 )
@@ -36,6 +41,7 @@ async def upsert_private_listing(
     (or on a fresh insert). Idempotent re-upserts with identical content
     preserve existing statuses.
     """
+    # Capture BEFORE the upsert — the returned row is the same identity-map object.
     # Pre-fetch so we can snapshot content trigger fields before the upsert
     # overwrites them. None means this is a fresh insert.
     pre = (
@@ -82,6 +88,8 @@ async def upsert_private_listing(
         # Coalesce: never clobber an existing non-null value with a null rescrape.
         "title": func.coalesce(excluded.title, PrivateListing.title),
         "description": func.coalesce(excluded.description, PrivateListing.description),
+        # coalesce protects against NULL only, not empty arrays — a []-photos
+        # re-scrape clobbers existing photos (treated as a parser failure upstream).
         "photos": func.coalesce(excluded.photos, PrivateListing.photos),
         "year": func.coalesce(excluded.year, PrivateListing.year),
         "make": func.coalesce(excluded.make, PrivateListing.make),
