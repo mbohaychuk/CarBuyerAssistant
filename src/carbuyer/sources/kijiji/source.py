@@ -5,8 +5,7 @@ implementation once Kijiji HTML fixtures are captured (see Task 5 in the plan).
 """
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from typing import Any
+from collections.abc import AsyncIterator
 
 from carbuyer.sources.base import RawPrivateListing
 
@@ -15,10 +14,10 @@ class KijijiSource:
     """Not yet implemented — Task 5 depends on captured HTML fixtures."""
 
     async def iter_search_results(
-        self, **_kwargs: Any,
-    ) -> AsyncGenerator[RawPrivateListing, None]:
+        self, *, provinces: tuple[str, ...] = (),
+    ) -> AsyncIterator[RawPrivateListing]:
         raise NotImplementedError("KijijiSource requires Task 5 implementation")
-        yield  # make this an async generator
+        yield  # pyright: ignore[reportUnreachable]
 
     async def fetch_listing_detail(
         self, raw: RawPrivateListing,

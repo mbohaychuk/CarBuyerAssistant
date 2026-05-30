@@ -129,7 +129,7 @@ class FakeSource:
         self._listings = listings
 
     async def iter_search_results(
-        self, **_kwargs: object,
+        self, *, provinces: tuple[str, ...] = (),
     ) -> AsyncGenerator[RawPrivateListing, None]:
         for raw in self._listings:
             yield raw

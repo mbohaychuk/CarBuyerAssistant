@@ -36,7 +36,7 @@ from carbuyer.apps.notifier.channel_resolver import resolve_channels
 from carbuyer.apps.notifier.discord_post import post_simple_message
 from carbuyer.apps.private_sale.enrich import enrich_private_listing
 from carbuyer.apps.private_sale.value import value_private_listing
-from carbuyer.db.enums import EnrichmentStatus, UserAction
+from carbuyer.db.enums import EnrichmentStatus, UserAction, ValuationStatus
 from carbuyer.db.models import PrivateListing, SavedSearch, SavedSearchMatch
 from carbuyer.db.private_upsert import upsert_private_listing
 from carbuyer.db.saved_searches import adapt_private_listing, match_listing
@@ -65,7 +65,7 @@ class PrivateListingSource(Protocol):
     """
 
     async def iter_search_results(
-        self, **kwargs: Any,
+        self, *, provinces: tuple[str, ...] = (),
     ) -> AsyncGenerator[RawPrivateListing, None]: ...
 
     async def fetch_listing_detail(
@@ -178,7 +178,7 @@ async def _process_listing(
             await enrich_private_listing(listing, provider=provider)
             counts["enriched"] += 1
 
-        if listing.valuation_status == "pending":
+        if listing.valuation_status == ValuationStatus.PENDING.value:
             await value_private_listing(s, listing)
             counts["valued"] += 1
 
@@ -224,6 +224,9 @@ async def _process_listing(
         return  # leave alerted_at NULL → retried next cycle
 
     # Phase 3: stamp alerted_at in a second short tx.
+    # No ``alerted_at is None`` guard here (unlike the digest runner): the
+    # private worker re-alerts on price drops, so it must re-stamp both fields
+    # to update the baseline for the *next* price-drop check.
     async with get_session() as s2, s2.begin():
         l2 = await s2.get(PrivateListing, listing_id)
         if l2 is not None:
@@ -259,7 +262,7 @@ async def run_cycle(
     }
 
     # Step 1: scrape + upsert.
-    async for raw_result in source.iter_search_results():
+    async for raw_result in source.iter_search_results(provinces=settings.private_provinces):
         try:
             raw = await source.fetch_listing_detail(raw_result)
             async with get_session() as s, s.begin():
@@ -279,7 +282,7 @@ async def run_cycle(
                         or_(
                             PrivateListing.enrichment_status
                             == EnrichmentStatus.PENDING.value,
-                            PrivateListing.valuation_status == "pending",
+                            PrivateListing.valuation_status == ValuationStatus.PENDING.value,
                         )
                     )
                 )
