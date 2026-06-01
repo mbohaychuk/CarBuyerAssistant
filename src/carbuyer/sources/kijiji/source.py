@@ -46,6 +46,13 @@ _PROVINCE_LOCATIONS: dict[str, tuple[str, int]] = {
     "SK": ("saskatchewan", 9009),
     "MB": ("manitoba", 9006),
 }
+# Jittered delay between per-listing detail fetches. The worker fetches one
+# detail page per search result, so an un-paced walk would fire ~45 listings x
+# 3 provinces ~= 135 back-to-back GETs at one host every cycle -- a cadence no
+# real browser produces and a fast route to a 429/CAPTCHA that silently zeroes
+# the cycle. ~1-2.5s x 135 ~= 3-6 min stays well inside the 15-min interval.
+# (Mirrors the page-level jitter the auction sources apply via jittered_sleep.)
+_DETAIL_FETCH_DELAY_S: tuple[float, float] = (1.0, 2.5)
 
 
 def _search_url(slug: str, location_id: int, page: int) -> str:
@@ -132,7 +139,7 @@ class KijijiSource(Source):
                 try:
                     resp = await self._http.get(url)
                     resp.raise_for_status()
-                except Exception as exc:
+                except httpx.HTTPError as exc:
                     _log.warning(
                         "search page fetch failed; ending province walk",
                         province=code, page=page, url=url, error=str(exc),
@@ -149,6 +156,13 @@ class KijijiSource(Source):
                     new_this_page += 1
                     yield self._to_raw(entry, search_province=code)
                 if new_this_page == 0:
+                    # Page held only dealers / already-seen ids (Kijiji clamps an
+                    # over-large page number to the last page). Log so a genuine
+                    # dealer-heavy truncation isn't invisible if max pages > 1.
+                    _log.info(
+                        "search page added no new owner listings; ending province walk",
+                        province=code, page=page,
+                    )
                     break
                 if page < settings.private_max_search_pages:
                     await jittered_sleep()
@@ -162,10 +176,12 @@ class KijijiSource(Source):
         On any fetch / parse failure the search-page stub is returned unchanged
         — a missing detail page must not drop an otherwise-valid listing.
         """
+        # Pace the per-listing detail fetches (see _DETAIL_FETCH_DELAY_S).
+        await jittered_sleep(*_DETAIL_FETCH_DELAY_S)
         try:
             resp = await self._http.get(raw.url)
             resp.raise_for_status()
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             _log.warning(
                 "listing detail fetch failed; using search-page data",
                 url=raw.url, error=str(exc),
@@ -194,7 +210,7 @@ class KijijiSource(Source):
             model=entry.model,
             trim=entry.trim,
             mileage_km=entry.mileage_km,
-            vin=None,
+            vin=entry.vin,
             ask_price_cad=entry.ask_price_cad,
             # Address province is best-effort and sometimes absent; the search
             # province is the reliable fallback (we searched within it).
@@ -211,9 +227,14 @@ class KijijiSource(Source):
         """Coalesce a detail-page parse over the search stub.
 
         Detail page wins for the long description + full photo set; the search
-        stub wins for normalized year/make/model/mileage (detail's structured
-        attributes are usually empty). ``x or stub.x`` keeps the stub's value
+        stub wins for normalized year/make/model/mileage/vin (detail's structured
+        attributes are empty). ``detail.x or stub.x`` keeps the stub's value
         whenever the detail page leaves a field empty.
+
+        Year is the exception that must read ``stub.year or detail.year``: the
+        detail page's ``caryear`` is always empty, so ``detail.year`` there is
+        only a title-regex guess — it must not override the authoritative
+        normalized ``caryear`` the search page already captured in the stub.
         """
         return RawPrivateListing(
             source=self.name,
@@ -222,12 +243,12 @@ class KijijiSource(Source):
             title=detail.title or stub.title,
             description=detail.description or stub.description,
             photos=list(detail.photos) or list(stub.photos),
-            year=detail.year or stub.year,
+            year=stub.year or detail.year,
             make=detail.make or stub.make,
             model=detail.model or stub.model,
             trim=detail.trim or stub.trim,
             mileage_km=detail.mileage_km or stub.mileage_km,
-            vin=stub.vin,
+            vin=detail.vin or stub.vin,
             ask_price_cad=detail.ask_price_cad or stub.ask_price_cad,
             pickup_province=detail.province or stub.pickup_province,
             pickup_city=detail.city or stub.pickup_city,
