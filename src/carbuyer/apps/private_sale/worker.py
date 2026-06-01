@@ -334,10 +334,15 @@ async def main(now: datetime | None = None) -> None:
         from carbuyer.llm.openai_provider import OpenAIProvider  # noqa: PLC0415
         from carbuyer.sources.kijiji.source import KijijiSource  # noqa: PLC0415
 
-        source: Any = KijijiSource()
         provider = OpenAIProvider()
 
-        async with aiohttp.ClientSession() as http_session:
+        # KijijiSource manages an httpx client over its `async with` scope; keep
+        # it open for the whole cycle so every per-listing detail fetch reuses
+        # the same connection pool + retry transport.
+        async with (
+            KijijiSource() as source,
+            aiohttp.ClientSession() as http_session,
+        ):
             await run_cycle(now, source=source, provider=provider, http=http_session)
     finally:
         await lock_conn.close()
