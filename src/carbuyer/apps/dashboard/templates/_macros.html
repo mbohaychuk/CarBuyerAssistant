@@ -105,6 +105,29 @@ low:{{ (days ~ 'd') if days else ((delta_min / 60) | int ~ 'h') }}
 {%- endif -%}
 {%- endmacro %}
 
+{# Private-listing action row — Interested / Pass (no bidding). Mirrors the
+   toggle pattern of action_buttons: each button posts its own render-time
+   `currently_active` literal; clicking an active button clears user_action.
+   Targets the whole card (#private-{id}); the mark endpoint (Task 4) returns
+   the re-rendered card, or an empty body when the new state is `passed` so the
+   card drops out of the best-deals feed. #}
+{% macro private_actions(listing_id, current_state) -%}
+{% set interested_on = current_state == 'interested' %}
+{% set pass_on = current_state == 'passed' %}
+<div class="lot-actions" data-size="sm" hx-target="#private-{{ listing_id }}" hx-swap="outerHTML">
+  <button class="lot-actions__btn" data-action="interested"
+          data-active="{{ 'true' if interested_on else 'false' }}"
+          hx-post="/private/{{ listing_id }}/mark"
+          hx-vals='{"action":"interested","currently_active":"{{ 'true' if interested_on else 'false' }}"}'
+          aria-label="Mark interested">Interested</button>
+  <button class="lot-actions__btn" data-action="passed"
+          data-active="{{ 'true' if pass_on else 'false' }}"
+          hx-post="/private/{{ listing_id }}/mark"
+          hx-vals='{"action":"passed","currently_active":"{{ 'true' if pass_on else 'false' }}"}'
+          aria-label="Pass on this listing">Pass</button>
+</div>
+{%- endmacro %}
+
 {# Action buttons row — Watch / Bid placed / Pass.
 
    `target` defaults to the card's outer element (`#lot-{{ lot_id }}`) so
