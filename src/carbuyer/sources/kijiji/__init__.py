@@ -1,1 +1,1 @@
-# Task 5: Kijiji source — gated on captured HTML fixtures (see plan).
+# Kijiji private-sale source (kijiji.ca cars & trucks, for-sale-by-owner).
