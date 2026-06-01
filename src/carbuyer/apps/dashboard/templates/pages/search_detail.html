@@ -33,8 +33,12 @@
   <ul class="search-detail__matches">
     {% for row in matches %}
       <li class="match-row">
-        <a href="/lots/{{ row.lot.id }}">{{ row.lot.title or ("Lot #" ~ row.lot.id) }}</a>
-        <span class="t-meta">{{ row.auction.pickup_province or "" }}</span>
+        {% if row.detail_url %}
+          <a href="{{ row.detail_url }}"{% if row.external %} target="_blank" rel="noopener"{% endif %}>{{ row.title }}</a>
+        {% else %}
+          <span>{{ row.title }}</span>
+        {% endif %}
+        <span class="t-meta">{{ row.subtitle }}{% if row.kind == "private_listing" %} · private{% endif %}</span>
         <button class="btn btn--ghost"
                 hx-post="/searches/{{ search.id }}/dismiss/{{ row.match.id }}"
                 hx-target="closest .match-row" hx-swap="outerHTML">Dismiss</button>
@@ -62,7 +66,11 @@
         <time datetime="{{ row.match.matched_at.isoformat() }}">
           {{ row.match.matched_at.strftime("%b %d, %H:%M") }}
         </time>
-        <a href="/lots/{{ row.match.source_id }}">{{ row.title or ("Lot #" ~ row.match.source_id) }}</a>
+        {% if row.detail_url %}
+          <a href="{{ row.detail_url }}"{% if row.external %} target="_blank" rel="noopener"{% endif %}>{{ row.title }}</a>
+        {% else %}
+          <span>{{ row.title }}</span>
+        {% endif %}
         {% if row.match.dismissed_at %}<span class="t-meta">dismissed</span>{% endif %}
       </li>
     {% endfor %}

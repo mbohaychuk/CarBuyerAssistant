@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -79,6 +79,18 @@ def _apply_form(
 
 
 _MATCH_PAGE_SIZE = 20
+
+
+def _listing_title(listing: PrivateListing) -> str:
+    parts = [str(p) for p in (listing.year, listing.make, listing.model, listing.trim) if p]
+    return " ".join(parts) or listing.title or f"Listing #{listing.id}"
+
+
+def _safe_external_url(url: str) -> str | None:
+    """Only http(s) URLs are safe to put in an href. Scraped listing URLs are
+    attacker-controllable, so reject javascript:/data:/etc. (allowlist)."""
+    return url if url.lower().startswith(("http://", "https://")) else None
+
 
 _MATCH_KINDS: tuple[tuple[type[AuctionLot] | type[PrivateListing], str], ...] = (
     (AuctionLot, "auction_lot"),
@@ -210,9 +222,10 @@ async def search_detail(
         return HTMLResponse("Not found", status_code=404)
     page = max(page, 1)
 
-    # Current matches (paginated): join to the lot + auction, drop dismissed and
-    # passed. Fetch one extra row to detect a next page without a COUNT.
-    base = (
+    # ── Current matches (both kinds), merged newest-first, paginated in Python.
+    # Match counts per search are modest, so fetching all live matches and
+    # slicing is correct and simpler than cross-source SQL pagination.
+    auction_rows = (await session.execute(
         select(AuctionLot, Auction, SavedSearchMatch)
         .join(SavedSearchMatch, (SavedSearchMatch.source_kind == "auction_lot")
               & (SavedSearchMatch.source_id == AuctionLot.id))
@@ -223,19 +236,43 @@ async def search_detail(
             (AuctionLot.user_action.is_(None))
             | (AuctionLot.user_action != UserAction.PASSED.value),
         )
-        .order_by(SavedSearchMatch.matched_at.desc(), SavedSearchMatch.id.desc())
-    )
-    rows = (await session.execute(
-        base.offset((page - 1) * _MATCH_PAGE_SIZE).limit(_MATCH_PAGE_SIZE + 1)
     )).all()
-    has_next = len(rows) > _MATCH_PAGE_SIZE
-    matches = [
-        {"lot": lot, "auction": auc, "match": m}
-        for lot, auc, m in rows[:_MATCH_PAGE_SIZE]
-    ]
+    private_rows = (await session.execute(
+        select(PrivateListing, SavedSearchMatch)
+        .join(SavedSearchMatch, (SavedSearchMatch.source_kind == "private_listing")
+              & (SavedSearchMatch.source_id == PrivateListing.id))
+        .where(
+            SavedSearchMatch.saved_search_id == search_id,
+            SavedSearchMatch.dismissed_at.is_(None),
+            (PrivateListing.user_action.is_(None))
+            | (PrivateListing.user_action != UserAction.PASSED.value),
+        )
+    )).all()
 
-    # Match-over-time activity log: every match incl. dismissed, excl. passed, newest first.
-    log_rows = (await session.execute(
+    # (matched_at, id, row) tuples — the sort key reads the typed SavedSearchMatch
+    # `m`, not the heterogeneous row dict (whose values are `object` to pyright).
+    keyed: list[tuple[datetime, int, dict[str, Any]]] = []
+    for lot, auc, m in auction_rows:
+        keyed.append((m.matched_at, m.id, {
+            "kind": "auction_lot", "match": m,
+            "title": lot.title or f"Lot #{lot.id}",
+            "subtitle": auc.pickup_province or "",
+            "detail_url": f"/lots/{lot.id}", "external": False,
+        }))
+    for listing, m in private_rows:
+        keyed.append((m.matched_at, m.id, {
+            "kind": "private_listing", "match": m,
+            "title": _listing_title(listing),
+            "subtitle": listing.pickup_province or "",
+            "detail_url": _safe_external_url(listing.url), "external": True,
+        }))
+    keyed.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    ordered = [row for _, _, row in keyed]
+    has_next = len(ordered) > page * _MATCH_PAGE_SIZE
+    matches = ordered[(page - 1) * _MATCH_PAGE_SIZE : page * _MATCH_PAGE_SIZE]
+
+    # ── Activity log: every match (incl. dismissed) of both kinds, excl. passed.
+    auction_log = (await session.execute(
         select(SavedSearchMatch, AuctionLot.title)
         .join(AuctionLot, (SavedSearchMatch.source_kind == "auction_lot")
               & (SavedSearchMatch.source_id == AuctionLot.id))
@@ -244,10 +281,30 @@ async def search_detail(
             (AuctionLot.user_action.is_(None))
             | (AuctionLot.user_action != UserAction.PASSED.value),
         )
-        .order_by(SavedSearchMatch.matched_at.desc(), SavedSearchMatch.id.desc())
-        .limit(50)
     )).all()
-    activity = [{"match": m, "title": title} for m, title in log_rows]
+    private_log = (await session.execute(
+        select(SavedSearchMatch, PrivateListing)
+        .join(PrivateListing, (SavedSearchMatch.source_kind == "private_listing")
+              & (SavedSearchMatch.source_id == PrivateListing.id))
+        .where(
+            SavedSearchMatch.saved_search_id == search_id,
+            (PrivateListing.user_action.is_(None))
+            | (PrivateListing.user_action != UserAction.PASSED.value),
+        )
+    )).all()
+    keyed_activity: list[tuple[datetime, int, dict[str, Any]]] = []
+    for m, title in auction_log:
+        keyed_activity.append((m.matched_at, m.id, {
+            "match": m, "title": title or f"Lot #{m.source_id}",
+            "detail_url": f"/lots/{m.source_id}", "external": False,
+        }))
+    for m, listing in private_log:
+        keyed_activity.append((m.matched_at, m.id, {
+            "match": m, "title": _listing_title(listing),
+            "detail_url": _safe_external_url(listing.url), "external": True,
+        }))
+    keyed_activity.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    activity = [row for _, _, row in keyed_activity[:50]]
 
     # Mark visited so the list's "N new" badge resets.
     search.last_viewed_at = datetime.now(UTC)
