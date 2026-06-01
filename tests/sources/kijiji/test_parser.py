@@ -97,10 +97,8 @@ def test_search_page_extracts_structured_vin() -> None:
     assert _by_id(entries, _VIN_LISTING_ID).vin == _VIN_VALUE
 
 
-def test_empty_canonical_value_normalizes_to_none() -> None:
-    # A canonicalValues: [""] (or []) must become None, not "", so the valuator's
-    # make/model/year guard catches it instead of issuing an empty comp query.
-    page = (
+def _one_listing_page(attributes: list[dict[str, object]]) -> str:
+    return (
         '<script id="__NEXT_DATA__" type="application/json">'
         + json.dumps(
             {
@@ -111,12 +109,7 @@ def test_empty_canonical_value_normalizes_to_none() -> None:
                                 "id": "1",
                                 "url": "https://www.kijiji.ca/v-cars-trucks/x/1",
                                 "title": "Mystery car",
-                                "attributes": {
-                                    "all": [
-                                        {"canonicalName": "carmake", "canonicalValues": [""]},
-                                        {"canonicalName": "carmodel", "canonicalValues": []},
-                                    ],
-                                },
+                                "attributes": {"all": attributes},
                             },
                         },
                     },
@@ -125,7 +118,39 @@ def test_empty_canonical_value_normalizes_to_none() -> None:
         )
         + "</script>"
     )
-    entry = parse_search_page(page)[0]
+
+
+def test_malformed_vin_is_rejected() -> None:
+    # A seller-entered vin that is over-length or wrong-charset must degrade to
+    # None, not overflow PrivateListing.vin (VARCHAR(32)) and drop the listing.
+    over_long = parse_search_page(
+        _one_listing_page([{"canonicalName": "vin", "canonicalValues": ["X" * 40]}])
+    )[0]
+    assert over_long.vin is None
+    pasted = parse_search_page(
+        _one_listing_page(
+            [{"canonicalName": "vin", "canonicalValues": ["VIN: 1HGCM82633A004352 call me"]}]
+        )
+    )[0]
+    assert pasted.vin is None
+    # A clean (lowercase) VIN is uppercased and kept.
+    good = parse_search_page(
+        _one_listing_page([{"canonicalName": "vin", "canonicalValues": ["1hgcm82633a004352"]}])
+    )[0]
+    assert good.vin == "1HGCM82633A004352"
+
+
+def test_empty_canonical_value_normalizes_to_none() -> None:
+    # A canonicalValues: [""] (or []) must become None, not "", so the valuator's
+    # make/model/year guard catches it instead of issuing an empty comp query.
+    entry = parse_search_page(
+        _one_listing_page(
+            [
+                {"canonicalName": "carmake", "canonicalValues": [""]},
+                {"canonicalName": "carmodel", "canonicalValues": []},
+            ]
+        )
+    )[0]
     assert entry.make is None
     assert entry.model is None
 
