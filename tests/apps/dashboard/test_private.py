@@ -169,3 +169,87 @@ async def test_private_card_blocks_javascript_url(_patch_deps: AsyncSession) -> 
     assert r.status_code == 200  # noqa: PLR2004
     assert "Ford F150" in r.text            # title still shown
     assert 'href="javascript:' not in r.text  # but not as a clickable link
+
+
+@pytest.mark.asyncio
+async def test_mark_interested_sets_action_and_returns_card(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    listing = _listing(source_listing_id="M1", title="Markable", make="Ford", model="F150")
+    session.add(listing)
+    await session.commit()
+
+    async with _client() as client:
+        r = await client.post(
+            f"/private/{listing.id}/mark",
+            data={"action": "interested", "currently_active": "false"},
+            headers={"HX-Request": "true"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert f'id="private-{listing.id}"' in r.text  # card fragment returned
+    await session.refresh(listing)
+    assert listing.user_action == UserAction.INTERESTED
+
+
+@pytest.mark.asyncio
+async def test_mark_passed_returns_empty_so_card_drops(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    listing = _listing(source_listing_id="M2", title="Passable", make="Ford", model="F150")
+    session.add(listing)
+    await session.commit()
+
+    async with _client() as client:
+        r = await client.post(
+            f"/private/{listing.id}/mark",
+            data={"action": "passed", "currently_active": "false"},
+            headers={"HX-Request": "true"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    assert r.text.strip() == ""  # empty body -> HTMX swaps the card away
+    await session.refresh(listing)
+    assert listing.user_action == UserAction.PASSED
+
+
+@pytest.mark.asyncio
+async def test_mark_toggle_off_clears_action(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    listing = _listing(source_listing_id="M3", title="Toggle", make="Ford", model="F150",
+                       user_action=UserAction.INTERESTED)
+    session.add(listing)
+    await session.commit()
+
+    async with _client() as client:
+        r = await client.post(
+            f"/private/{listing.id}/mark",
+            data={"action": "interested", "currently_active": "true"},
+            headers={"HX-Request": "true"},
+        )
+    assert r.status_code == 200  # noqa: PLR2004
+    await session.refresh(listing)
+    assert listing.user_action is None
+
+
+@pytest.mark.asyncio
+async def test_mark_unknown_listing_404(_patch_deps: AsyncSession) -> None:
+    async with _client() as client:
+        r = await client.post(
+            "/private/999999/mark",
+            data={"action": "interested", "currently_active": "false"},
+        )
+    assert r.status_code == 404  # noqa: PLR2004
+
+
+@pytest.mark.asyncio
+async def test_mark_invalid_action_422(_patch_deps: AsyncSession) -> None:
+    # Auction-only actions (e.g. bid_placed) are not valid on a private listing.
+    session = _patch_deps
+    listing = _listing(source_listing_id="M4", title="X", make="Ford", model="F150")
+    session.add(listing)
+    await session.commit()
+    async with _client() as client:
+        r = await client.post(
+            f"/private/{listing.id}/mark",
+            data={"action": "bid_placed", "currently_active": "false"},
+        )
+    assert r.status_code == 422  # noqa: PLR2004
+    await session.refresh(listing)
+    assert listing.user_action is None  # rejected action left state untouched
