@@ -44,8 +44,10 @@ JSON — do not scrape the DOM.
   `caryear=[]`, `cartrim=[]`, `carmileageinkms=[]` even though make/model are
   present. Derive year/model/trim from the **title** and fall back to attributes,
   not the reverse.
-- **No VIN** in structured data. It only appears (if at all) in free-text
-  description — leave VIN extraction to the enricher / `find_carfax_url`.
+- **VIN** is carried in a structured `vin` attribute on the **search** page for
+  the subset of sellers who entered one (~9/45 owners, ~39/46 on the mixed
+  page); the detail page has no attributes. Read it when present; the enricher /
+  `find_carfax_url` still backfills from the description for the rest.
 - **Two-stage scrape is warranted**: the search stub has a truncated description
   and only 5 photos; the detail page carries the full description and all photos.
 

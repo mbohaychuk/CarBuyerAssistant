@@ -6,6 +6,7 @@ No network: the search/detail pages are served from the captured fixtures.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -31,6 +32,7 @@ _DETAIL_PHOTO_COUNT = 15
 _MIN_FULL_DESC_LEN = 200
 _JEEP_MILEAGE_KM = 115000
 _JEEP_YEAR = 2016
+_STUB_OVERRIDE_YEAR = 2003   # differs from the Jeep detail title-year (2016)
 _WALK_PAGES = 3
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -171,6 +173,7 @@ def _jeep_search_stub() -> RawPrivateListing:
         model="cherokee",
         trim="Trailhawk",
         mileage_km=115000,
+        vin="1C4PJMCS0GW123456",
         ask_price_cad=Decimal("13999"),
         pickup_province="AB",
         pickup_city="Edmonton",
@@ -191,8 +194,21 @@ async def test_fetch_detail_coalesces_search_and_detail() -> None:
     assert merged.mileage_km == _JEEP_MILEAGE_KM
     assert merged.year == _JEEP_YEAR
     assert merged.make == "jeep"
+    assert merged.vin == "1C4PJMCS0GW123456"  # detail has no vin -> stub preserved
     assert merged.ask_price_cad == Decimal("13999")
     assert merged.source_listing_id == _JEEP_ID
+
+
+async def test_fetch_detail_keeps_authoritative_search_year() -> None:
+    # The search page's normalized caryear is authoritative. The detail page's
+    # caryear is always empty, so its year is only a title-regex guess and must
+    # NOT override the stub — even when the title year differs from caryear.
+    handler = _search_handler("search_owner_alberta.html")
+    stub = replace(_jeep_search_stub(), year=_STUB_OVERRIDE_YEAR)
+    async with KijijiSource(_transport=httpx.MockTransport(handler)) as src:
+        merged = await src.fetch_listing_detail(stub)
+    # The Jeep detail title parses to 2016, but the stub's caryear must win.
+    assert merged.year == _STUB_OVERRIDE_YEAR
 
 
 async def test_fetch_detail_returns_stub_on_http_error() -> None:

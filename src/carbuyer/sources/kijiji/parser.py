@@ -21,8 +21,10 @@ So the caller (``KijijiSource``) must coalesce: take the long description and
 full photo set from the detail page, and year / make / model / mileage from the
 search page — neither page's gaps should clobber the other's data.
 
-VIN is never present in the structured data; it surfaces (if at all) only in the
-free-text description and is left to the enricher / ``find_carfax_url``.
+VIN is carried in a structured ``vin`` attribute on the **search** page for the
+subset of listings whose seller entered one (the detail page has no attributes
+at all). We read it when present; the enricher / ``find_carfax_url`` still
+backfills from the free-text description for the rest.
 """
 from __future__ import annotations
 
@@ -80,6 +82,7 @@ class KijijiListing:
     model: str | None
     trim: str | None
     mileage_km: int | None
+    vin: str | None
     ask_price_cad: Decimal | None
     province: str | None
     city: str | None
@@ -113,13 +116,24 @@ def _extract_apollo_state(html: str) -> dict[str, Any]:
     """
     match = _NEXT_DATA_RE.search(html)
     if match is None:
+        # A healthy Kijiji page always carries __NEXT_DATA__; its absence means
+        # an anti-bot interstitial or a re-platform off Next.js. Surface it —
+        # otherwise the scraper goes silently blind (every cycle yields zero).
+        _log.warning("Kijiji page has no __NEXT_DATA__ block (anti-bot or re-platform?)")
         return {}
     try:
         data: Any = json.loads(match.group(1))
     except json.JSONDecodeError:
+        _log.warning("Kijiji __NEXT_DATA__ block is not valid JSON")
         return {}
     page_props = _as_dict(_as_dict(data).get("props")).get("pageProps")
-    return _as_dict(_as_dict(page_props).get("__APOLLO_STATE__"))
+    state = _as_dict(_as_dict(page_props).get("__APOLLO_STATE__"))
+    if not state:
+        # __NEXT_DATA__ parsed but the Apollo state is gone — page shape changed.
+        # (A legitimately empty result page still has a populated state with
+        # ROOT_QUERY/Location and just no AutosListing keys, so this is anomalous.)
+        _log.warning("Kijiji page has no __APOLLO_STATE__ (page shape changed?)")
+    return state
 
 
 def _attr(record: dict[str, Any], name: str) -> str | None:
@@ -131,7 +145,10 @@ def _attr(record: dict[str, Any], name: str) -> str | None:
         values = _as_list(entry.get("canonicalValues"))
         if values:
             first = values[0]
-            return first if isinstance(first, str) else None
+            # Normalize "" -> None to match _str_or_none, so an empty canonical
+            # value is caught by the valuator's make/model/year guard rather
+            # than degrading into an empty comp query.
+            return first if isinstance(first, str) and first else None
         return None
     return None
 
@@ -224,6 +241,7 @@ def _parse_one(record: dict[str, Any]) -> KijijiListing | None:
         model=_attr(record, "carmodel"),
         trim=_attr(record, "cartrim"),
         mileage_km=_int_attr(record, "carmileageinkms"),
+        vin=_attr(record, "vin"),
         ask_price_cad=_parse_price(record),
         province=_parse_province(address),
         city=city,

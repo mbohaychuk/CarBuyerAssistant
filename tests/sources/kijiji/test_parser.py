@@ -5,6 +5,7 @@ Re-capture and re-inspect the Apollo JSON if Kijiji re-platforms off Next.js.
 """
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -31,6 +32,9 @@ _JEEP_MILEAGE_KM = 115000
 _SEARCH_PHOTO_COUNT = 5           # search page carries the first few photos
 _DETAIL_PHOTO_COUNT = 15          # detail page carries the full set
 _MIN_FULL_DESC_LEN = 200          # detail description is longer than the stub
+_OWNER_VIN_COUNT = 9              # owner listings with a structured vin attribute
+_VIN_LISTING_ID = "1737022167"
+_VIN_VALUE = "JA4JT3AXXDU602633"
 
 
 def _read(name: str) -> str:
@@ -86,6 +90,46 @@ def test_contact_price_listings_have_no_ask_price() -> None:
     assert sum(1 for e in entries if e.ask_price_cad is None) == _CONTACT_PRICE_COUNT
 
 
+def test_search_page_extracts_structured_vin() -> None:
+    entries = parse_search_page(_read("search_owner_alberta.html"))
+    # A subset of sellers fill the structured `vin` attribute on the search page.
+    assert sum(1 for e in entries if e.vin) == _OWNER_VIN_COUNT
+    assert _by_id(entries, _VIN_LISTING_ID).vin == _VIN_VALUE
+
+
+def test_empty_canonical_value_normalizes_to_none() -> None:
+    # A canonicalValues: [""] (or []) must become None, not "", so the valuator's
+    # make/model/year guard catches it instead of issuing an empty comp query.
+    page = (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(
+            {
+                "props": {
+                    "pageProps": {
+                        "__APOLLO_STATE__": {
+                            "AutosListing:1": {
+                                "id": "1",
+                                "url": "https://www.kijiji.ca/v-cars-trucks/x/1",
+                                "title": "Mystery car",
+                                "attributes": {
+                                    "all": [
+                                        {"canonicalName": "carmake", "canonicalValues": [""]},
+                                        {"canonicalName": "carmodel", "canonicalValues": []},
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            }
+        )
+        + "</script>"
+    )
+    entry = parse_search_page(page)[0]
+    assert entry.make is None
+    assert entry.model is None
+
+
 # ── detail page ────────────────────────────────────────────────────────────────
 
 
@@ -104,6 +148,8 @@ def test_detail_page_happy_path() -> None:
     assert len(entry.photos) == _DETAIL_PHOTO_COUNT
     assert entry.description is not None
     assert len(entry.description) > _MIN_FULL_DESC_LEN
+    # Detail pages have no structured vin attribute (search page is the source).
+    assert entry.vin is None
 
 
 def test_detail_page_degenerate_listing() -> None:
