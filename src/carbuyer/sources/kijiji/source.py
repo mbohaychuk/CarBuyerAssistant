@@ -181,7 +181,11 @@ class KijijiSource(Source):
         try:
             resp = await self._http.get(raw.url)
             resp.raise_for_status()
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # raw.url is scrape-controlled, so a malformed URL (InvalidURL, which
+            # is NOT an httpx.HTTPError) must also degrade to the stub rather than
+            # drop an otherwise-valid listing. The _http context-manager guard
+            # (RuntimeError) and genuine bugs still propagate.
             _log.warning(
                 "listing detail fetch failed; using search-page data",
                 url=raw.url, error=str(exc),

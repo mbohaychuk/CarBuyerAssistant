@@ -45,9 +45,12 @@ JSON — do not scrape the DOM.
   present. Derive year/model/trim from the **title** and fall back to attributes,
   not the reverse.
 - **VIN** is carried in a structured `vin` attribute on the **search** page for
-  the subset of sellers who entered one (~9/45 owners, ~39/46 on the mixed
-  page); the detail page has no attributes. Read it when present; the enricher /
-  `find_carfax_url` still backfills from the description for the rest.
+  the subset of sellers who entered one. Owner VINs are sparse — 9/45 on the
+  owner-filtered page; on the mixed page 39/46 listings carry a VIN but those
+  are all *dealer* ads (0/7 owners), and the production walk is owner-filtered,
+  so realistic owner coverage is ~20%. The detail page has no attributes. The
+  parser validates VIN shape (`[A-HJ-NPR-Z0-9]{11,17}`) and the enricher /
+  `find_carfax_url` backfills from the description for the rest.
 - **Two-stage scrape is warranted**: the search stub has a truncated description
   and only 5 photos; the detail page carries the full description and all photos.
 

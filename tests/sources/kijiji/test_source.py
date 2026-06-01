@@ -232,3 +232,15 @@ async def test_fetch_detail_returns_stub_on_unparseable_page() -> None:
     async with KijijiSource(_transport=httpx.MockTransport(handler)) as src:
         result = await src.fetch_listing_detail(stub)
     assert result is stub
+
+
+async def test_fetch_detail_returns_stub_on_malformed_url() -> None:
+    # raw.url is scrape-controlled; a malformed URL raises httpx.InvalidURL
+    # (not an HTTPError). It must still degrade to the stub, not drop the listing.
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        return httpx.Response(404)
+
+    stub = replace(_jeep_search_stub(), url="https://www.kijiji.ca:notaport/x/1")
+    async with KijijiSource(_transport=httpx.MockTransport(handler)) as src:
+        result = await src.fetch_listing_detail(stub)
+    assert result is stub

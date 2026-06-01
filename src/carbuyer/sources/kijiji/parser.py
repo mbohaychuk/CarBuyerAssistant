@@ -59,6 +59,13 @@ _PROVINCE_CODES = frozenset(
 # multi-comma addresses and ignores non-province pairs.
 _PROVINCE_RE = re.compile(r",\s*([A-Z]{2})\b")
 
+# A real VIN is 11-17 of [A-HJ-NPR-Z0-9] (no I/O/Q). The structured ``vin``
+# attribute is seller-entered, so a malformed / over-long value must NOT pass
+# through — PrivateListing.vin is VARCHAR(32) and Postgres errors (not truncates)
+# on overflow, which would drop the whole listing on rescrape. Same guard the
+# McDougall parser applies to its serial-number field.
+_VIN_RE = re.compile(r"^[A-HJ-NPR-Z0-9]{11,17}$")
+
 
 @dataclass(slots=True, frozen=True)
 class KijijiListing:
@@ -107,28 +114,35 @@ def _as_list(value: Any) -> list[Any]:
     return cast("list[Any]", value) if isinstance(value, list) else []
 
 
-def _extract_apollo_state(html: str) -> dict[str, Any]:
+def _extract_apollo_state(html: str, *, warn: bool = False) -> dict[str, Any]:
     """Pull ``props.pageProps.__APOLLO_STATE__`` out of the page's __NEXT_DATA__.
 
     Returns ``{}`` for any page that isn't a parseable Kijiji Next.js document
     (empty body, anti-bot interstitial, JSON change) so callers degrade to "no
     listings" rather than raising.
+
+    ``warn`` gates the "going blind" log lines. Only the **search** path passes
+    ``warn=True`` (it's the critical path and is bounded to a few pages/cycle);
+    the per-listing detail path stays silent so a site-wide block doesn't emit
+    one warning per listing (~135/cycle) — it already degrades to the search stub.
     """
     match = _NEXT_DATA_RE.search(html)
     if match is None:
         # A healthy Kijiji page always carries __NEXT_DATA__; its absence means
         # an anti-bot interstitial or a re-platform off Next.js. Surface it —
         # otherwise the scraper goes silently blind (every cycle yields zero).
-        _log.warning("Kijiji page has no __NEXT_DATA__ block (anti-bot or re-platform?)")
+        if warn:
+            _log.warning("Kijiji page has no __NEXT_DATA__ block (anti-bot or re-platform?)")
         return {}
     try:
         data: Any = json.loads(match.group(1))
     except json.JSONDecodeError:
-        _log.warning("Kijiji __NEXT_DATA__ block is not valid JSON")
+        if warn:
+            _log.warning("Kijiji __NEXT_DATA__ block is not valid JSON")
         return {}
     page_props = _as_dict(_as_dict(data).get("props")).get("pageProps")
     state = _as_dict(_as_dict(page_props).get("__APOLLO_STATE__"))
-    if not state:
+    if not state and warn:
         # __NEXT_DATA__ parsed but the Apollo state is gone — page shape changed.
         # (A legitimately empty result page still has a populated state with
         # ROOT_QUERY/Location and just no AutosListing keys, so this is anomalous.)
@@ -188,6 +202,14 @@ def _parse_price(record: dict[str, Any]) -> Decimal | None:
     return Decimal(amount) / Decimal(100)
 
 
+def _parse_vin(record: dict[str, Any]) -> str | None:
+    raw = _attr(record, "vin")
+    if raw is None:
+        return None
+    candidate = raw.strip().upper()
+    return candidate if _VIN_RE.match(candidate) else None
+
+
 def _parse_province(address: str | None) -> str | None:
     if not address:
         return None
@@ -241,7 +263,7 @@ def _parse_one(record: dict[str, Any]) -> KijijiListing | None:
         model=_attr(record, "carmodel"),
         trim=_attr(record, "cartrim"),
         mileage_km=_int_attr(record, "carmileageinkms"),
-        vin=_attr(record, "vin"),
+        vin=_parse_vin(record),
         ask_price_cad=_parse_price(record),
         province=_parse_province(address),
         city=city,
@@ -250,8 +272,8 @@ def _parse_one(record: dict[str, Any]) -> KijijiListing | None:
     )
 
 
-def _autos_listings(html: str) -> list[dict[str, Any]]:
-    state = _extract_apollo_state(html)
+def _autos_listings(html: str, *, warn: bool = False) -> list[dict[str, Any]]:
+    state = _extract_apollo_state(html, warn=warn)
     return [
         _as_dict(value)
         for key, value in state.items()
@@ -265,10 +287,11 @@ def parse_search_page(html: str) -> list[KijijiListing]:
     Returns dealer **and** owner listings (each flagged via ``is_dealer``) — the
     source filters dealers and uses the total to drive pagination. An empty list
     means "no listings on this page" (past the last page, or an unparseable
-    document).
+    document — the latter is logged via the ``warn`` path, since this is the
+    critical search path).
     """
     out: list[KijijiListing] = []
-    for record in _autos_listings(html):
+    for record in _autos_listings(html, warn=True):
         parsed = _parse_one(record)
         if parsed is None:
             _log.warning("skipping Kijiji listing record without id/url")
