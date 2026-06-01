@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     private_deal_threshold: float = 0.15           # min price_deal_score to alert
     private_realert_drop_pct: float = 0.10          # re-alert if price drops >= this fraction
     private_provinces: tuple[str, ...] = ("AB", "SK", "MB")  # Kijiji search scope
+    # Pages of owner-listing search results to walk per province per cycle.
+    # Kijiji's first page carries the highest-ranked / newest listings; the
+    # worker fetches a detail page per result, so this bounds per-cycle request
+    # volume and wall-clock. Raise it to deepen back-catalog coverage at the
+    # cost of a longer cycle.
+    private_max_search_pages: int = 1
 
     notify_threshold: float = 0.15
     # early_warning is the "long-lead / plan a road trip" signal (spec PR-3
