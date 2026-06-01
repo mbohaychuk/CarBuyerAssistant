@@ -16,7 +16,7 @@ from carbuyer.apps.dashboard.deps import (
     is_htmx,
 )
 from carbuyer.db.enums import UserAction
-from carbuyer.db.models import Auction, AuctionLot, SavedSearch, SavedSearchMatch
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, SavedSearch, SavedSearchMatch
 from carbuyer.db.notify import notify
 
 router = APIRouter()
@@ -80,47 +80,64 @@ def _apply_form(
 
 _MATCH_PAGE_SIZE = 20
 
+_MATCH_KINDS: tuple[tuple[type[AuctionLot] | type[PrivateListing], str], ...] = (
+    (AuctionLot, "auction_lot"),
+    (PrivateListing, "private_listing"),
+)
 
-async def _match_count(session: AsyncSession, search_id: int) -> int:
+
+def _live_match_count_stmt(
+    model: type[AuctionLot] | type[PrivateListing],
+    source_kind: str,
+    search_id: int,
+    *,
+    since: datetime | None = None,
+):
+    """COUNT of live (non-dismissed, non-passed) matches of one kind for a search.
+
+    ``since`` (a search's ``last_viewed_at``) restricts to matches after that time.
+    Both AuctionLot and PrivateListing expose the same `id` / `user_action`
+    columns, so one helper covers both kinds.
+    """
     stmt = (
         select(func.count())
         .select_from(SavedSearchMatch)
         .join(
-            AuctionLot,
-            (AuctionLot.id == SavedSearchMatch.source_id)
-            & (SavedSearchMatch.source_kind == "auction_lot"),
+            model,
+            (model.id == SavedSearchMatch.source_id)
+            & (SavedSearchMatch.source_kind == source_kind),
         )
         .where(
             SavedSearchMatch.saved_search_id == search_id,
             SavedSearchMatch.dismissed_at.is_(None),
-            (AuctionLot.user_action.is_(None))
-            | (AuctionLot.user_action != UserAction.PASSED.value),
+            (model.user_action.is_(None))
+            | (model.user_action != UserAction.PASSED.value),
         )
     )
-    return (await session.execute(stmt)).scalar_one()
+    if since is not None:
+        stmt = stmt.where(SavedSearchMatch.matched_at > since)
+    return stmt
+
+
+async def _match_count(session: AsyncSession, search_id: int) -> int:
+    """Count live (non-dismissed, non-passed) matches across both kinds."""
+    total = 0
+    for model, kind in _MATCH_KINDS:
+        total += (await session.execute(
+            _live_match_count_stmt(model, kind, search_id)
+        )).scalar_one()
+    return total
 
 
 async def _new_count(session: AsyncSession, search: SavedSearch) -> int:
-    """Live matches newer than the last detail-view visit (spec's 'N new'),
-    excluding passed lots so the badge agrees with the detail page."""
-    stmt = (
-        select(func.count())
-        .select_from(SavedSearchMatch)
-        .join(
-            AuctionLot,
-            (AuctionLot.id == SavedSearchMatch.source_id)
-            & (SavedSearchMatch.source_kind == "auction_lot"),
-        )
-        .where(
-            SavedSearchMatch.saved_search_id == search.id,
-            SavedSearchMatch.dismissed_at.is_(None),
-            (AuctionLot.user_action.is_(None))
-            | (AuctionLot.user_action != UserAction.PASSED.value),
-        )
-    )
-    if search.last_viewed_at is not None:
-        stmt = stmt.where(SavedSearchMatch.matched_at > search.last_viewed_at)
-    return (await session.execute(stmt)).scalar_one()
+    """Live matches of both kinds newer than the last detail-view visit
+    (spec's 'N new'), excluding passed so the badge agrees with the detail page."""
+    total = 0
+    for model, kind in _MATCH_KINDS:
+        total += (await session.execute(
+            _live_match_count_stmt(model, kind, search.id, since=search.last_viewed_at)
+        )).scalar_one()
+    return total
 
 
 @router.get("/searches", response_class=HTMLResponse)
