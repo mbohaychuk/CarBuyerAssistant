@@ -1,0 +1,40 @@
+{% from "_macros.html" import money, pct, deal_bucket, state_pill, flag_chip, private_actions %}
+{# `listing` is a PrivateListing. Rendered in the feed and (Task 4) as the HTMX
+   swap returned by /private/{id}/mark. listing.url + photos are scraped, so the
+   safe_url filter gates them to http(s) (blocks javascript:/data:). #}
+{% set title_text = [listing.year, listing.make, listing.model, listing.trim] | select | join(" ")
+   or listing.title or ("Listing #" ~ listing.id) %}
+{% set href = listing.url | safe_url %}
+{% set photo = (listing.photos[0] if listing.photos else none) | safe_url %}
+<article id="private-{{ listing.id }}" class="lot-card private-card"
+         data-deal="{{ deal_bucket(listing.price_deal_score) }}">
+  {% if photo %}
+  <img class="private-card__thumb" src="{{ photo }}" alt="" loading="lazy" width="120" height="90">
+  {% endif %}
+  <div class="private-card__body">
+    <div class="private-card__head">
+      {% if href %}
+      <a class="private-card__title" href="{{ href }}" target="_blank" rel="noopener">{{ title_text }}</a>
+      {% else %}
+      <span class="private-card__title">{{ title_text }}</span>
+      {% endif %}
+      {% if listing.price_deal_score is not none %}
+      <span class="private-card__deal">{{ pct(listing.price_deal_score) }} deal</span>
+      {% endif %}
+      {{ state_pill(listing.user_action.value if listing.user_action else None) }}
+    </div>
+    <p class="private-card__pricing">
+      Ask {{ money(listing.ask_price_cad) }} · Expected {{ money(listing.expected_value_cad) }}
+      {% if listing.condition_categorical %} · {{ listing.condition_categorical }}{% endif %}
+    </p>
+    {% if listing.green_flags or listing.red_flags %}
+    <div class="private-card__flags">
+      {% for f in listing.green_flags %}{{ flag_chip(f, "good") }}{% endfor %}
+      {% for f in listing.red_flags %}{{ flag_chip(f, "bad") }}{% endfor %}
+    </div>
+    {% endif %}
+    {% if listing.summary %}<p class="private-card__summary">{{ listing.summary }}</p>{% endif %}
+    {{ private_actions(listing.id, listing.user_action.value if listing.user_action else None) }}
+    <span class="t-meta">{{ listing.pickup_city or "" }}{% if listing.pickup_province %}, {{ listing.pickup_province }}{% endif %}</span>
+  </div>
+</article>

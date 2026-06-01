@@ -38,6 +38,18 @@ def is_htmx(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
 
 
+def safe_url(url: str | None) -> str | None:
+    """Return *url* only if it is an http(s) URL, else None.
+
+    Scraped listing URLs are attacker-controllable; gating them to an http(s)
+    allowlist before they reach an href/src blocks javascript:/data:/vbscript:
+    XSS. Used by the search-detail row builder (Python) and the `safe_url`
+    Jinja filter (templates)."""
+    if url is None:
+        return None
+    return url if url.lower().startswith(("http://", "https://")) else None
+
+
 # Auth seam — returns a stub for MVP, but wired into every mutating endpoint
 # (mark / notes / rescore / retry_routing / purchases_create) so the dependency
 # signature is exercised on every request that changes state. Replacing the
@@ -45,7 +57,7 @@ def is_htmx(request: Request) -> bool:
 #
 # `request: Request` is accepted now (unused) so the future real implementation
 # can read headers/cookies without changing every caller's signature.
-def current_user(request: Request) -> CurrentUser:  # noqa: ARG001
+def current_user(request: Request) -> CurrentUser:
     return CurrentUser(id="me", role="dev")
 
 

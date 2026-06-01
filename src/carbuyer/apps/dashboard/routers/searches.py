@@ -14,6 +14,7 @@ from carbuyer.apps.dashboard.deps import (
     current_user,
     get_session,
     is_htmx,
+    safe_url,
 )
 from carbuyer.db.enums import UserAction
 from carbuyer.db.models import Auction, AuctionLot, PrivateListing, SavedSearch, SavedSearchMatch
@@ -84,12 +85,6 @@ _MATCH_PAGE_SIZE = 20
 def _listing_title(listing: PrivateListing) -> str:
     parts = [str(p) for p in (listing.year, listing.make, listing.model, listing.trim) if p]
     return " ".join(parts) or listing.title or f"Listing #{listing.id}"
-
-
-def _safe_external_url(url: str) -> str | None:
-    """Only http(s) URLs are safe to put in an href. Scraped listing URLs are
-    attacker-controllable, so reject javascript:/data:/etc. (allowlist)."""
-    return url if url.lower().startswith(("http://", "https://")) else None
 
 
 _MATCH_KINDS: tuple[tuple[type[AuctionLot] | type[PrivateListing], str], ...] = (
@@ -264,7 +259,7 @@ async def search_detail(
             "kind": "private_listing", "match": m,
             "title": _listing_title(listing),
             "subtitle": listing.pickup_province or "",
-            "detail_url": _safe_external_url(listing.url), "external": True,
+            "detail_url": safe_url(listing.url), "external": True,
         }))
     keyed.sort(key=lambda t: (t[0], t[1]), reverse=True)
     ordered = [row for _, _, row in keyed]
@@ -301,7 +296,7 @@ async def search_detail(
     for m, listing in private_log:
         keyed_activity.append((m.matched_at, m.id, {
             "match": m, "title": _listing_title(listing),
-            "detail_url": _safe_external_url(listing.url), "external": True,
+            "detail_url": safe_url(listing.url), "external": True,
         }))
     keyed_activity.sort(key=lambda t: (t[0], t[1]), reverse=True)
     activity = [row for _, _, row in keyed_activity[:50]]

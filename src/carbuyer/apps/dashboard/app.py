@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from carbuyer.apps.dashboard.deps import safe_url
+
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -31,7 +33,11 @@ templates.env.filters["local_dt"] = _local_dt
 # "right now" anchor (e.g. the countdown chip) can compute relative time
 # without each router having to thread one through their context. Routers
 # may still pass an explicit `now` kwarg for deterministic tests.
-templates.env.globals["now_utc"] = lambda: datetime.now(UTC)
+# Jinja2's type stubs type env.filters/globals.__setitem__ to the built-in
+# filter/global overload union, so registering a custom callable is a stub
+# false positive (correct at runtime).
+templates.env.globals["now_utc"] = lambda: datetime.now(UTC)  # pyright: ignore[reportArgumentType]
+templates.env.filters["safe_url"] = safe_url  # pyright: ignore[reportArgumentType]
 
 
 def create_app() -> FastAPI:
@@ -53,6 +59,7 @@ def create_app() -> FastAPI:
         health,
         lots,
         needs_plugin,
+        private,
         purchases,
         searches,
         sold,
@@ -61,7 +68,7 @@ def create_app() -> FastAPI:
     )
     for router in (
         today, feed, closing, watched, searches, lots, comps, sold,
-        purchases, health, actions, needs_plugin, auctions, admin,
+        private, purchases, health, actions, needs_plugin, auctions, admin,
     ):
         app.include_router(router.router)
     return app
