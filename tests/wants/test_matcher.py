@@ -17,7 +17,6 @@ def _lot(**over: Any) -> AuctionLot:
         "transmission": "manual",
         "drivetrain": "4wd",
         "mileage_km": 180_000,
-        "current_high_bid_cad": Decimal("8000"),
         "condition_categorical": "decent",
         "condition_inferred_from_sparse_listing": False,
         "showstopper_flags": [],
@@ -58,9 +57,11 @@ def test_transmission_manual_only_excludes_automatic_but_keeps_unknown() -> None
 
 def test_price_ceiling_excludes_over_but_keeps_unknown() -> None:
     want = WantCriteria(price_ceiling_cad=10_000)
-    assert matches(_lot(current_high_bid_cad=Decimal("9000")), want) is True
-    assert matches(_lot(current_high_bid_cad=Decimal("12000")), want) is False
-    assert matches(_lot(current_high_bid_cad=None), want) is True  # lenient
+    assert matches(_lot(), want, offer_price_cad=Decimal("9000")) is True
+    assert matches(_lot(), want, offer_price_cad=Decimal("10000")) is True  # == boundary
+    assert matches(_lot(), want, offer_price_cad=Decimal("12000")) is False
+    assert matches(_lot(), want, offer_price_cad=None) is True  # lenient
+    assert matches(_lot(), want) is True  # price not provided → unknown → lenient
 
 
 def test_mileage_cap_excludes_over_but_keeps_unknown() -> None:

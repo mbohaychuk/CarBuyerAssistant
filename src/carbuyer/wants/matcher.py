@@ -5,6 +5,12 @@ unit-test and trivial to call per-lot from the valuator's post-valuation hook. T
 bulk "all lots matching this want" SQL query (dashboard) is a separate, later seam
 that must agree with this predicate.
 
+Channel-specific values (price, pickup province) are passed in as keywords rather
+than read off the lot, so the predicate touches only source-agnostic vehicle facts.
+When auction_lots splits into a vehicle_offer parent + auction_lot/private_listing
+children (Phase 1), the price source differs per channel (current high bid vs asking
+price) — keeping it injected makes that a caller change, not a matcher rewrite.
+
 Policy: LENIENT on unknown attributes. A buyer-assistant should rather raise an
 extra dismissable alert than silently miss a deal, so a missing trim / transmission
 / mileage / price does NOT exclude a lot. Only the core identity (make, model,
@@ -35,6 +41,7 @@ def matches(
     criteria: WantCriteria,
     *,
     pickup_province: str | None = None,
+    offer_price_cad: int | Decimal | None = None,
 ) -> bool:
     checks = (
         not (criteria.hide_showstoppers and lot.showstopper_flags),
@@ -44,7 +51,7 @@ def matches(
         _in_set(lot.transmission, criteria.transmissions, lenient_unknown=True),
         _in_set(lot.drivetrain, criteria.drivetrains, lenient_unknown=True),
         _year_in_range(lot.year, criteria.year_min, criteria.year_max),
-        _at_most(lot.current_high_bid_cad, criteria.price_ceiling_cad),
+        _at_most(offer_price_cad, criteria.price_ceiling_cad),
         _at_most(lot.mileage_km, criteria.max_mileage_km),
         _province_ok(pickup_province, criteria.provinces),
         _condition_ok(
