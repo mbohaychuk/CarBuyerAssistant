@@ -11,7 +11,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from carbuyer.db.models import Search
+from carbuyer.db.models import Search, WantMatch
 from carbuyer.wants.criteria import WantCriteria
 
 
@@ -77,3 +77,34 @@ async def delete_want(session: AsyncSession, want_id: int) -> bool:
     await session.delete(want)
     await session.flush()
     return True
+
+
+async def upsert_want_match(
+    session: AsyncSession,
+    *,
+    search_id: int,
+    lot_id: int,
+    want_relative_score: float | None,
+) -> tuple[WantMatch, bool]:
+    """Insert a (search, lot) match or refresh its score. Returns (row, created).
+    On an existing row, only the score is updated — notified_at and dismissed are
+    preserved, so a re-evaluation (e.g. a new bid) re-scores without re-alerting.
+    """
+    existing = (
+        await session.execute(
+            select(WantMatch).where(
+                WantMatch.search_id == search_id,
+                WantMatch.lot_id == lot_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.want_relative_score = want_relative_score
+        await session.flush()
+        return existing, False
+    match = WantMatch(
+        search_id=search_id, lot_id=lot_id, want_relative_score=want_relative_score
+    )
+    session.add(match)
+    await session.flush()
+    return match, True
