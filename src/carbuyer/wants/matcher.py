@@ -1,0 +1,84 @@
+"""Does a vehicle lot satisfy a want? The single source of truth for matching.
+
+Pure function over an AuctionLot (Phase 0) — no DB, no session — so it is fast to
+unit-test and trivial to call per-lot from the valuator's post-valuation hook. The
+bulk "all lots matching this want" SQL query (dashboard) is a separate, later seam
+that must agree with this predicate.
+
+Policy: LENIENT on unknown attributes. A buyer-assistant should rather raise an
+extra dismissable alert than silently miss a deal, so a missing trim / transmission
+/ mileage / price does NOT exclude a lot. Only the core identity (make, model,
+year) requires a known, matching value; an explicit province filter likewise needs
+a known location.
+"""
+from __future__ import annotations
+
+from collections.abc import Sequence
+from decimal import Decimal
+
+from carbuyer.db.models import AuctionLot
+from carbuyer.wants.criteria import WantCriteria
+
+# Worst → best; index gives an orderable rank for the condition floor.
+_CONDITION_ORDER = ("bad", "poor", "decent", "good", "great")
+
+
+def matches(
+    lot: AuctionLot,
+    criteria: WantCriteria,
+    *,
+    pickup_province: str | None = None,
+) -> bool:
+    checks = (
+        not (criteria.hide_showstoppers and lot.showstopper_flags),
+        _in_set(lot.make, criteria.makes, lenient_unknown=False),
+        _in_set(lot.model, criteria.models, lenient_unknown=False),
+        _in_set(lot.trim, criteria.trims, lenient_unknown=True),
+        _in_set(lot.transmission, criteria.transmissions, lenient_unknown=True),
+        _in_set(lot.drivetrain, criteria.drivetrains, lenient_unknown=True),
+        _year_in_range(lot.year, criteria.year_min, criteria.year_max),
+        _at_most(lot.current_high_bid_cad, criteria.price_ceiling_cad),
+        _at_most(lot.mileage_km, criteria.max_mileage_km),
+        _province_ok(pickup_province, criteria.provinces),
+        _condition_ok(lot.condition_categorical, criteria.condition_min),
+    )
+    return all(checks)
+
+
+def _in_set(value: str | None, allowed: Sequence[str], *, lenient_unknown: bool) -> bool:
+    """Case-insensitive membership. Empty `allowed` = "any"; `unknown`/None is
+    lenient (kept) or strict (dropped) per `lenient_unknown`.
+    """
+    if not allowed:
+        return True
+    if value is None or value.strip().lower() == "unknown":
+        return lenient_unknown
+    needle = value.strip().lower()
+    return any(needle == a.strip().lower() for a in allowed)
+
+
+def _year_in_range(year: int | None, ymin: int | None, ymax: int | None) -> bool:
+    if ymin is None and ymax is None:
+        return True
+    if year is None:
+        return False
+    return (ymin is None or year >= ymin) and (ymax is None or year <= ymax)
+
+
+def _at_most(value: int | Decimal | None, ceiling: int | None) -> bool:
+    """True unless both are known and value exceeds the ceiling (lenient on None)."""
+    return ceiling is None or value is None or value <= ceiling
+
+
+def _province_ok(pickup_province: str | None, provinces: Sequence[str]) -> bool:
+    if not provinces:
+        return True
+    if pickup_province is None:
+        return False
+    return pickup_province.upper() in {p.upper() for p in provinces}
+
+
+def _condition_ok(condition: str | None, floor: str | None) -> bool:
+    if floor is None or condition not in _CONDITION_ORDER:
+        return True  # no floor, or unknown condition → lenient
+    return _CONDITION_ORDER.index(condition) >= _CONDITION_ORDER.index(floor)
