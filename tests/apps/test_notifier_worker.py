@@ -355,7 +355,8 @@ async def test_process_one_fires_early_warning(
     """Lot with high rarity + close far out → early_warning fires → DONE."""
     session = _patched_get_session
     # rarity_score above threshold (2.0), scheduled_end_at 72 h out (>= 48 h).
-    far_end = datetime(2026, 6, 10, tzinfo=UTC)  # well beyond 48 h from test run
+    # Relative to now so the early-warning window check doesn't rot past a fixed date.
+    far_end = datetime.now(UTC) + timedelta(hours=72)
     _, lot = _seed_lot(
         session,
         rarity_score=3.0,
