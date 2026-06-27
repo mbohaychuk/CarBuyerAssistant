@@ -15,12 +15,19 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from decimal import Decimal
+from typing import get_args
 
 from carbuyer.db.models import AuctionLot
+from carbuyer.llm.schemas import Condition
 from carbuyer.wants.criteria import WantCriteria
 
-# Worst → best; index gives an orderable rank for the condition floor.
+# Worst → best; index gives an orderable rank for the condition floor. Guarded
+# against drift from the Condition vocabulary it mirrors (set-equality, so the
+# ranking order stays ours to choose).
 _CONDITION_ORDER = ("bad", "poor", "decent", "good", "great")
+assert set(_CONDITION_ORDER) == set(get_args(Condition)), (
+    "_CONDITION_ORDER drifted from carbuyer.llm.schemas.Condition"
+)
 
 
 def matches(
@@ -40,20 +47,25 @@ def matches(
         _at_most(lot.current_high_bid_cad, criteria.price_ceiling_cad),
         _at_most(lot.mileage_km, criteria.max_mileage_km),
         _province_ok(pickup_province, criteria.provinces),
-        _condition_ok(lot.condition_categorical, criteria.condition_min),
+        _condition_ok(
+            lot.condition_categorical,
+            criteria.condition_min,
+            sparse=bool(lot.condition_inferred_from_sparse_listing),
+        ),
     )
     return all(checks)
 
 
 def _in_set(value: str | None, allowed: Sequence[str], *, lenient_unknown: bool) -> bool:
-    """Case-insensitive membership. Empty `allowed` = "any"; `unknown`/None is
-    lenient (kept) or strict (dropped) per `lenient_unknown`.
+    """Case-insensitive membership. Empty `allowed` = "any". A missing value —
+    None, blank, or the "unknown" sentinel — is lenient (kept) or strict
+    (dropped) per `lenient_unknown`.
     """
     if not allowed:
         return True
-    if value is None or value.strip().lower() == "unknown":
+    needle = "" if value is None else value.strip().lower()
+    if needle in ("", "unknown"):
         return lenient_unknown
-    needle = value.strip().lower()
     return any(needle == a.strip().lower() for a in allowed)
 
 
@@ -73,12 +85,14 @@ def _at_most(value: int | Decimal | None, ceiling: int | None) -> bool:
 def _province_ok(pickup_province: str | None, provinces: Sequence[str]) -> bool:
     if not provinces:
         return True
-    if pickup_province is None:
+    if pickup_province is None or not pickup_province.strip():
         return False
-    return pickup_province.upper() in {p.upper() for p in provinces}
+    return pickup_province.strip().upper() in {p.strip().upper() for p in provinces}
 
 
-def _condition_ok(condition: str | None, floor: str | None) -> bool:
-    if floor is None or condition not in _CONDITION_ORDER:
-        return True  # no floor, or unknown condition → lenient
+def _condition_ok(condition: str | None, floor: str | None, *, sparse: bool) -> bool:
+    # No floor, an unknown/unrecognized rating, or a sparse-listing-inferred
+    # rating (a coerced "decent" that is really unknown) → lenient.
+    if floor is None or sparse or condition not in _CONDITION_ORDER:
+        return True
     return _CONDITION_ORDER.index(condition) >= _CONDITION_ORDER.index(floor)

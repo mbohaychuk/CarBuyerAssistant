@@ -19,6 +19,7 @@ def _lot(**over: Any) -> AuctionLot:
         "mileage_km": 180_000,
         "current_high_bid_cad": Decimal("8000"),
         "condition_categorical": "decent",
+        "condition_inferred_from_sparse_listing": False,
         "showstopper_flags": [],
     }
     base.update(over)
@@ -95,3 +96,26 @@ def test_trim_is_lenient_on_unknown() -> None:
     assert matches(_lot(trim="PRO-4X"), want) is True
     assert matches(_lot(trim=None), want) is True  # lenient on sparse data
     assert matches(_lot(trim="SE"), want) is False
+
+
+def test_empty_string_in_lenient_field_is_treated_as_unknown() -> None:
+    # An empty string is sparse/unknown data, not a known non-match.
+    assert matches(_lot(trim=""), WantCriteria(trims=["PRO-4X"])) is True
+    assert matches(_lot(transmission=""), WantCriteria(transmissions=["manual"])) is True
+
+
+def test_province_match_strips_whitespace() -> None:
+    want = WantCriteria(provinces=["AB"])
+    assert matches(_lot(), want, pickup_province=" ab ") is True
+    assert matches(_lot(), want, pickup_province="  ") is False
+
+
+def test_sparse_inferred_condition_is_lenient_against_floor() -> None:
+    # The enricher coerces low-confidence listings to "decent" and flags them
+    # sparse; that "decent" is really unknown, so a good+ want must not drop it.
+    want = WantCriteria(condition_min="good")
+    sparse = _lot(condition_categorical="decent", condition_inferred_from_sparse_listing=True)
+    assert matches(sparse, want) is True
+    # A genuinely-confident "decent" is still correctly excluded by a good+ floor.
+    confident = _lot(condition_categorical="decent", condition_inferred_from_sparse_listing=False)
+    assert matches(confident, want) is False
