@@ -120,3 +120,45 @@ def test_sparse_inferred_condition_is_lenient_against_floor() -> None:
     # A genuinely-confident "decent" is still correctly excluded by a good+ floor.
     confident = _lot(condition_categorical="decent", condition_inferred_from_sparse_listing=False)
     assert matches(confident, want) is False
+
+
+def test_model_required_independently_of_make() -> None:
+    # make matches; only the model differs → isolates the model predicate
+    want = WantCriteria(makes=["Nissan"], models=["Xterra"])
+    assert matches(_lot(make="Nissan", model="Frontier"), want) is False
+
+
+def test_multiple_makes_models_any_one_matches() -> None:
+    want = WantCriteria(makes=["Lexus", "Toyota"], models=["GX 470", "4Runner"])
+    assert matches(_lot(make="Toyota", model="4Runner"), want) is True
+    assert matches(_lot(make="Lexus", model="GX 470"), want) is True
+    assert matches(_lot(make="Nissan", model="Xterra"), want) is False
+
+
+def test_year_bounds_apply_independently() -> None:
+    assert matches(_lot(year=2000), WantCriteria(year_min=2005)) is False
+    assert matches(_lot(year=2010), WantCriteria(year_min=2005)) is True
+    assert matches(_lot(year=2020), WantCriteria(year_max=2015)) is False
+    assert matches(_lot(year=2010), WantCriteria(year_max=2015)) is True
+
+
+def test_year_min_equals_max_is_an_exact_year() -> None:
+    want = WantCriteria(year_min=2010, year_max=2010)
+    assert matches(_lot(year=2010), want) is True
+    assert matches(_lot(year=2011), want) is False
+
+
+def test_condition_unknown_or_garbage_value_is_lenient() -> None:
+    want = WantCriteria(condition_min="good")
+    assert matches(_lot(condition_categorical="unknown"), want) is True
+    assert matches(_lot(condition_categorical="weird"), want) is True
+
+
+def test_mileage_cap_boundary_is_inclusive() -> None:
+    assert matches(_lot(mileage_km=200_000), WantCriteria(max_mileage_km=200_000)) is True
+
+
+def test_showstopper_excludes_even_when_all_else_matches() -> None:
+    want = WantCriteria(makes=["Nissan"], models=["Xterra"], year_min=2005, year_max=2015)
+    flagged = _lot(showstopper_flags=[{"flag": "frame_rot", "evidence": "rust"}])
+    assert matches(flagged, want) is False

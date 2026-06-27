@@ -63,6 +63,33 @@ async def test_update_want_returns_none_for_missing(session: AsyncSession) -> No
     assert await repo.update_want(session, 999_999, name="x") is None
 
 
+async def test_list_wants_is_scoped_to_user(session: AsyncSession) -> None:
+    mine = await repo.create_want(session, name="mine", criteria=WantCriteria())
+    await repo.create_want(
+        session, name="theirs", criteria=WantCriteria(), user_id="someone_else"
+    )
+    await session.commit()
+
+    wants = await repo.list_wants(session)  # defaults to user_id="me"
+    assert mine.id in {w.id for w in wants}
+    assert all(w.user_id == "me" for w in wants)
+
+
+async def test_update_want_leaves_unspecified_fields_intact(session: AsyncSession) -> None:
+    crit = WantCriteria(makes=["Nissan"], models=["Xterra"])
+    want = await repo.create_want(session, name="orig", criteria=crit)
+    await session.commit()
+
+    await repo.update_want(session, want.id, name="renamed")  # only the name
+    await session.commit()
+
+    fetched = await _reload(session, want.id)
+    assert fetched is not None
+    assert fetched.name == "renamed"
+    assert fetched.enabled is True  # untouched
+    assert WantCriteria.model_validate(fetched.config) == crit  # untouched
+
+
 async def test_delete_want_removes_row(session: AsyncSession) -> None:
     want = await repo.create_want(session, name="doomed", criteria=WantCriteria())
     await session.commit()

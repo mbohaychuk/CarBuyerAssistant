@@ -24,9 +24,9 @@ class WantCriteria(BaseModel):
 
     # Vehicle identity. Empty list = "any" for that field; multiple values fan
     # the want out (e.g. models=["GX 470","4Runner"] for a cross-platform want).
-    makes: list[str] = Field(default_factory=list)
-    models: list[str] = Field(default_factory=list)
-    trims: list[str] = Field(default_factory=list)
+    makes: list[str] = []
+    models: list[str] = []
+    trims: list[str] = []
     transmissions: list[Transmission] = []
     drivetrains: list[Drivetrain] = []
 
@@ -34,7 +34,7 @@ class WantCriteria(BaseModel):
     year_max: int | None = None
     price_ceiling_cad: int | None = Field(default=None, gt=0)
     max_mileage_km: int | None = Field(default=None, gt=0)
-    provinces: list[str] = Field(default_factory=list)
+    provinces: list[str] = []
     condition_min: Condition | None = None
 
     hide_showstoppers: bool = True

@@ -158,3 +158,4 @@ LLM archetype expander (`gpt-5-nano` → vPIC-normalized → owner-confirm) seed
 - **`'private'` multiplier 1.00 + uncalibrated §4c haircut** → listing deal scores optimistic until calibrated on real disappeared-listing data.
 - **Single-user assumption is baked in** (`user_action` has no `user_id`; channels are global) — fine for "me", but any multi-user want-list needs attribution threaded through buttons/routing.
 - **Flip economics** (`recommended_max_bid`, `flip_margin`, landed-cost) are flipper concepts — scope them to the auction half or drop for the buyer-assistant path.
+- **`searches.config` has no versioning** — `WantCriteria` uses `extra="forbid"`, so a future rename/removal of a criterion would make `model_validate` reject pre-existing rows. Before any slice changes the criteria shape, add a `config` schema_version + migration (or isolate per-want validation so one stale row can't halt a batch match). Adding fields with defaults stays backward-safe.
