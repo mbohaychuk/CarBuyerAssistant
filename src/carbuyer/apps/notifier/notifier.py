@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import aiohttp
+from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,12 +68,17 @@ async def _load_want_alerts(session: AsyncSession, lot: AuctionLot) -> list[Want
                 WantMatch.lot_id == lot.id,
                 WantMatch.notified_at.is_(None),
                 WantMatch.dismissed.is_(False),
+                Search.enabled.is_(True),  # a muted want must not fire queued matches
             )
         )
     ).all()
     alerts: list[WantAlert] = []
     for want_match_id, want_name, config in rows:
-        criteria = WantCriteria.model_validate(config)
+        try:
+            criteria = WantCriteria.model_validate(config)
+        except ValidationError:
+            log.warning("skipping want alert with invalid config", want_match_id=want_match_id)
+            continue
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.current_high_bid_cad)
         alerts.append(WantAlert(want_match_id, want_name, deal))
     return alerts
@@ -84,11 +90,12 @@ async def _post_want_alerts(
     lot_id: int,
     *,
     http_session: aiohttp.ClientSession,
-) -> tuple[bool, bool, list[int], str | None, str | None]:
+) -> tuple[bool, bool, bool, list[int], str | None, str | None]:
     """Post each want match to the 'wants' channel. Want alerts bypass quiet
     hours — the user explicitly asked for these vehicles. Returns
-    (attempted, succeeded, stamped_want_match_ids, last_channel, last_error)."""
-    attempted = succeeded = False
+    (attempted, succeeded, failed, stamped_want_match_ids, last_channel, last_error)
+    where `failed` means at least one delivery to a configured channel failed."""
+    attempted = succeeded = failed = False
     stamped_ids: list[int] = []
     last_channel: str | None = None
     last_error: str | None = None
@@ -121,12 +128,13 @@ async def _post_want_alerts(
                 lot_id=lot_id, want_name=alert.want_name, channel=channel_key,
             )
         else:
+            failed = True
             last_error = f"post_failed:{channel_key}:want_match"
             log.warning(
                 "want-match post failed",
                 lot_id=lot_id, want_name=alert.want_name, channel_key=channel_key,
             )
-    return attempted, succeeded, stamped_ids, last_channel, last_error
+    return attempted, succeeded, failed, stamped_ids, last_channel, last_error
 
 
 def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
@@ -300,15 +308,18 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     # the next external NOTIFY (bid change, rescore, etc.) re-evaluates after
     # quiet hours. The 08:00 morning digest in the spec is a Phase 14
     # follow-on (needs a periodic flush job).
+    had_suppressed_triggers = False
     if _in_quiet_hours(now, settings.quiet_hours_start, settings.quiet_hours_end):
         closing_in_1h = (
             auction.scheduled_end_at is not None
             and (auction.scheduled_end_at - now) <= timedelta(hours=1)
         )
+        before = len(triggers)
         triggers = [
             t for t in triggers
             if closing_in_1h or _trigger_overrides_quiet_hours(t, lot, now)
         ]
+        had_suppressed_triggers = len(triggers) < before
         # Want alerts bypass quiet hours (the user explicitly wants these), so
         # only defer when there are no want alerts AND no overriding triggers.
         if not triggers and not want_alerts:
@@ -369,7 +380,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
 
     # Want-match alerts (dedup keyed on want_matches.notified_at, not lot columns).
     (
-        w_attempted, w_succeeded, stamped_want_ids, w_channel, w_error,
+        w_attempted, w_succeeded, w_failed, stamped_want_ids, w_channel, w_error,
     ) = await _post_want_alerts(want_alerts, data, lot_id, http_session=http_session)
     any_post_attempted = any_post_attempted or w_attempted
     any_post_succeeded = any_post_succeeded or w_succeeded
@@ -380,6 +391,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
 
     # Decide outcome based on whether anything reached Discord.
     if any_post_succeeded:
+        final = "done"
         async with get_session() as s, s.begin():
             # Stamp the want ledger first — it's independent of the lot row, so a
             # vanished lot can't cause a duplicate want alert on recovery.
@@ -401,9 +413,29 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
                 setattr(row, field, ts)
             if last_channel is not None:
                 row.last_notified_channel = last_channel
-            row.notification_status = NotificationStatus.DONE
-            row.last_notification_error = None
-        return "done"
+            if w_failed:
+                # A want post failed amid successes. Want matches don't re-fire on
+                # re-enqueue the way per-column triggers do, so keep the lot PENDING
+                # to retry the un-stamped want, counting the attempt toward the cap.
+                row.last_notification_error = last_error
+                row.notification_attempts = (row.notification_attempts or 0) + 1
+                if row.notification_attempts >= settings.notification_max_attempts:
+                    row.notification_status = NotificationStatus.FAILED
+                    final = "failed"
+                else:
+                    row.notification_status = NotificationStatus.PENDING
+                    final = "transient"
+            elif had_suppressed_triggers:
+                # A want alert delivered (bypassing quiet hours) but a non-priority
+                # system trigger was suppressed; keep PENDING so it defers rather
+                # than being lost when the lot is finalized.
+                row.notification_status = NotificationStatus.PENDING
+                row.last_notification_error = None
+                final = "deferred"
+            else:
+                row.notification_status = NotificationStatus.DONE
+                row.last_notification_error = None
+        return final
 
     # No posts succeeded. If every trigger landed on a missing channel,
     # SKIP — re-running won't fix configuration. Otherwise it's transient.
