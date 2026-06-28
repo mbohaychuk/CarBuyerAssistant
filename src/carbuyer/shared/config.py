@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     # just the UA, so the proxy alone isn't enough without impersonation.
     http_impersonate: str = "chrome"
     proxy_url: str | None = None
+    # Opt-in NHTSA vPIC make/model normalization in the enricher (adds one
+    # keyless HTTP call per lot; best-effort, off by default). Aligns comp keys
+    # across LLM output + scraped listings ("F150" → "F-150").
+    vpic_normalization_enabled: bool = False
 
     # HiBid plugin discovery target provinces. Override via env, e.g.
     # `HIBID_PROVINCES='["AB","BC","SK"]'` to scope discovery for testing.

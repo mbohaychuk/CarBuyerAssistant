@@ -60,9 +60,11 @@ from carbuyer.llm.carfax import (
 )
 from carbuyer.llm.openai_provider import OpenAIProvider
 from carbuyer.llm.schemas import CarfaxFindings, EnrichmentOutput
+from carbuyer.normalize import vpic
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
+from carbuyer.sources.http import make_client
 
 log = get_logger("enricher")
 
@@ -229,11 +231,20 @@ def _is_unknown_str(s: str | None) -> bool:
     return s is not None and s.strip().lower() in ("unknown", "n/a", "")
 
 
+async def _canonical_model(make: str | None, model: str | None, year: int | None) -> str | None:
+    """Best-effort NHTSA-canonical model spelling (off unless configured)."""
+    if not settings.vpic_normalization_enabled:
+        return model
+    async with make_client(timeout=10.0) as client:
+        return await vpic.canonical_model(make, model, year, client=client)
+
+
 def _apply_to_lot(  # noqa: PLR0912 -- pre-existing field-by-field mapper; refactor out of S3 scope
     lot: VehicleOffer,
     result: _EnrichmentResult,
     *,
     raw_carfax_url: str | None,
+    canonical_model: str | None = None,
 ) -> None:
     """Mutate the ORM row with enrichment output. Caller controls the
     transaction. No I/O here — this is pure CPU + assignment.
@@ -256,7 +267,8 @@ def _apply_to_lot(  # noqa: PLR0912 -- pre-existing field-by-field mapper; refac
     else:
         lot.year = nv.year or lot.year
     lot.make = nv.make or lot.make
-    lot.model = nv.model or lot.model
+    # vPIC-canonicalized model (when enabled) wins over the raw LLM spelling.
+    lot.model = canonical_model or nv.model or lot.model
     lot.trim = nv.trim or lot.trim
     if not _is_unknown_str(nv.engine):
         lot.engine = nv.engine or lot.engine
@@ -392,12 +404,15 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
             lot.enrichment_status = EnrichmentStatus.PENDING  # re-claim
         return "transient"
 
+    nv = result.output.normalized_vehicle
+    canonical = await _canonical_model(nv.make, nv.model, nv.year or snap.year)
+
     async with get_session() as s, s.begin():
         lot = await s.get(VehicleOffer, lot_id)
         if lot is None:
             return "missing"
         lot.enrichment_attempts = (lot.enrichment_attempts or 0) + 1
-        _apply_to_lot(lot, result, raw_carfax_url=raw_carfax_url)
+        _apply_to_lot(lot, result, raw_carfax_url=raw_carfax_url, canonical_model=canonical)
         await notify(s, "valuation_pending", str(lot.id))
     return "done"
 
