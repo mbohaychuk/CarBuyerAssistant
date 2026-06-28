@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,16 @@ async def test_create_want_persists_name_and_criteria(session: AsyncSession) -> 
 
 async def test_get_want_returns_none_for_missing(session: AsyncSession) -> None:
     assert await repo.get_want(session, 999_999) is None
+
+
+async def test_create_want_rejects_empty_name(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="name"):
+        await repo.create_want(session, name="   ", criteria=WantCriteria())
+
+
+async def test_create_want_rejects_overlong_name(session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="name"):
+        await repo.create_want(session, name="x" * 200, criteria=WantCriteria())
 
 
 async def test_list_wants_all_then_enabled_only(session: AsyncSession) -> None:

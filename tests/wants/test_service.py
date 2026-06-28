@@ -8,8 +8,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.valuator.valuator import value_one
-from carbuyer.db.enums import NotificationStatus
-from carbuyer.db.models import Auction, AuctionLot, WantMatch
+from carbuyer.db.enums import NotificationStatus, ValuationStatus
+from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
 from carbuyer.wants import repo, service
 from carbuyer.wants.criteria import WantCriteria
 
@@ -150,6 +150,39 @@ async def test_value_one_forces_pending_on_want_match(session: AsyncSession) -> 
     row = (await session.execute(select(WantMatch))).scalar_one()
     assert row.search_id == want.id
     assert row.lot_id == lot.id
+
+
+async def test_evaluate_skips_malformed_want_config(session: AsyncSession) -> None:
+    # A directly-inserted Search with an invalid (extra-key) config must not abort
+    # matching for the valid wants — it is skipped, not raised.
+    auction = await _auction(session)
+    lot = await _lot(session, auction)
+    session.add(Search(name="corrupt", config={"bogus_key": 1}))
+    good = await repo.create_want(session, name="good", criteria=WantCriteria(makes=["Nissan"]))
+    await session.flush()
+
+    created = await service.evaluate_lot_against_wants(
+        session, lot, pickup_province="AB", offer_price_cad=Decimal("8000")
+    )
+    assert [m.search_id for m in created] == [good.id]
+
+
+async def test_backfill_seeds_matches_from_valued_lots(session: AsyncSession) -> None:
+    auction = await _auction(session)
+    await _lot(session, auction, lot_status="open", valuation_status=ValuationStatus.DONE.value)
+    await _lot(
+        session, auction, source_lot_id="L2", url="http://x/l2",
+        make="Toyota", model="4Runner",  # non-matching
+        lot_status="open", valuation_status=ValuationStatus.DONE.value,
+    )
+    want = await repo.create_want(
+        session, name="x", criteria=WantCriteria(makes=["Nissan"], models=["Xterra"])
+    )
+    await session.flush()
+
+    n = await service.backfill_want(session, want)
+    assert n == 1
+    assert await _count_matches(session) == 1
 
 
 async def test_value_one_keeps_skipped_without_want_match(session: AsyncSession) -> None:

@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.db.models import Search, WantMatch
 from carbuyer.wants.criteria import WantCriteria
 
+_MAX_NAME_LEN = 128  # matches Search.name String(128)
+
 
 async def create_want(
     session: AsyncSession,
@@ -22,6 +24,11 @@ async def create_want(
     criteria: WantCriteria,
     user_id: str = "me",
 ) -> Search:
+    name = name.strip()
+    if not name:
+        raise ValueError("name is required")
+    if len(name) > _MAX_NAME_LEN:
+        raise ValueError(f"name too long (max {_MAX_NAME_LEN} characters)")
     want = Search(
         user_id=user_id,
         name=name,

@@ -72,18 +72,21 @@ class WantCriteria(BaseModel):
         comma-separated; raises pydantic.ValidationError on bad values. Uses
         model_validate so runtime-validated strings don't trip the list[Literal]
         field types statically."""
+        # Literal-typed fields (transmission/drivetrain/condition) have lowercase
+        # vocabularies; lower the inputs so "Manual"/"4WD"/"Good" are accepted, to
+        # match the case-insensitivity of make/model/trim/province downstream.
         return cls.model_validate({
             "makes": _split_csv(makes),
             "models": _split_csv(models),
             "trims": _split_csv(trims),
-            "transmissions": _split_csv(transmissions),
-            "drivetrains": _split_csv(drivetrains),
+            "transmissions": [t.lower() for t in _split_csv(transmissions)],
+            "drivetrains": [d.lower() for d in _split_csv(drivetrains)],
             "year_min": year_min,
             "year_max": year_max,
             "price_ceiling_cad": max_price_cad,
             "max_mileage_km": max_mileage_km,
             "provinces": _split_csv(provinces),
-            "condition_min": condition_min or None,
+            "condition_min": (condition_min or "").strip().lower() or None,
         })
 
     @model_validator(mode="after")

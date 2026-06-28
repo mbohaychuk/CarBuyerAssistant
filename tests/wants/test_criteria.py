@@ -71,6 +71,22 @@ def test_want_criteria_rejects_invalid_transmission() -> None:
         WantCriteria.model_validate({"transmissions": ["stick"]})
 
 
+def test_from_inputs_is_case_insensitive_for_literal_fields() -> None:
+    # make/model/trim/province are matched case-insensitively downstream; the
+    # Literal-typed fields must accept mixed case at the input boundary too.
+    crit = WantCriteria.from_inputs(
+        makes="Nissan", transmissions="Manual", drivetrains="4WD", condition_min="Good"
+    )
+    assert crit.transmissions == ["manual"]
+    assert crit.drivetrains == ["4wd"]
+    assert crit.condition_min == "good"
+
+
+def test_from_inputs_rejects_unknown_literal() -> None:
+    with pytest.raises(ValidationError):
+        WantCriteria.from_inputs(transmissions="stick")
+
+
 async def test_search_config_round_trips_want_criteria(session: AsyncSession) -> None:
     """A WantCriteria survives a write/read through searches.config (JSONB)."""
     want = _manual_xterra()
