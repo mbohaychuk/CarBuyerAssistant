@@ -15,21 +15,9 @@ from pydantic import ValidationError
 from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
 from carbuyer.wants import repo
-from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.criteria import WantCriteria, first_error
 
 log = get_logger("bot")
-
-
-def _split(value: str | None) -> list[str]:
-    """Comma-separated slash-command input → list, dropping blanks."""
-    return [part.strip() for part in value.split(",") if part.strip()] if value else []
-
-
-def _first_error(exc: ValidationError) -> str:
-    err = exc.errors()[0]
-    loc = ".".join(str(p) for p in err.get("loc", ()))
-    msg = err.get("msg", "invalid value")
-    return f"{loc}: {msg}" if loc else msg
 
 
 async def add_want(
@@ -47,24 +35,16 @@ async def add_want(
     provinces: str | None = None,
     condition_min: str | None = None,
 ) -> str:
-    # model_validate (not the typed ctor) so runtime-validated strings from the
-    # slash command don't trip the static list[Literal] field types.
     try:
-        criteria = WantCriteria.model_validate({
-            "makes": _split(makes),
-            "models": _split(models),
-            "trims": _split(trims),
-            "transmissions": _split(transmissions),
-            "drivetrains": _split(drivetrains),
-            "year_min": year_min,
-            "year_max": year_max,
-            "price_ceiling_cad": max_price_cad,
-            "max_mileage_km": max_mileage_km,
-            "provinces": _split(provinces),
-            "condition_min": condition_min or None,
-        })
+        criteria = WantCriteria.from_inputs(
+            makes=makes, models=models, trims=trims,
+            transmissions=transmissions, drivetrains=drivetrains,
+            year_min=year_min, year_max=year_max, max_price_cad=max_price_cad,
+            max_mileage_km=max_mileage_km, provinces=provinces,
+            condition_min=condition_min,
+        )
     except ValidationError as exc:
-        return f"Invalid want: {_first_error(exc)}"
+        return f"Invalid want: {first_error(exc)}"
 
     async with get_session() as session, session.begin():
         want = await repo.create_want(session, name=name, criteria=criteria)
