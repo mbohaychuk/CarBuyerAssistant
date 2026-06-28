@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+
+if TYPE_CHECKING:
+    from carbuyer.wants.criteria import WantCriteria
 
 SourceType = Literal["listing", "auction"]
 
@@ -277,15 +280,20 @@ class AuctionSource(AuctionDiscoverer, AuctionFetcher, BidPoller):
 
 
 class ListingSource(Source):
-    """Marker base for private-sale listing plugins (Kijiji, …).
+    """Base for private-sale listing plugins (Kijiji, …).
 
     A sibling of the auction roles, not a subtype — listings have no bids, so
-    there is no BidPoller. The want-list PULL contract (``search_listings`` over
-    a want's criteria) lands when ingestion is wired; here it just marks the
-    ``listing`` kind so the registry and routing can tell the channels apart.
+    there is no BidPoller. The want-list PULL model queries each source per
+    active want, so the contract is ``search_listings`` over a want's criteria
+    rather than a crawl-everything discover.
     """
 
     kind: ClassVar[SourceType] = "listing"
+
+    @abstractmethod
+    def search_listings(self, criteria: WantCriteria) -> AsyncIterator[RawListing]:
+        """Yield the listings on this source matching a want's criteria."""
+        ...
 
 
 # ── Registry ────────────────────────────────────────────────────────────────
