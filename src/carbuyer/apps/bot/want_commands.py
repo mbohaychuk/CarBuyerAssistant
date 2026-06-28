@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from carbuyer.db.session import get_session
 from carbuyer.shared.logging import get_logger
-from carbuyer.wants import repo
+from carbuyer.wants import repo, service
 from carbuyer.wants.criteria import WantCriteria, first_error
 
 log = get_logger("bot")
@@ -46,9 +46,19 @@ async def add_want(
     except ValidationError as exc:
         return f"Invalid want: {first_error(exc)}"
 
-    async with get_session() as session, session.begin():
-        want = await repo.create_want(session, name=name, criteria=criteria)
-        return f"Added want #{want.id}: {name}"
+    try:
+        async with get_session() as session, session.begin():
+            want = await repo.create_want(session, name=name, criteria=criteria)
+            backfilled = await service.backfill_want(session, want)
+            want_id, want_name = want.id, want.name
+    except ValueError as exc:
+        return f"Invalid want: {exc}"
+    suffix = (
+        f" — {backfilled} existing match{'' if backfilled == 1 else 'es'} found"
+        if backfilled
+        else ""
+    )
+    return f"Added want #{want_id}: {want_name}{suffix}"
 
 
 async def list_wants_text() -> str:

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.dashboard.app import templates
 from carbuyer.apps.dashboard.deps import CurrentUser, current_user, get_session
 from carbuyer.db.models import AuctionLot, WantMatch
-from carbuyer.wants import repo
+from carbuyer.wants import repo, service
 from carbuyer.wants.criteria import WantCriteria, first_error
 
 router = APIRouter()
@@ -34,14 +34,13 @@ async def _render_list(
         )
     ).all()
     counts = {search_id: n for search_id, n in count_rows}
-    items: list[dict[str, Any]] = [
-        {
-            "want": w,
-            "criteria": WantCriteria.model_validate(w.config),
-            "match_count": counts.get(w.id, 0),
-        }
-        for w in wants
-    ]
+    items: list[dict[str, Any]] = []
+    for w in wants:
+        try:
+            criteria: WantCriteria | None = WantCriteria.model_validate(w.config)
+        except ValidationError:
+            criteria = None  # a corrupt/stale config must not 500 the page
+        items.append({"want": w, "criteria": criteria, "match_count": counts.get(w.id, 0)})
     return templates.TemplateResponse(
         request, "pages/wants.html", {"items": items, "error": error}
     )
@@ -82,11 +81,12 @@ async def wants_create(
             max_mileage_km=_int_or_none(max_mileage_km),
             provinces=provinces, condition_min=condition_min,
         )
+        want = await repo.create_want(session, name=name, criteria=criteria)
+        await service.backfill_want(session, want)  # seed matches from existing lots
     except ValidationError as exc:
         return await _render_list(request, session, error=f"Invalid want: {first_error(exc)}")
     except ValueError as exc:
-        return await _render_list(request, session, error=f"Invalid number: {exc}")
-    await repo.create_want(session, name=name, criteria=criteria)
+        return await _render_list(request, session, error=f"Invalid want: {exc}")
     await session.commit()
     return RedirectResponse("/wants", status_code=303)
 

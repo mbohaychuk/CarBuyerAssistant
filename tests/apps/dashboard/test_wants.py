@@ -73,6 +73,31 @@ async def test_create_want_round_trip(_patch_deps: AsyncSession) -> None:
     assert "manual xterra" in listing.text
 
 
+async def test_create_want_backfills_existing_matches(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    auction = Auction(
+        source="test", source_auction_id="A1", url="http://x/a",
+        canonical_url="http://x/a",
+        first_seen_at=datetime.now(UTC), last_seen_at=datetime.now(UTC),
+        pickup_province="AB",
+    )
+    session.add(auction)
+    await session.flush()
+    session.add(AuctionLot(
+        auction_id=auction.id, source_lot_id="L1", url="http://x/lot",
+        make="Nissan", model="Xterra", year=2010,
+        current_high_bid_cad=Decimal("8000"),
+        lot_status="open", valuation_status="done",
+    ))
+    await session.commit()
+
+    async with _client(follow=False) as c:
+        r = await c.post("/wants", data={"name": "x", "makes": "Nissan", "models": "Xterra"})
+        assert r.status_code == 303  # noqa: PLR2004
+        listing = await c.get("/wants")
+    assert "1 match" in listing.text
+
+
 async def test_create_want_invalid_shows_error(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
     async with _client() as c:
