@@ -134,7 +134,9 @@ Evidence that the original design *anticipated* this (so we extend, not fight):
 
 ## 7. Phased plan
 
-### Phase 0 — Want-list spine on auction data *(no schema split, no scrapers)*
+### Phase 0 — Want-list spine on auction data *(no schema split, no scrapers)* — ✅ COMPLETE (branch `want-list-pivot`)
+All 9 slices shipped TDD-first, suite green. The loop works end-to-end on auction data: declare a want (`/want` Discord command or `/wants` dashboard) → valuator matches + scores it → notifier posts a want-relative alert. `carbuyer/wants/` holds criteria/repo/matcher/deal/service; `want_matches` is the fire-once ledger; the valuator and notifier are wired; management UI exists in Discord and the dashboard.
+
 Slices (each compiles + tests green; TDD on the matcher/scoring logic):
 1. **`WantCriteria` Pydantic schema** for `Search.config` — make[]/model[] (lists, so one want can name several models = manual fan-out), year_min/max, trim, transmission, drivetrain, price_ceiling_cad, provinces[], max_mileage_km, condition_min, hide_showstoppers. Round-trip ↔ the JSONB column.
 2. **Want repository** — create/list/edit/enable/disable/delete `Search` rows.
