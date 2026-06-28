@@ -88,6 +88,7 @@
           {% if lot.title_status %}<div><dt>Title</dt><dd>{{ lot.title_status }}</dd></div>{% endif %}
           {% if lot.province_of_origin %}<div><dt>Origin</dt><dd>{{ lot.province_of_origin }}</dd></div>{% endif %}
           {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}</dd></div>{% endif %}
+          {% if lot.recall_count is not none or lot.complaint_count is not none %}<div><dt>NHTSA reliability</dt><dd>{{ lot.recall_count if lot.recall_count is not none else '?' }} recalls · {{ lot.complaint_count if lot.complaint_count is not none else '?' }} complaints</dd></div>{% endif %}
           {% if auction.pickup_window_text %}<div><dt>Pickup</dt><dd>{{ auction.pickup_window_text }}</dd></div>{% endif %}
           {% if auction.terms_text %}<div><dt>Terms</dt><dd class="t-meta">{{ auction.terms_text }}</dd></div>{% endif %}
         </dl>

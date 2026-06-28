@@ -98,6 +98,32 @@ def test_render_want_match_no_drop_line_on_increase() -> None:
     assert "Price drop" not in text
 
 
+def test_render_want_match_shows_reliability() -> None:
+    text = render_want_match_text(
+        _data(recall_count=2, complaint_count=47),
+        want_name="w",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "NHTSA" in text
+    assert "2 recalls" in text
+    assert "47 complaints" in text
+
+
+def test_render_want_match_no_reliability_line_when_absent() -> None:
+    text = render_want_match_text(
+        _data(),  # recall_count/complaint_count default None
+        want_name="w",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "NHTSA" not in text
+
+
 def test_render_want_match_uncomped() -> None:
     text = render_want_match_text(
         _data(),

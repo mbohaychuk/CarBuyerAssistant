@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # keyless HTTP call per lot; best-effort, off by default). Aligns comp keys
     # across LLM output + scraped listings ("F150" → "F-150").
     vpic_normalization_enabled: bool = False
+    # Opt-in NHTSA reliability lookup in the enricher (recall + complaint counts;
+    # two keyless HTTP calls per lot; best-effort, off by default).
+    nhtsa_reliability_enabled: bool = False
 
     # HiBid plugin discovery target provinces. Override via env, e.g.
     # `HIBID_PROVINCES='["AB","BC","SK"]'` to scope discovery for testing.

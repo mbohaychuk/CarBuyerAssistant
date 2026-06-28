@@ -60,7 +60,7 @@ from carbuyer.llm.carfax import (
 )
 from carbuyer.llm.openai_provider import OpenAIProvider
 from carbuyer.llm.schemas import CarfaxFindings, EnrichmentOutput
-from carbuyer.normalize import vpic
+from carbuyer.normalize import nhtsa, vpic
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
@@ -239,12 +239,24 @@ async def _canonical_model(make: str | None, model: str | None, year: int | None
         return await vpic.canonical_model(make, model, year, client=client)
 
 
-def _apply_to_lot(  # noqa: PLR0912 -- pre-existing field-by-field mapper; refactor out of S3 scope
+async def _reliability(
+    make: str | None, model: str | None, year: int | None,
+) -> tuple[int | None, int | None]:
+    """Best-effort NHTSA recall + complaint counts (off unless configured)."""
+    if not settings.nhtsa_reliability_enabled:
+        return None, None
+    async with make_client(timeout=10.0) as client:
+        return await nhtsa.fetch_reliability(make, model, year, client=client)
+
+
+def _apply_to_lot(  # noqa: PLR0912, PLR0915 -- field-by-field mapper; counts scale with the column set
     lot: VehicleOffer,
     result: _EnrichmentResult,
     *,
     raw_carfax_url: str | None,
     canonical_model: str | None = None,
+    recall_count: int | None = None,
+    complaint_count: int | None = None,
 ) -> None:
     """Mutate the ORM row with enrichment output. Caller controls the
     transaction. No I/O here — this is pure CPU + assignment.
@@ -313,6 +325,10 @@ def _apply_to_lot(  # noqa: PLR0912 -- pre-existing field-by-field mapper; refac
     lot.classic_or_collector = out.rarity.classic_or_collector
     lot.desirability_signals = list(out.rarity.desirability_signals)
     lot.desirability_evidence = list(out.rarity.desirability_evidence)
+    if recall_count is not None:
+        lot.recall_count = recall_count
+    if complaint_count is not None:
+        lot.complaint_count = complaint_count
     if result.carfax_findings is not None:
         lot.carfax_findings = result.carfax_findings.model_dump()
 
@@ -405,14 +421,19 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
         return "transient"
 
     nv = result.output.normalized_vehicle
-    canonical = await _canonical_model(nv.make, nv.model, nv.year or snap.year)
+    year = nv.year or snap.year
+    canonical = await _canonical_model(nv.make, nv.model, year)
+    recall_count, complaint_count = await _reliability(nv.make, canonical or nv.model, year)
 
     async with get_session() as s, s.begin():
         lot = await s.get(VehicleOffer, lot_id)
         if lot is None:
             return "missing"
         lot.enrichment_attempts = (lot.enrichment_attempts or 0) + 1
-        _apply_to_lot(lot, result, raw_carfax_url=raw_carfax_url, canonical_model=canonical)
+        _apply_to_lot(
+            lot, result, raw_carfax_url=raw_carfax_url, canonical_model=canonical,
+            recall_count=recall_count, complaint_count=complaint_count,
+        )
         await notify(s, "valuation_pending", str(lot.id))
     return "done"
 

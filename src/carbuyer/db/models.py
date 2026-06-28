@@ -232,6 +232,12 @@ class VehicleOffer(Base, TimestampMixin):
     recent_appreciation: Mapped[float | None] = mapped_column()
     # rarity_score: combined LLM + DB; written by valuator.
     rarity_score: Mapped[float | None] = mapped_column()
+    # Reliability signal — NHTSA recall campaign + consumer-complaint counts for
+    # this make/model/year (written by the enricher when enabled; the "known
+    # issues" hard signal for the reliable/easy-to-fix archetype). NULL = not
+    # fetched / unavailable.
+    recall_count: Mapped[int | None] = mapped_column(Integer)
+    complaint_count: Mapped[int | None] = mapped_column(Integer)
 
     # ── Owned by: vision-batcher (nightly two-pass) ─────────────────────────
     vision_findings: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

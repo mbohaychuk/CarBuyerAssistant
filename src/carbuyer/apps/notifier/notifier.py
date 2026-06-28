@@ -201,6 +201,8 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
         suspicious_underprice=lot.suspicious_underprice_flag,
         scheduled_end_at=end_at,
         previous_asking_cad=previous_asking,
+        recall_count=lot.recall_count,
+        complaint_count=lot.complaint_count,
     )
 
 

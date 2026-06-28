@@ -42,6 +42,9 @@ class LotEmbedData:
     # Private-listing price-drop re-alert: the asking price before the latest
     # drop (None for auctions / no prior drop).
     previous_asking_cad: Decimal | None = None
+    # NHTSA reliability signal (None = not looked up).
+    recall_count: int | None = None
+    complaint_count: int | None = None
 
 
 def _vehicle_title(d: LotEmbedData) -> str:
@@ -156,11 +159,16 @@ def render_want_match_text(
     budget = ""
     if dollars_under_ceiling_cad is not None:
         budget = f"\n${int(dollars_under_ceiling_cad):,} under your budget"
+    reliability = ""
+    if d.recall_count is not None or d.complaint_count is not None:
+        recalls = d.recall_count if d.recall_count is not None else "?"
+        complaints = d.complaint_count if d.complaint_count is not None else "?"
+        reliability = f"\n\U0001f527 NHTSA: {recalls} recalls · {complaints} complaints"
     return (
         f"\U0001f3af Matches your want “{want_name}”\n"
         f"{drop_line}"
         f"{title} ({d.location})\n"
-        f"Price: {price} · {deal_line}{budget}\n"
+        f"Price: {price} · {deal_line}{budget}{reliability}\n"
         f"{d.url}"
     )
 
