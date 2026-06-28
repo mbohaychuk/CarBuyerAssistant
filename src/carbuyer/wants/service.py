@@ -113,10 +113,11 @@ async def backfill_want(session: AsyncSession, want: Search) -> int:
         ):
             continue
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.current_high_bid_cad)
-        await repo.upsert_want_match(
+        match, _ = await repo.upsert_want_match(
             session, search_id=want.id, lot_id=lot.id, want_relative_score=deal.score
         )
-        count += 1
+        if not match.dismissed:  # cross-source VIN duplicates don't count as findable
+            count += 1
 
     # Private listings already valued — same predicate, channel-specific price +
     # province injected (the matcher is source-agnostic). Active candidates only;
@@ -140,8 +141,9 @@ async def backfill_want(session: AsyncSession, want: Search) -> int:
         ):
             continue
         deal = score_want_deal(listing, criteria, offer_price_cad=listing.asking_price_cad)
-        await repo.upsert_want_match(
+        match, _ = await repo.upsert_want_match(
             session, search_id=want.id, lot_id=listing.id, want_relative_score=deal.score,
         )
-        count += 1
+        if not match.dismissed:  # cross-source VIN duplicates don't count as findable
+            count += 1
     return count
