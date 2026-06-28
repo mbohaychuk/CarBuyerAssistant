@@ -11,7 +11,7 @@ from carbuyer.db.enums import (
     ValuationStatus,
     VisionStatus,
 )
-from carbuyer.db.models import AuctionLot, VehicleOffer
+from carbuyer.db.models import VehicleOffer
 
 # All status fields readable for catchup sweeps.
 StatusField = Literal[
@@ -67,11 +67,17 @@ async def claim_pending_ids(
     watchdog (Phase 2.5) flips 'in_progress' rows older than N minutes back to
     'pending' to recover from worker crashes mid-processing.
     """
-    column = getattr(AuctionLot, status_field)
+    # Claim on the offer parent so the queue serves both channels (auction lots
+    # and private listings). Lock against the core table, NOT the ORM entity:
+    # the parent's with_polymorphic loading turns an entity select into a LEFT
+    # OUTER JOIN to the children, and FOR UPDATE can't touch the nullable side
+    # of an outer join. The core-table select is a plain single-table lock.
+    table = VehicleOffer.__table__
+    column = table.c[status_field]
     select_stmt = (
-        select(AuctionLot.id)
+        select(table.c.id)
         .where(column == "pending")
-        .order_by(AuctionLot.id)
+        .order_by(table.c.id)
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
@@ -87,25 +93,20 @@ async def claim_pending_lots(
     *,
     status_field: ClaimableStatusField,
     limit: int = 50,
-) -> list[AuctionLot]:
-    """Claim up to ``limit`` pending lots (full ORM rows) and flip them to
-    in_progress. SKIP-LOCKED + UPDATE atomicity matches claim_pending_ids;
-    this variant returns full rows so callers don't need a second SELECT
-    round-trip when the whole row is needed.
+) -> list[VehicleOffer]:
+    """Claim up to ``limit`` pending offers (full polymorphic ORM rows) and flip
+    them to in_progress. Returns auction lots and/or private listings.
+
+    Implemented as claim-ids-then-load: the lock + in_progress marker run
+    against the core table (see claim_pending_ids — FOR UPDATE can't touch the
+    nullable side of the with_polymorphic outer join), then the now-claimed rows
+    are loaded as full polymorphic entities (no lock needed — they're ours).
     """
-    column = getattr(AuctionLot, status_field)
-    stmt = (
-        select(AuctionLot)
-        .where(column == "pending")
-        .order_by(AuctionLot.id)
-        .limit(limit)
-        .with_for_update(skip_locked=True)
-    )
-    lots = list((await session.execute(stmt)).scalars().all())
-    if not lots:
+    ids = await claim_pending_ids(session, status_field=status_field, limit=limit)
+    if not ids:
         return []
-    await _mark_in_progress(session, ids=[lot.id for lot in lots], status_field=status_field)
-    return lots
+    stmt = select(VehicleOffer).where(VehicleOffer.id.in_(ids)).order_by(VehicleOffer.id)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def recover_orphans(
@@ -156,11 +157,12 @@ async def select_pending_ids(
     while the worker was down. Caller dispatches each id (typically by issuing
     a fresh NOTIFY) so the regular processing path picks them up.
     """
-    column = getattr(AuctionLot, status_field)
+    table = VehicleOffer.__table__
+    column = table.c[status_field]
     stmt = (
-        select(AuctionLot.id)
+        select(table.c.id)
         .where(column == "pending")
-        .order_by(AuctionLot.id)
+        .order_by(table.c.id)
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())

@@ -40,7 +40,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps._runner import run_worker
 from carbuyer.db.enums import NotificationStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.models import (
+    Auction,
+    AuctionLot,
+    HistoricalSale,
+    PrivateListing,
+    VehicleOffer,
+)
 from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import (
     claim_pending_ids,
@@ -48,6 +54,7 @@ from carbuyer.db.queue import (
     select_pending_ids,
 )
 from carbuyer.db.session import get_session, get_session_maker
+from carbuyer.scoring.asking_haircut import effective_acquisition_price
 from carbuyer.scoring.comps import build_comp_set
 from carbuyer.scoring.fair_value import ConfidenceBucket, compute_fair_value
 from carbuyer.scoring.landed_cost import distance_km_between, landed_cost_premium
@@ -92,11 +99,11 @@ def _weights_hash() -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def _has_required_data(lot: AuctionLot) -> bool:
+def _has_required_data(lot: VehicleOffer) -> bool:
     return bool(lot.make and lot.model and lot.year)
 
 
-def _decide_notification_status(lot: AuctionLot) -> NotificationStatus:
+def _decide_notification_status(lot: VehicleOffer) -> NotificationStatus:
     """Phase 4 overlay #12: showstoppers always skip notification; cumulative
     raw weight at/below the configured threshold also skips. Otherwise the
     notifier picks the row up via the ``notification_pending`` NOTIFY."""
@@ -182,7 +189,52 @@ def _apply_pricing(
         lot.suspicious_underprice_flag = False
 
 
-async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
+def _apply_listing_pricing(
+    lot: PrivateListing, *, expected_value: Decimal | None,
+) -> None:
+    """Price a fixed-price private listing: the asking price discounted by the
+    §4c asking→sold haircut, with no buyer premium and no GST (private used-car
+    sales), plus the province-based landed cost. Reuses ``all_in_cost`` /
+    ``price_deal_score`` by passing the haircut-adjusted price as the "bid" and
+    zeroing the auction fee/tax inputs.
+    """
+    dest_province = lot.location_province or settings.home_province
+    distance = distance_km_between(settings.home_province, dest_province)
+    landed = landed_cost_premium(
+        home=settings.home_province, dest=dest_province, distance_km=distance,
+    )
+    lot.landed_cost_premium_cad = landed
+
+    asking = lot.asking_price_cad
+    if asking is not None and expected_value is not None:
+        effective = effective_acquisition_price(asking, lot.seller_type)
+        zero = Decimal("0")
+        lot.all_in_at_current_bid_cad = all_in_cost(
+            current_high_bid=effective,
+            buyer_premium_pct=zero, gst_pct=zero, pst_pct=zero,
+            landed_cost_premium=landed,
+        )
+        lot.price_deal_score = price_deal_score(
+            current_high_bid=effective,
+            buyer_premium_pct=zero, gst_pct=zero, pst_pct=zero,
+            landed_cost_premium=landed, expected_value=expected_value,
+        )
+    else:
+        lot.all_in_at_current_bid_cad = None
+        lot.price_deal_score = None
+    # recommended_max_bid is a flipper concept — N/A for a fixed-price listing.
+    lot.recommended_max_bid_cad = None
+
+    value_low = lot.value_low_cad
+    if value_low is not None and asking is not None:
+        lot.suspicious_underprice_flag = (
+            asking < (value_low * SUSPICIOUS_UNDERPRICE_FRACTION)
+        )
+    else:
+        lot.suspicious_underprice_flag = False
+
+
+async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
     """Compute and persist the valuation for a single lot.
 
     Caller controls the transaction. No network I/O happens here — only DB
@@ -191,8 +243,11 @@ async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
     into snapshot → close → compute-in-memory → reopen → write; for MVP scale
     a single-tx pattern is fine and easier to test.
     """
-    auction = await session.get(Auction, lot.auction_id)
-    if auction is None or not _has_required_data(lot):
+    # Auction lots need their parent auction row for fees/taxes/province;
+    # private listings have none. Either way bad-shape rows skip.
+    auction = await session.get(Auction, lot.auction_id) if isinstance(lot, AuctionLot) else None
+    auction_missing = isinstance(lot, AuctionLot) and auction is None
+    if auction_missing or not _has_required_data(lot):
         lot.valuation_status = ValuationStatus.SKIPPED
         # Terminate the row from the notifier's perspective — without this,
         # the lot stays at notification_status=pending forever.
@@ -241,7 +296,20 @@ async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
         description_quality=lot.description_quality,
     )
 
-    _apply_pricing(lot, auction=auction, expected_value=fv.expected_value_cad)
+    # Channel-specific pricing: auction lots run BP/tax off the auction row;
+    # private listings run the asking→sold haircut with no premium and no GST.
+    if isinstance(lot, AuctionLot):
+        assert auction is not None
+        _apply_pricing(lot, auction=auction, expected_value=fv.expected_value_cad)
+        want_price = lot.current_high_bid_cad
+        want_province = auction.pickup_province
+    elif isinstance(lot, PrivateListing):
+        _apply_listing_pricing(lot, expected_value=fv.expected_value_cad)
+        want_price = lot.asking_price_cad
+        want_province = lot.location_province
+    else:
+        want_price = None
+        want_province = None
 
     if fv.confidence == ConfidenceBucket.INSUFFICIENT:
         # Distinguish "we tried, comp set too thin" from "ran the formula".
@@ -259,8 +327,8 @@ async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
     new_want_matches = await evaluate_lot_against_wants(
         session,
         lot,
-        pickup_province=auction.pickup_province,
-        offer_price_cad=lot.current_high_bid_cad,
+        pickup_province=want_province,
+        offer_price_cad=want_price,
     )
     if new_want_matches:
         lot.notification_status = NotificationStatus.PENDING
@@ -279,7 +347,7 @@ async def _process_one(lot_id: int) -> str:
     """
     try:
         async with get_session() as s, s.begin():
-            lot = await s.get(AuctionLot, lot_id)
+            lot = await s.get(VehicleOffer, lot_id)
             if lot is None:
                 return "missing"
             lot.valuation_attempts = (lot.valuation_attempts or 0) + 1
@@ -290,7 +358,7 @@ async def _process_one(lot_id: int) -> str:
     except Exception as exc:
         log.exception("valuation failed", lot_id=lot_id)
         async with get_session() as s, s.begin():
-            lot = await s.get(AuctionLot, lot_id)
+            lot = await s.get(VehicleOffer, lot_id)
             if lot is None:
                 return "missing"
             lot.valuation_attempts = (lot.valuation_attempts or 0) + 1

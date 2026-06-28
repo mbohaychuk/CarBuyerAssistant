@@ -43,7 +43,7 @@ from pydantic import ValidationError
 
 from carbuyer.apps._runner import run_worker
 from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, VehicleOffer
 from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import (
     claim_pending_ids,
@@ -97,7 +97,7 @@ class _LotSnapshot:
     make: str | None
     model: str | None
     image_count: int
-    auction_id: int
+    auction_id: int | None  # None for private listings (no auction context)
     auctioneer_name: str | None
     auction_subtype: str
     pickup_province: str | None
@@ -117,33 +117,55 @@ class _EnrichmentResult:
 
 async def _load_snapshot(lot_id: int) -> _LotSnapshot | None:
     async with get_session() as s:
-        lot = await s.get(AuctionLot, lot_id)
+        lot = await s.get(VehicleOffer, lot_id)
         if lot is None:
             return None
-        auction = await s.get(Auction, lot.auction_id)
-        if auction is None:
-            return None
-        return _LotSnapshot(
-            lot_id=lot.id,
-            title=lot.title or "",
-            description=lot.description or "",
-            year=lot.year,
-            make=lot.make,
-            model=lot.model,
-            image_count=len(lot.photos or []),
-            auction_id=auction.id,
-            auctioneer_name=auction.auctioneer_name,
-            auction_subtype=auction.auction_subtype,
-            pickup_province=auction.pickup_province,
-            current_high_bid_cad=lot.current_high_bid_cad,
-            auction_close_at=auction.scheduled_end_at,
-            # No-reserve detection: per Phase 3 review, `reserve_met=False`
-            # means "reserve exists but not yet met"; `None` means "unknown".
-            # Neither maps to "no reserve". Until a true `is_no_reserve` signal
-            # lands (Phase 7 bid-poller territory), tell the LLM `False`
-            # honestly — better than the inverted "is False" derivation.
-            is_no_reserve=False,
-        )
+        if isinstance(lot, AuctionLot):
+            auction = await s.get(Auction, lot.auction_id)
+            if auction is None:
+                return None
+            return _LotSnapshot(
+                lot_id=lot.id,
+                title=lot.title or "",
+                description=lot.description or "",
+                year=lot.year,
+                make=lot.make,
+                model=lot.model,
+                image_count=len(lot.photos or []),
+                auction_id=auction.id,
+                auctioneer_name=auction.auctioneer_name,
+                auction_subtype=auction.auction_subtype,
+                pickup_province=auction.pickup_province,
+                current_high_bid_cad=lot.current_high_bid_cad,
+                auction_close_at=auction.scheduled_end_at,
+                # No-reserve detection: per Phase 3 review, `reserve_met=False`
+                # means "reserve exists but not yet met"; `None` means "unknown".
+                # Neither maps to "no reserve". Until a true `is_no_reserve` signal
+                # lands (Phase 7 bid-poller territory), tell the LLM `False`
+                # honestly — better than the inverted "is False" derivation.
+                is_no_reserve=False,
+            )
+        if isinstance(lot, PrivateListing):
+            # No auction context — the LLM still normalizes make/model and reads
+            # flags from the description. ``auction_subtype='private_sale'`` and
+            # the asking price stand in for the auction-context fields.
+            return _LotSnapshot(
+                lot_id=lot.id,
+                title=lot.title or "",
+                description=lot.description or "",
+                year=lot.year,
+                make=lot.make,
+                model=lot.model,
+                image_count=len(lot.photos or []),
+                auction_id=None,
+                auctioneer_name=None,
+                auction_subtype="private_sale",
+                pickup_province=lot.location_province,
+                current_high_bid_cad=lot.asking_price_cad,
+                auction_close_at=None,
+                is_no_reserve=False,
+            )
+        return None
 
 
 def _build_describe_input(snap: _LotSnapshot) -> DescribeInput:
@@ -207,8 +229,8 @@ def _is_unknown_str(s: str | None) -> bool:
     return s is not None and s.strip().lower() in ("unknown", "n/a", "")
 
 
-def _apply_to_lot(
-    lot: AuctionLot,
+def _apply_to_lot(  # noqa: PLR0912 -- pre-existing field-by-field mapper; refactor out of S3 scope
+    lot: VehicleOffer,
     result: _EnrichmentResult,
     *,
     raw_carfax_url: str | None,
@@ -355,7 +377,7 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
             classification=classification,
         )
         async with get_session() as s, s.begin():
-            lot = await s.get(AuctionLot, lot_id)
+            lot = await s.get(VehicleOffer, lot_id)
             if lot is None:
                 return "missing"
             lot.enrichment_attempts = (lot.enrichment_attempts or 0) + 1
@@ -371,7 +393,7 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
         return "transient"
 
     async with get_session() as s, s.begin():
-        lot = await s.get(AuctionLot, lot_id)
+        lot = await s.get(VehicleOffer, lot_id)
         if lot is None:
             return "missing"
         lot.enrichment_attempts = (lot.enrichment_attempts or 0) + 1

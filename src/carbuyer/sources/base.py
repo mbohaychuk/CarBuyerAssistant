@@ -181,6 +181,8 @@ class RawListing:
     seller_type: str | None = None
     days_on_market: int | None = None
     listing_status: str = "active"
+    # Where the vehicle is — drives landed-cost distance + want province match.
+    location_province: str | None = None
     first_seen_at: datetime | None = None
     # See RawLot.extra. Source-specific fields awaiting a canonical column.
     extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]

@@ -289,6 +289,7 @@ async def upsert_private_listing(
             trim=raw.trim,
             mileage_km=raw.mileage_km,
             vin=raw.vin,
+            location_province=raw.location_province,
             asking_price_cad=raw.asking_price_cad,
             seller_type=raw.seller_type,
             days_on_market=raw.days_on_market,
@@ -316,6 +317,8 @@ async def upsert_private_listing(
         existing.days_on_market = raw.days_on_market
     if raw.seller_type is not None:
         existing.seller_type = raw.seller_type
+    if raw.location_province is not None:
+        existing.location_province = raw.location_province
     existing.listing_status = raw.listing_status
     existing.updated_at = func.now()
     await session.flush()

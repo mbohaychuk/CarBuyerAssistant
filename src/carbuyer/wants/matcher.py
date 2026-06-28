@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import get_args
 
-from carbuyer.db.models import AuctionLot
+from carbuyer.db.models import VehicleOffer
 from carbuyer.llm.schemas import Condition
 from carbuyer.wants.criteria import WantCriteria
 
@@ -37,7 +37,7 @@ assert set(_CONDITION_ORDER) == set(get_args(Condition)), (
 
 
 def matches(
-    lot: AuctionLot,
+    lot: VehicleOffer,
     criteria: WantCriteria,
     *,
     pickup_province: str | None = None,

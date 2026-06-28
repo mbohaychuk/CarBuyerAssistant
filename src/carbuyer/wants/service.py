@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.enums import LotStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
+from carbuyer.db.models import Auction, AuctionLot, Search, VehicleOffer, WantMatch
 from carbuyer.shared.logging import get_logger
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
@@ -50,7 +50,7 @@ def _criteria_or_none(want: Search) -> WantCriteria | None:
 
 async def evaluate_lot_against_wants(
     session: AsyncSession,
-    lot: AuctionLot,
+    lot: VehicleOffer,
     *,
     pickup_province: str | None = None,
     offer_price_cad: Decimal | int | None = None,
