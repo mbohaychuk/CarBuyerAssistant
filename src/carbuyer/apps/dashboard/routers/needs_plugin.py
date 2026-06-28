@@ -17,7 +17,7 @@ from carbuyer.db.enums import (
     ValuationStatus,
     VisionStatus,
 )
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.models import Auction, AuctionLot, VehicleOffer
 from carbuyer.db.notify import notify
 from carbuyer.shared.logging import get_logger
 from carbuyer.sources.resolver import resolve_auction_url
@@ -90,9 +90,15 @@ async def retry_routing(
     # Reset any lots already associated so they re-process under the new source.
     # In practice there should be zero lots since the source was unknown, but
     # being explicit is cheap insurance against edge cases.
+    # Status columns live on the vehicle_offer parent; scope the reset to this
+    # auction's lots via a child-id subquery.
     await session.execute(
-        update(AuctionLot)
-        .where(AuctionLot.auction_id == auction.id)
+        update(VehicleOffer)
+        .where(
+            VehicleOffer.id.in_(
+                select(AuctionLot.id).where(AuctionLot.auction_id == auction.id),
+            ),
+        )
         .values(
             enrichment_status=EnrichmentStatus.PENDING.value,
             valuation_status=ValuationStatus.PENDING.value,

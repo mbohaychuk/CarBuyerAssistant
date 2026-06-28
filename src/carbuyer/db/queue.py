@@ -11,7 +11,7 @@ from carbuyer.db.enums import (
     ValuationStatus,
     VisionStatus,
 )
-from carbuyer.db.models import AuctionLot
+from carbuyer.db.models import AuctionLot, VehicleOffer
 
 # All status fields readable for catchup sweeps.
 StatusField = Literal[
@@ -40,9 +40,12 @@ async def _mark_in_progress(
     status_field: ClaimableStatusField,
 ) -> None:
     in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
+    # Status columns live on the vehicle_offer parent; UPDATE there so the
+    # bulk write targets the right table (an update through the AuctionLot
+    # child mapper would emit UPDATE auction_lot, which lacks these columns).
     update_stmt = (
-        update(AuctionLot)
-        .where(AuctionLot.id.in_(ids))
+        update(VehicleOffer)
+        .where(VehicleOffer.id.in_(ids))
         .values({status_field: in_progress_value})
     )
     await session.execute(update_stmt)
@@ -123,7 +126,7 @@ async def recover_orphans(
     claim_pending_ids ensures the next claim's atomicity, and the UPDATE
     here is idempotent.
     """
-    column = getattr(AuctionLot, status_field)
+    column = getattr(VehicleOffer, status_field)
     in_progress_value = _IN_PROGRESS_BY_FIELD[status_field]
     pending_by_field: dict[ClaimableStatusField, str] = {
         "enrichment_status": EnrichmentStatus.PENDING,
@@ -132,7 +135,7 @@ async def recover_orphans(
         "notification_status": NotificationStatus.PENDING,
     }
     stmt = (
-        update(AuctionLot)
+        update(VehicleOffer)
         .where(column == in_progress_value)
         .values({status_field: pending_by_field[status_field]})
     )

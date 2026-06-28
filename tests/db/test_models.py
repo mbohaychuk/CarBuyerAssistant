@@ -12,14 +12,18 @@ from carbuyer.db.models import (
     AuctionBidHistory,
     AuctionLot,
     HistoricalSale,
+    PrivateListing,
     Purchase,
     Search,
+    VehicleOffer,
 )
 
 
 def test_models_importable() -> None:
     assert Auction.__tablename__ == "auctions"
-    assert AuctionLot.__tablename__ == "auction_lots"
+    assert VehicleOffer.__tablename__ == "vehicle_offer"
+    assert AuctionLot.__tablename__ == "auction_lot"
+    assert PrivateListing.__tablename__ == "private_listing"
     assert AuctionBidHistory.__tablename__ == "auction_bid_history"
     assert HistoricalSale.__tablename__ == "historical_sales"
     assert Purchase.__tablename__ == "purchases"
@@ -37,11 +41,16 @@ def test_status_enums_have_expected_values() -> None:
     assert UserAction.INTERESTED == "interested"
 
 
-def test_auction_lot_has_required_columns() -> None:
-    cols = {c.name for c in AuctionLot.__table__.columns}
-    expected = {
-        "id", "auction_id", "source_lot_id", "lot_number", "url",
-        "parser_version",
+def test_split_preserves_every_pre_split_column() -> None:
+    # After the vehicle_offer split, every column the monolithic auction_lots
+    # table used to carry must still exist on either the parent or the auction
+    # child — the split moves columns, it never drops them.
+    parent = {c.name for c in VehicleOffer.__table__.columns}
+    child = {c.name for c in AuctionLot.__table__.columns}
+    union = parent | child
+    pre_split = {
+        "id", "auction_id", "source_lot_id", "source_lot_row_id", "lot_number",
+        "url", "parser_version",
         "title", "description", "photos",
         "year", "make", "model", "trim", "engine", "transmission", "drivetrain",
         "mileage_km", "vin", "title_status", "province_of_origin",
@@ -54,7 +63,8 @@ def test_auction_lot_has_required_columns() -> None:
         "vision_findings", "vision_condition_overall", "vision_confidence",
         "vision_contradictions",
         "current_high_bid_cad", "last_bid_observed_at", "bid_count_visible",
-        "reserve_met", "lot_status", "closed_at", "final_bid_cad",
+        "reserve_met", "lot_status", "scheduled_end_at", "closed_at",
+        "final_bid_cad",
         "comp_count", "value_low_cad", "value_mid_cad", "value_high_cad",
         "expected_value_cad", "landed_cost_premium_cad",
         "all_in_at_current_bid_cad", "recommended_max_bid_cad",
@@ -62,10 +72,16 @@ def test_auction_lot_has_required_columns() -> None:
         "suspicious_underprice_flag", "scoring_version", "weights_hash",
         "enrichment_status", "valuation_status", "vision_status",
         "notification_status", "enrichment_version",
+        "enrichment_attempts", "last_enrichment_error",
+        "valuation_attempts", "last_valuation_error",
+        "notification_attempts", "last_notification_error",
+        "condition_inferred_from_sparse_listing", "description_quality",
         "early_warning_notified_at", "cheap_notified_at", "closing_notified_at",
         "trajectory_notified_at", "extended_notified_at", "last_notified_channel",
         "user_action", "notes", "was_purchased_by_us",
         "created_at", "updated_at",
     }
-    missing = expected - cols
-    assert not missing, f"missing columns: {missing}"
+    missing = pre_split - union
+    assert not missing, f"columns lost in the split: {missing}"
+    # The discriminator is the one genuinely new column.
+    assert "offer_kind" in parent

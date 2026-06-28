@@ -138,90 +138,6 @@ _CONTENT_TRIGGER_FIELDS: tuple[str, ...] = (
 )
 
 
-async def _upsert_lot(
-    session: AsyncSession,
-    auction_id: int,
-    raw: RawLot,
-    *,
-    parser_version: str,
-) -> AuctionLot:
-    """Atomic UPSERT on (auction_id, source_lot_id) with coalesce-on-update.
-
-    Caller wraps in upsert_lot_with_status_cascade to apply the trigger-field
-    cascade. This inner function is the pure SQL operation.
-
-    Note: ``RawLot.extra`` is not persisted to ``AuctionLot`` (no column for it
-    by design). It flows in-memory from scraper to enricher (Phase 3) so
-    source-specific fields like Carfax URLs / reserve status / buy-now price
-    can be promoted to canonical columns once 2+ sources surface the same key.
-    """
-    insert_values: dict[str, object] = {
-        "auction_id": auction_id,
-        "source_lot_id": raw.ref.source_lot_id,
-        "source_lot_row_id": raw.source_lot_row_id,
-        "lot_number": raw.lot_number,
-        "url": raw.ref.url,
-        "parser_version": parser_version,
-        "title": raw.title,
-        "description": raw.description,
-        "photos": raw.photos,
-        "year": raw.year,
-        "make": raw.make,
-        "model": raw.model,
-        "trim": raw.trim,
-        "mileage_km": raw.mileage_km,
-        "vin": raw.vin,
-        "lot_status": raw.lot_status,
-        "scheduled_end_at": raw.scheduled_end_at,
-    }
-    stmt = pg_insert(AuctionLot).values(**insert_values)
-    excluded = stmt.excluded
-
-    # Per Phase 0 column-ownership: lot-scraper does NOT write bid columns.
-    # `lot_status` belongs to the bid-poller after initial INSERT — leaving it
-    # out of `update_values` means lot-scraper sets the initial 'open' on
-    # creation, then never touches the column again. Bid-poller advances it
-    # to 'closing_soon' / 'extended' / 'closed' / 'sold' / 'unsold'.
-    #
-    # Per Phase 3 design overlay #5: year/make/model/trim/vin/mileage_km are
-    # written only on INSERT. After enrichment normalizes "F150" → "F-150",
-    # a rescrape's raw "F150" must NOT clobber the normalized value (a
-    # coalesce(EXCLUDED.model, lot.model) here produces enrich → rescrape-
-    # clobber → re-enrich flap that burns OpenAI budget). They remain in
-    # _CONTENT_TRIGGER_FIELDS for cascade detection (snapshots match → cascade
-    # correctly does not fire).
-    update_values: dict[str, object] = {
-        "url": excluded.url,
-        "lot_number": func.coalesce(excluded.lot_number, AuctionLot.lot_number),
-        "parser_version": excluded.parser_version,
-        # source_lot_row_id can change when HiBid re-lists the same itemId
-        # in a new auction event. Always take the latest so bid_poller can
-        # look up the current row id.
-        "source_lot_row_id": excluded.source_lot_row_id,
-        # scheduled_end_at refreshes on rescrape so soft-close-style end-time
-        # updates (McDougall sometimes nudges per-lot close times when the
-        # auction-event reshuffles) propagate to bid_poller's priority queue.
-        # Coalesce so a transient NULL on rescrape doesn't clobber a known
-        # end time.
-        "scheduled_end_at": func.coalesce(
-            excluded.scheduled_end_at, AuctionLot.scheduled_end_at,
-        ),
-        "updated_at": func.now(),
-    }
-    for field_name in ("title", "description", "photos"):
-        update_values[field_name] = func.coalesce(
-            getattr(excluded, field_name), getattr(AuctionLot, field_name),
-        )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["auction_id", "source_lot_id"],
-        set_=update_values,
-    ).returning(AuctionLot)
-    result = await session.execute(
-        stmt, execution_options={"populate_existing": True},
-    )
-    return result.scalar_one()
-
-
 async def upsert_lot_with_status_cascade(
     session: AsyncSession,
     auction_id: int,
@@ -229,10 +145,22 @@ async def upsert_lot_with_status_cascade(
     *,
     parser_version: str,
 ) -> AuctionLot:
-    """UPSERT a lot; reset all four pipeline statuses if any content trigger
-    field or parser_version changed. Idempotent re-scrapes preserve status.
+    """UPSERT an auction lot (vehicle_offer parent + auction_lot child) and
+    reset all four pipeline statuses if any content trigger field or
+    parser_version changed. Idempotent re-scrapes preserve status.
+
+    The offer split makes this a two-table write, so we drive it through the
+    ORM unit-of-work (which routes parent vs child columns automatically) off
+    the find-by-natural-key SELECT rather than a single ON CONFLICT. The
+    ingester is single-instance (advisory lock), so no concurrent INSERT of the
+    same (auction_id, source_lot_id) can race the find→write window.
+
+    Note: ``RawLot.extra`` is not persisted (no column for it by design). It
+    flows in-memory from scraper to enricher so source-specific fields like
+    Carfax URLs / reserve status / buy-now price can be promoted to canonical
+    columns once 2+ sources surface the same key.
     """
-    pre = (
+    existing = (
         await session.execute(
             select(AuctionLot).where(
                 AuctionLot.auction_id == auction_id,
@@ -240,37 +168,70 @@ async def upsert_lot_with_status_cascade(
             ),
         )
     ).scalar_one_or_none()
-    if pre is not None:
-        pre_snapshot: dict[str, object] | None = {
-            f: getattr(pre, f) for f in _CONTENT_TRIGGER_FIELDS
-        }
-        pre_parser_version: str | None = pre.parser_version
-    else:
-        pre_snapshot = None
-        pre_parser_version = None
 
-    lot = await _upsert_lot(session, auction_id, raw, parser_version=parser_version)
-
-    if pre_snapshot is None:
-        # Fresh insert — server defaults already set all statuses to PENDING.
+    if existing is None:
+        # Fresh insert — year/make/model/trim/vin/mileage_km are written ONLY
+        # here so a later rescrape's raw heuristic value can't clobber the
+        # enricher's normalization. Server defaults set all statuses to PENDING.
+        lot = AuctionLot(
+            auction_id=auction_id,
+            source_lot_id=raw.ref.source_lot_id,
+            source_lot_row_id=raw.source_lot_row_id,
+            lot_number=raw.lot_number,
+            url=raw.ref.url,
+            parser_version=parser_version,
+            title=raw.title,
+            description=raw.description,
+            photos=raw.photos,
+            year=raw.year,
+            make=raw.make,
+            model=raw.model,
+            trim=raw.trim,
+            mileage_km=raw.mileage_km,
+            vin=raw.vin,
+            lot_status=raw.lot_status,
+            scheduled_end_at=raw.scheduled_end_at,
+        )
+        session.add(lot)
+        await session.flush()
         return lot
 
-    post_snapshot = {f: getattr(lot, f) for f in _CONTENT_TRIGGER_FIELDS}
+    pre_snapshot = {f: getattr(existing, f) for f in _CONTENT_TRIGGER_FIELDS}
+    pre_parser_version = existing.parser_version
+
+    # Coalesce-on-update: never overwrite a known value with None.
+    existing.url = raw.ref.url
+    existing.parser_version = parser_version
+    # source_lot_row_id can change when HiBid re-lists the same itemId in a new
+    # auction event. Always take the latest so bid_poller can look it up.
+    existing.source_lot_row_id = raw.source_lot_row_id
+    if raw.lot_number is not None:
+        existing.lot_number = raw.lot_number
+    # scheduled_end_at refreshes on rescrape (McDougall nudges per-lot close
+    # times) but a transient NULL must not clobber a known end time.
+    if raw.scheduled_end_at is not None:
+        existing.scheduled_end_at = raw.scheduled_end_at
+    for field_name in ("title", "description", "photos"):
+        value = getattr(raw, field_name)
+        if value is not None:
+            setattr(existing, field_name, value)
+    # year/make/model/trim/vin/mileage_km: write-once (see INSERT path).
+    # lot_status: bid-poller owns it after INSERT — never re-scraped here.
+    existing.updated_at = func.now()  # ORM onupdate doesn't fire on no-op flush
+    await session.flush()
+
+    post_snapshot = {f: getattr(existing, f) for f in _CONTENT_TRIGGER_FIELDS}
     content_changed = post_snapshot != pre_snapshot
-    parser_changed = lot.parser_version != pre_parser_version
+    parser_changed = existing.parser_version != pre_parser_version
     if content_changed or parser_changed:
-        lot.enrichment_status = EnrichmentStatus.PENDING
-        lot.valuation_status = ValuationStatus.PENDING
-        # vision_status='skipped' is set by the Phase 8 vision-batcher when a
-        # lot has no photos OR every photo download/decode failed. Sub-threshold
-        # lots stay PENDING and are simply not selected by the batcher's
-        # shortlist that night — they re-enter the shortlist automatically if a
-        # bid update lifts their price_deal_score above the threshold. Don't
-        # promote SKIPPED → PENDING on a content rescrape: SKIPPED means
+        existing.enrichment_status = EnrichmentStatus.PENDING
+        existing.valuation_status = ValuationStatus.PENDING
+        # Don't promote SKIPPED → PENDING on a content rescrape: SKIPPED means
         # "no usable photos", and a rescrape doesn't add photos that weren't
-        # there before.
-        if lot.vision_status != VisionStatus.SKIPPED:
-            lot.vision_status = VisionStatus.PENDING
-        lot.notification_status = NotificationStatus.PENDING
+        # there before. Sub-threshold lots stay PENDING and simply aren't
+        # selected by the vision-batcher's nightly shortlist.
+        if existing.vision_status != VisionStatus.SKIPPED:
+            existing.vision_status = VisionStatus.PENDING
+        existing.notification_status = NotificationStatus.PENDING
         await session.flush()
-    return lot
+    return existing

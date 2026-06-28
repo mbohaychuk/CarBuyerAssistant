@@ -254,11 +254,12 @@ async def cmd_summary(args: argparse.Namespace) -> None:
     """Show pipeline state — how many lots are at each valuation status."""
     async with get_session() as s:
         rows = (await s.execute(text(
-            "SELECT l.valuation_status, count(*) "
-            "FROM auction_lots l "
+            "SELECT vo.valuation_status, count(*) "
+            "FROM auction_lot l "
+            "JOIN vehicle_offer vo ON vo.id = l.id "
             "JOIN auctions a ON a.id = l.auction_id "
             "WHERE a.scheduled_end_at > now() "
-            "GROUP BY l.valuation_status ORDER BY count(*) DESC",
+            "GROUP BY vo.valuation_status ORDER BY count(*) DESC",
         ))).all()
         synth = (await s.execute(text(
             "SELECT count(*) FROM historical_sales "
