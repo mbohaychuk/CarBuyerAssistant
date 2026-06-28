@@ -27,8 +27,17 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from carbuyer.db.enums import LotStatus
-from carbuyer.db.models import AuctionLot, HistoricalSale
+from carbuyer.db.enums import ListingStatus, LotStatus
+from carbuyer.db.models import AuctionLot, HistoricalSale, PrivateListing
+
+# A private listing is only a comp once it has DISAPPEARED — a sold/removed
+# listing's last-seen asking price is a noisy sold-price proxy. An ACTIVE
+# listing is an asking price, not a sale, so it never enters the comp set
+# (using asking prices as comps would bias every fair value high).
+_PRIVATE_COMP_STATUSES: tuple[str, ...] = (
+    ListingStatus.SOLD.value,
+    ListingStatus.REMOVED.value,
+)
 
 # Lot statuses representing a completed auction with a trustworthy
 # `final_bid_cad`. CLOSED is the natural close path; FORCE_CLOSED is set by
@@ -62,7 +71,7 @@ class ComparableSale:
     mileage_km: int | None
     days_listed: int | None
     disposition_reason: str
-    source: str  # "historical_sales" | "auction_lots"
+    source: str  # "historical_sales" | "auction_lots" | "private_listing"
 
 
 async def build_comp_set(
@@ -132,6 +141,26 @@ async def build_comp_set(
         )
     al_rows = (await session.execute(al_stmt)).scalars().all()
 
+    # Disappeared private listings (sold/removed) as private-channel comps —
+    # make/model/year/mileage live on the vehicle_offer parent (inherited),
+    # listing_status + asking_price on the private_listing child.
+    pl_stmt = select(PrivateListing).where(
+        func.upper(PrivateListing.make) == make_u,
+        func.upper(PrivateListing.model) == model_u,
+        PrivateListing.year.between(year - year_window, year + year_window),
+        PrivateListing.mileage_km.between(mileage_lo, mileage_hi),
+        PrivateListing.listing_status.in_(_PRIVATE_COMP_STATUSES),
+        PrivateListing.asking_price_cad.is_not(None),
+    )
+    if trim_u:
+        pl_stmt = pl_stmt.where(
+            or_(
+                func.upper(PrivateListing.trim) == trim_u,
+                PrivateListing.trim.is_(None),
+            ),
+        )
+    pl_rows = (await session.execute(pl_stmt)).scalars().all()
+
     comps: list[ComparableSale] = []
     for h in hs_rows:
         # Prefer the all-in price (with BP) when present; fall back to the
@@ -166,6 +195,23 @@ async def build_comp_set(
                 days_listed=None,
                 disposition_reason="sold",
                 source="auction_lots",
+            )
+        )
+    for pl in pl_rows:
+        price = pl.asking_price_cad
+        if price is None:
+            continue
+        # Last-seen asking as the sold proxy; the private channel multiplier is
+        # 1.00, so no further adjustment here.
+        comps.append(
+            ComparableSale(
+                price_cad=Decimal(price),
+                sale_channel="private",
+                year=pl.year,
+                mileage_km=pl.mileage_km,
+                days_listed=pl.days_on_market,
+                disposition_reason=pl.listing_status,
+                source="private_listing",
             )
         )
     return comps
