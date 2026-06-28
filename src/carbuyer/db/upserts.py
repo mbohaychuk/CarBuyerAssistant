@@ -19,8 +19,8 @@ from carbuyer.db.enums import (
     ValuationStatus,
     VisionStatus,
 )
-from carbuyer.db.models import Auction, AuctionLot
-from carbuyer.sources.base import RawAuction, RawLot
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, VehicleOffer
+from carbuyer.sources.base import RawAuction, RawListing, RawLot
 from carbuyer.sources.resolver import canonicalize_url
 
 
@@ -219,19 +219,105 @@ async def upsert_lot_with_status_cascade(
     # lot_status: bid-poller owns it after INSERT — never re-scraped here.
     existing.updated_at = func.now()  # ORM onupdate doesn't fire on no-op flush
     await session.flush()
+    await _apply_content_cascade(session, existing, pre_snapshot, pre_parser_version)
+    return existing
 
-    post_snapshot = {f: getattr(existing, f) for f in _CONTENT_TRIGGER_FIELDS}
-    content_changed = post_snapshot != pre_snapshot
-    parser_changed = existing.parser_version != pre_parser_version
-    if content_changed or parser_changed:
-        existing.enrichment_status = EnrichmentStatus.PENDING
-        existing.valuation_status = ValuationStatus.PENDING
-        # Don't promote SKIPPED → PENDING on a content rescrape: SKIPPED means
-        # "no usable photos", and a rescrape doesn't add photos that weren't
-        # there before. Sub-threshold lots stay PENDING and simply aren't
-        # selected by the vision-batcher's nightly shortlist.
-        if existing.vision_status != VisionStatus.SKIPPED:
-            existing.vision_status = VisionStatus.PENDING
-        existing.notification_status = NotificationStatus.PENDING
+
+async def _apply_content_cascade(
+    session: AsyncSession,
+    offer: VehicleOffer,
+    pre_snapshot: dict[str, object],
+    pre_parser_version: str | None,
+) -> None:
+    """Reset the four pipeline statuses to PENDING when a content trigger field
+    or parser_version changed since the pre-write snapshot. Shared by the auction
+    and listing upserts (the trigger fields all live on the offer parent).
+    """
+    post_snapshot = {f: getattr(offer, f) for f in _CONTENT_TRIGGER_FIELDS}
+    if post_snapshot == pre_snapshot and offer.parser_version == pre_parser_version:
+        return
+    offer.enrichment_status = EnrichmentStatus.PENDING
+    offer.valuation_status = ValuationStatus.PENDING
+    # Don't promote SKIPPED → PENDING on a content rescrape: SKIPPED means "no
+    # usable photos", and a rescrape doesn't add photos that weren't there
+    # before. Sub-threshold offers stay PENDING and simply aren't selected by
+    # the vision-batcher's nightly shortlist.
+    if offer.vision_status != VisionStatus.SKIPPED:
+        offer.vision_status = VisionStatus.PENDING
+    offer.notification_status = NotificationStatus.PENDING
+    await session.flush()
+
+
+async def upsert_private_listing(
+    session: AsyncSession,
+    raw: RawListing,
+    *,
+    parser_version: str,
+) -> PrivateListing:
+    """UPSERT a private listing (vehicle_offer parent + private_listing child),
+    keyed on the natural key (source, source_listing_id). Mirrors the auction
+    lot upsert: a two-table ORM write driven off a find-by-key SELECT (the
+    ingester is single-instance, so no concurrent INSERT can race), with the
+    shared content-change status cascade.
+
+    Listing economics (asking price, days-on-market, status) refresh every
+    ingest so price drops propagate; only the vehicle content fields gate the
+    re-enrichment cascade. Photos are source URLs for deep-linking only — never
+    rehosted; seller PII is never persisted.
+    """
+    existing = (
+        await session.execute(
+            select(PrivateListing).where(
+                PrivateListing.source == raw.ref.source,
+                PrivateListing.source_listing_id == raw.ref.source_listing_id,
+            ),
+        )
+    ).scalar_one_or_none()
+
+    if existing is None:
+        listing = PrivateListing(
+            source=raw.ref.source,
+            source_listing_id=raw.ref.source_listing_id,
+            url=raw.ref.url,
+            parser_version=parser_version,
+            title=raw.title,
+            description=raw.description,
+            photos=raw.photos,
+            year=raw.year,
+            make=raw.make,
+            model=raw.model,
+            trim=raw.trim,
+            mileage_km=raw.mileage_km,
+            vin=raw.vin,
+            asking_price_cad=raw.asking_price_cad,
+            seller_type=raw.seller_type,
+            days_on_market=raw.days_on_market,
+            listing_status=raw.listing_status,
+            first_seen_at=raw.first_seen_at,
+        )
+        session.add(listing)
         await session.flush()
+        return listing
+
+    pre_snapshot = {f: getattr(existing, f) for f in _CONTENT_TRIGGER_FIELDS}
+    pre_parser_version = existing.parser_version
+
+    existing.url = raw.ref.url
+    existing.parser_version = parser_version
+    for field_name in ("title", "description", "photos"):
+        value = getattr(raw, field_name)
+        if value is not None:
+            setattr(existing, field_name, value)
+    # year/make/model/trim/vin/mileage_km: write-once (enricher normalizes them).
+    # Listing economics refresh on every ingest.
+    if raw.asking_price_cad is not None:
+        existing.asking_price_cad = raw.asking_price_cad
+    if raw.days_on_market is not None:
+        existing.days_on_market = raw.days_on_market
+    if raw.seller_type is not None:
+        existing.seller_type = raw.seller_type
+    existing.listing_status = raw.listing_status
+    existing.updated_at = func.now()
+    await session.flush()
+    await _apply_content_cascade(session, existing, pre_snapshot, pre_parser_version)
     return existing

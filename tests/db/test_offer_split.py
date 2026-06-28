@@ -104,6 +104,7 @@ async def test_private_listing_is_empty_capable_sibling(
     session: AsyncSession,
 ) -> None:
     listing = PrivateListing(
+        source="kijiji", source_listing_id="K1",
         url="http://x/listing/1", make="Lexus", model="GX 470", year=2005,
         asking_price_cad=Decimal("15000"), listing_status="active",
     )

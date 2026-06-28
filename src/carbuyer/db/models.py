@@ -499,6 +499,10 @@ class PrivateListing(VehicleOffer):
         primary_key=True,
         autoincrement=False,
     )
+    # Natural key — the source plugin + its stable per-listing id. Upsert dedup
+    # is keyed on (source, source_listing_id).
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_listing_id: Mapped[str] = mapped_column(String(128), nullable=False)
     asking_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     seller_type: Mapped[str | None] = mapped_column(String(32))
     days_on_market: Mapped[int | None] = mapped_column(Integer)
@@ -512,6 +516,12 @@ class PrivateListing(VehicleOffer):
     disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __mapper_args__ = {"polymorphic_identity": "private"}  # noqa: RUF012 -- SQLAlchemy dunder
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source", "source_listing_id", name="uq_private_listing_source_listing",
+        ),
+    )
 
 
 class AuctionBidHistory(Base):
