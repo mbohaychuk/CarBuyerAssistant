@@ -19,6 +19,7 @@ ChannelKey = Literal[
     "early_warning",
     "hot_deals",
     "watchlist",
+    "wants",
     "auction_closing",
     "auction_watch",
     "vision_updates",
@@ -32,6 +33,7 @@ HOT_DEAL_SCORE_THRESHOLD: Final[float] = 0.20
 # Triggers that always map 1:1 to a channel regardless of score.
 _FIXED_ROUTES: Final[dict[str, ChannelKey]] = {
     "early_warning": "early_warning",
+    "want_match": "wants",
     "closing_soon": "auction_closing",
     "bid_trajectory": "auction_closing",
     "lot_extended": "auction_closing",

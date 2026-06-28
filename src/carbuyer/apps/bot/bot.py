@@ -22,6 +22,7 @@ from carbuyer.apps.bot.views import (
     LotMaybeButton,
     LotNotInterestedButton,
 )
+from carbuyer.apps.bot.want_commands import WantGroup
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 
@@ -37,6 +38,7 @@ def _intents() -> discord.Intents:
 class CarbuyerBot(commands.Bot):
     def __init__(self) -> None:
         super().__init__(command_prefix="!", intents=_intents())
+        self.tree.add_command(WantGroup())
 
     async def setup_hook(self) -> None:
         self.add_dynamic_items(

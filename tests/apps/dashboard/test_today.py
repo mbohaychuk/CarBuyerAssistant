@@ -167,7 +167,11 @@ async def test_bump_returns_prior_value_then_advances(
 @pytest.mark.asyncio
 async def test_closing_buckets_bin_by_time(_patch_deps: AsyncSession) -> None:
     session = _patch_deps
-    now = datetime.now(UTC)
+    # Pin the time-of-day (not the date) to noon UTC so the +1d2h lot below lands
+    # squarely inside the local "tomorrow" bucket regardless of when the suite
+    # runs. With a real wall-clock now late in the day, +1d2h crosses into the
+    # day-after and escapes every bucket — the historical timezone flake.
+    now = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
     a = _seed_auction(session, source_id="A1", end_at=now + timedelta(days=2))
     _seed_lot(session, a, source_lot_id="NOW_5M",
               scheduled_end_at=now + timedelta(minutes=5))

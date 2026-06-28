@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ want.name }} — Wants{% endblock %}
+{% block nav %}wants{% endblock %}
+{% block content %}
+  <h1>{{ want.name }}</h1>
+  <p>
+    <a href="/wants">← all wants</a>
+    · <span class="muted">{{ '🔔 active' if want.enabled else '🔕 muted' }}</span>
+  </p>
+
+  {% if not items %}<p class="muted">No matches yet.</p>{% endif %}
+  <ul class="want-match-list">
+    {% for item in items %}
+      <li class="want-match">
+        <a href="{{ item.lot.url }}">
+          {{ item.lot.year or '' }} {{ item.lot.make or '' }} {{ item.lot.model or '' }} {{ item.lot.trim or '' }}
+        </a>
+        <span class="muted">
+          {% if item.lot.current_high_bid_cad is not none %}
+            · ${{ '{:,}'.format(item.lot.current_high_bid_cad | int) }}
+          {% endif %}
+          {% if item.match.want_relative_score is not none %}
+            · {{ (item.match.want_relative_score * 100) | round | int }}% vs market
+          {% endif %}
+          {% if item.match.notified_at %} · alerted{% endif %}
+        </span>
+        <form method="post" action="/want-matches/{{ item.match.id }}/dismiss" class="inline">
+          <button type="submit">Dismiss</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}

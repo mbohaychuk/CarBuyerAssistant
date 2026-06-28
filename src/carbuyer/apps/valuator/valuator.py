@@ -63,6 +63,7 @@ from carbuyer.scoring.score import (
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
+from carbuyer.wants.service import evaluate_lot_against_wants
 
 log = get_logger("valuator")
 
@@ -251,6 +252,18 @@ async def value_one(session: AsyncSession, lot: AuctionLot) -> None:
     else:
         lot.valuation_status = ValuationStatus.DONE
         lot.notification_status = _decide_notification_status(lot)
+
+    # Want-list match: a lot the user explicitly asked for must alert regardless
+    # of the system deal filter (it may even be INSUFFICIENT-priced). A new match
+    # forces PENDING; re-matching an already-known lot only refreshes its score.
+    new_want_matches = await evaluate_lot_against_wants(
+        session,
+        lot,
+        pickup_province=auction.pickup_province,
+        offer_price_cad=lot.current_high_bid_cad,
+    )
+    if new_want_matches:
+        lot.notification_status = NotificationStatus.PENDING
 
 
 async def _process_one(lot_id: int) -> str:

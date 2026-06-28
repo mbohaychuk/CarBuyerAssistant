@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Wants — CarBuyer{% endblock %}
+{% block nav %}wants{% endblock %}
+{% block content %}
+  <h1>Wants</h1>
+  <p class="muted">Target vehicles to monitor across auctions and (soon) private sales.</p>
+  {% if error %}<p class="tag" style="color:#b00020">{{ error }}</p>{% endif %}
+
+  <form method="post" action="/wants" class="want-form">
+    <input name="name" placeholder="Name (e.g. manual Xterra)" required>
+    <input name="makes" placeholder="Makes — comma-sep (Nissan, Toyota)">
+    <input name="models" placeholder="Models (Xterra, 4Runner)">
+    <input name="trims" placeholder="Trims (PRO-4X)">
+    <input name="transmissions" placeholder="Transmissions (manual)">
+    <input name="drivetrains" placeholder="Drivetrains (4wd)">
+    <input name="year_min" type="number" placeholder="Year min">
+    <input name="year_max" type="number" placeholder="Year max">
+    <input name="max_price_cad" type="number" placeholder="Max price $">
+    <input name="max_mileage_km" type="number" placeholder="Max km">
+    <input name="provinces" placeholder="Provinces (AB, BC)">
+    <input name="condition_min" placeholder="Min condition (decent, good)">
+    <button type="submit">Add want</button>
+  </form>
+
+  {% if not items %}<p class="muted">No wants yet — add one above.</p>{% endif %}
+  <ul class="want-list">
+    {% for item in items %}
+      <li>
+        <a href="/wants/{{ item.want.id }}">{{ item.want.name }}</a>
+        <span class="muted">
+          {{ '🔔 active' if item.want.enabled else '🔕 muted' }}
+          · {{ item.match_count }} match{{ '' if item.match_count == 1 else 'es' }}
+          {% set crit = item.criteria %}
+          {% if crit.makes or crit.models %}
+            · {{ (crit.makes + crit.models) | join(' / ') }}
+          {% endif %}
+          {% if crit.price_ceiling_cad %} · ≤ ${{ '{:,}'.format(crit.price_ceiling_cad) }}{% endif %}
+        </span>
+        <form method="post" action="/wants/{{ item.want.id }}/toggle" class="inline">
+          <button type="submit">{{ 'Mute' if item.want.enabled else 'Unmute' }}</button>
+        </form>
+        <form method="post" action="/wants/{{ item.want.id }}/delete" class="inline">
+          <button type="submit">Delete</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}

@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,8 +21,8 @@ from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUs
     _process_one,
     process_pending,
 )
-from carbuyer.db.enums import NotificationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.enums import NotificationStatus, UserAction
+from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
 
 
 def _seed_lot(
@@ -97,6 +98,206 @@ def _patched_get_session(
     monkeypatch.setattr(notifier_mod, "get_session", fake_get_session)
     monkeypatch.setattr(notifier_mod, "get_session_maker", fake_get_session_maker)
     return session
+
+
+# ─── want-match notifications ───
+
+
+@pytest.mark.asyncio
+async def test_process_one_posts_want_match_and_stamps_ledger(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An un-notified want_match posts to the 'wants' channel + stamps the ledger."""
+    session = _patched_get_session
+    # rarity/price below thresholds → no system trigger; the want match is the work.
+    _, lot = _seed_lot(session, rarity_score=0.0, price_deal_score=0.0)
+    lot.make, lot.model, lot.year = "Nissan", "Xterra", 2010
+    lot.expected_value_cad = Decimal("10000")
+    lot.value_mid_cad = Decimal("10000")
+    lot.comp_count = 9
+    lot.current_high_bid_cad = Decimal("8000")
+    want = Search(name="manual xterra", config={})
+    session.add(want)
+    await session.flush()
+    wm = WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.2)
+    session.add(wm)
+    await session.flush()
+    wm_id, lot_id = wm.id, lot.id
+
+    posted: list[tuple[int, str, int]] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lid: int, *, session: object = None
+    ) -> bool:
+        posted.append((channel_id, content, lid))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "done"
+    assert len(posted) == 1
+    assert posted[0][0] == 4242  # noqa: PLR2004 -- the configured wants channel id
+    assert "manual xterra" in posted[0][1]
+
+    session.expire_all()
+    refreshed = await session.get(WantMatch, wm_id)
+    assert refreshed is not None
+    assert refreshed.notified_at is not None
+
+
+@pytest.mark.asyncio
+async def test_process_one_skips_already_notified_want_match(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A want_match already stamped notified_at is not re-posted (fire-once)."""
+    session = _patched_get_session
+    _, lot = _seed_lot(session, rarity_score=0.0, price_deal_score=0.0)
+    want = Search(name="w", config={})
+    session.add(want)
+    await session.flush()
+    wm = WantMatch(
+        search_id=want.id, lot_id=lot.id,
+        want_relative_score=0.2, notified_at=datetime.now(UTC),
+    )
+    session.add(wm)
+    await session.flush()
+    lot_id = lot.id
+
+    posted: list[int] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lid: int, *, session: object = None
+    ) -> bool:
+        posted.append(lid)
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "skipped"
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_process_one_ignores_muted_want(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A muted (disabled) want must not fire its already-queued matches."""
+    session = _patched_get_session
+    _, lot = _seed_lot(session, rarity_score=0.0, price_deal_score=0.0)
+    want = Search(name="muted", config={}, enabled=False)
+    session.add(want)
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.2))
+    await session.flush()
+    lot_id = lot.id
+
+    posted: list[int] = []
+
+    async def fake_post(c: int, content: str, lid: int, *, session: object = None) -> bool:
+        posted.append(lid)
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "skipped"
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_process_one_keeps_pending_when_a_want_post_fails(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two wants match; one post succeeds, one fails. The failed want must stay
+    un-stamped and the lot must return to PENDING so it retries (fire-once)."""
+    session = _patched_get_session
+    _, lot = _seed_lot(session, rarity_score=0.0, price_deal_score=0.0)
+    lot.make, lot.model, lot.year = "Nissan", "Xterra", 2010
+    lot.current_high_bid_cad = Decimal("8000")
+    want_a = Search(name="want-a", config={})
+    want_b = Search(name="want-b", config={})
+    session.add_all([want_a, want_b])
+    await session.flush()
+    wm_a = WantMatch(search_id=want_a.id, lot_id=lot.id, want_relative_score=0.2)
+    wm_b = WantMatch(search_id=want_b.id, lot_id=lot.id, want_relative_score=0.2)
+    session.add_all([wm_a, wm_b])
+    await session.flush()
+    wm_a_id, wm_b_id, lot_id = wm_a.id, wm_b.id, lot.id
+
+    async def fake_post(c: int, content: str, lid: int, *, session: object = None) -> bool:
+        return "want-b" not in content  # want-b's post fails
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "transient"
+    session.expire_all()
+    assert (await session.get(WantMatch, wm_a_id)).notified_at is not None  # type: ignore[union-attr]
+    assert (await session.get(WantMatch, wm_b_id)).notified_at is None  # type: ignore[union-attr]
+    lot_row = await session.get(AuctionLot, lot_id)
+    assert lot_row.notification_status == NotificationStatus.PENDING  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_want_alert_does_not_drop_quiet_hours_suppressed_trigger(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A want alert (which bypasses quiet hours) must not finalize the lot as DONE
+    when a non-priority system trigger was suppressed — that trigger must defer."""
+    session = _patched_get_session
+    far = datetime.now(UTC) + timedelta(hours=48)
+    _, lot = _seed_lot(
+        session, rarity_score=0.0, price_deal_score=0.16,
+        confidence_bucket="high", flag_score=0,
+        user_action=UserAction.INTERESTED.value, scheduled_end_at=far,
+    )
+    want = Search(name="w", config={})
+    session.add(want)
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.2))
+    await session.flush()
+    lot_id = lot.id
+
+    base = "carbuyer.apps.notifier.notifier.settings."
+    monkeypatch.setattr(base + "quiet_hours_start", 0)
+    monkeypatch.setattr(base + "quiet_hours_end", 24)
+    monkeypatch.setattr(base + "quiet_hours_override_score", 0.99)
+    posted: list[int] = []
+
+    async def fake_post(c: int, content: str, lid: int, *, session: object = None) -> bool:
+        posted.append(c)
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        base + "discord_channels", {"wants": 4242, "watchlist": 1, "hot_deals": 2}
+    )
+
+    outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "deferred"
+    assert posted == [4242]  # only the want posted; going_cheap deferred
+    session.expire_all()
+    lot_row = await session.get(AuctionLot, lot_id)
+    assert lot_row.notification_status == NotificationStatus.PENDING  # type: ignore[union-attr]
 
 
 # ─── _process_one ───
@@ -355,7 +556,8 @@ async def test_process_one_fires_early_warning(
     """Lot with high rarity + close far out → early_warning fires → DONE."""
     session = _patched_get_session
     # rarity_score above threshold (2.0), scheduled_end_at 72 h out (>= 48 h).
-    far_end = datetime(2026, 6, 10, tzinfo=UTC)  # well beyond 48 h from test run
+    # Relative to now so the early-warning window check doesn't rot past a fixed date.
+    far_end = datetime.now(UTC) + timedelta(hours=72)
     _, lot = _seed_lot(
         session,
         rarity_score=3.0,

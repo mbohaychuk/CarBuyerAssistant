@@ -114,6 +114,42 @@ def render_lot_extended_text(d: LotEmbedData) -> str:
     )
 
 
+def render_want_match_text(
+    d: LotEmbedData,
+    *,
+    want_name: str,
+    pct_below_market: float | None,
+    dollars_below_market_cad: Decimal | None,
+    dollars_under_ceiling_cad: Decimal | None,
+    comp_count: int | None,
+) -> str:
+    """Alert for a lot that matched a user's want. Shows the want-relative deal
+    (% and $ vs market, $ under the want's ceiling, comp count) and degrades
+    gracefully to '(not enough comps to price)' when the lot is uncomped."""
+    title = _vehicle_title(d)
+    price = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no price yet)"
+    parts: list[str] = []
+    if pct_below_market is not None and dollars_below_market_cad is not None:
+        pct = round(pct_below_market * 100)
+        amt = int(dollars_below_market_cad)
+        if amt >= 0:
+            parts.append(f"{pct}% (${amt:,}) below market")
+        else:
+            parts.append(f"{-pct}% (${-amt:,}) above market")
+    if comp_count is not None:
+        parts.append(f"{comp_count} comps")
+    deal_line = " · ".join(parts) if parts else "(not enough comps to price)"
+    budget = ""
+    if dollars_under_ceiling_cad is not None:
+        budget = f"\n${int(dollars_under_ceiling_cad):,} under your budget"
+    return (
+        f"\U0001f3af Matches your want “{want_name}”\n"
+        f"{title} ({d.location})\n"
+        f"Price: {price} · {deal_line}{budget}\n"
+        f"{d.url}"
+    )
+
+
 def render_needs_plugin_text(
     *,
     auction_id: int,

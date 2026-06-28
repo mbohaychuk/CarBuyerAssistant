@@ -540,6 +540,46 @@ class Search(Base, TimestampMixin):
     )
 
 
+class WantMatch(Base, TimestampMixin):
+    """One row per (want, lot) the matcher has linked — the fire-once ledger.
+
+    A lot can satisfy several wants, and each want must alert independently, so
+    dedup is keyed on (search_id, lot_id) here rather than on the per-lot
+    *_notified_at columns. created_at (TimestampMixin) is the match time;
+    notified_at gates the want alert (NULL = not yet sent); dismissed mutes it;
+    want_relative_score is filled by the want-relative deal scorer.
+
+    lot_id FKs auction_lots today; at the Phase-1 vehicle_offer split it repoints
+    to the offer parent (the id value is preserved by the shared-PK design).
+    """
+
+    __tablename__ = "want_matches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    search_id: Mapped[int] = mapped_column(
+        ForeignKey("searches.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("auction_lots.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    want_relative_score: Mapped[float | None] = mapped_column()
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dismissed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("search_id", "lot_id", name="uq_want_matches_search_lot"),
+    )
+
+
 class DashboardState(Base):
     """Singleton row tracking when the user last opened the Today inbox.
 
