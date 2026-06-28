@@ -16,8 +16,10 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
 from pydantic import ValidationError
+from sqlalchemy import func, update
 
-from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
+from carbuyer.db.enums import EnrichmentStatus, ListingStatus, ValuationStatus
+from carbuyer.db.models import PrivateListing
 from carbuyer.db.notify import notify
 from carbuyer.db.session import get_session
 from carbuyer.db.upserts import (
@@ -114,48 +116,75 @@ async def _run_mcdougall_lot_first() -> int:
         return count
 
 
-async def _pull_listings(
-    sources: Sequence[ListingSource],
+async def _pull_source(
+    source: ListingSource,
     criterias: Sequence[WantCriteria],
-) -> int:
-    """Query each listing source per want criteria; upsert deduped listings.
+) -> set[str]:
+    """Pull one listing source across all want criteria; upsert + wake each
+    listing; return the set of source_listing_ids seen this run.
 
-    Want-list PULL: a private source is asked for what matches each want rather
-    than crawled wholesale. One listing can satisfy several wants, so dedup on
-    (source, source_listing_id) within the run avoids re-upserting / re-NOTIFYing
-    the same listing once per matching want (the upsert is idempotent regardless,
-    but the seen-set skips the redundant round-trips).
+    Want-list PULL: a source is asked for what matches each want rather than
+    crawled wholesale. One listing can satisfy several wants, so the seen-set
+    dedups within the run (the upsert is idempotent regardless) — and doubles as
+    the disappearance signal: any active listing from this source NOT in the set
+    has dropped out of every want's results.
     """
-    seen: set[tuple[str, str]] = set()
-    count = 0
-    for source in sources:
-        async with source:
-            for criteria in criterias:
-                async for raw in source.search_listings(criteria):
-                    key = (raw.ref.source, raw.ref.source_listing_id)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    async with get_session() as session, session.begin():
-                        listing = await upsert_private_listing(
-                            session, raw, parser_version=source.version,
-                        )
-                        # Route the wake-up: a fresh/content-changed listing
-                        # re-enriches (which then NOTIFYs valuation); a price-only
-                        # change re-values directly.
-                        if listing.enrichment_status == EnrichmentStatus.PENDING:
-                            await notify(session, "enrichment_pending", str(listing.id))
-                        elif listing.valuation_status == ValuationStatus.PENDING:
-                            await notify(session, "valuation_pending", str(listing.id))
-                        count += 1
-    return count
+    seen: set[str] = set()
+    async with source:
+        for criteria in criterias:
+            async for raw in source.search_listings(criteria):
+                if raw.ref.source_listing_id in seen:
+                    continue
+                seen.add(raw.ref.source_listing_id)
+                async with get_session() as session, session.begin():
+                    listing = await upsert_private_listing(
+                        session, raw, parser_version=source.version,
+                    )
+                    # Route the wake-up: a fresh/content-changed listing
+                    # re-enriches (which then NOTIFYs valuation); a price-only
+                    # change re-values directly.
+                    if listing.enrichment_status == EnrichmentStatus.PENDING:
+                        await notify(session, "enrichment_pending", str(listing.id))
+                    elif listing.valuation_status == ValuationStatus.PENDING:
+                        await notify(session, "valuation_pending", str(listing.id))
+    return seen
+
+
+async def _reconcile_disappeared(source: str, seen_ids: set[str]) -> int:
+    """Mark active listings from ``source`` that this run did NOT return as
+    removed (a sold/delisted car drops out of search). Stamps disappeared_at so
+    the last-seen asking becomes a private-channel comp (scoring.comps).
+
+    Skipped when the run saw nothing — an empty result is far more likely a
+    transient glitch than every listing vanishing at once, and the caller only
+    reconciles after a SUCCESSFUL pull so a source error can't mass-remove.
+    """
+    if not seen_ids:
+        return 0
+    # All columns are on the private_listing child table, so this is a plain
+    # single-table UPDATE (no joined-inheritance multi-table write).
+    async with get_session() as session, session.begin():
+        result = await session.execute(
+            update(PrivateListing)
+            .where(
+                PrivateListing.source == source,
+                PrivateListing.listing_status == ListingStatus.ACTIVE.value,
+                PrivateListing.source_listing_id.not_in(seen_ids),
+            )
+            .values(
+                listing_status=ListingStatus.REMOVED.value,
+                disappeared_at=func.now(),
+            )
+        )
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def _run_listing_pull() -> int:
-    """Strategy: want-list PULL ingestion across registered listing sources.
+    """Strategy: want-list PULL ingestion + disappearance reconciliation.
 
-    No-op when there are no listing sources or no enabled wants. A source whose
-    parser isn't implemented yet raises and is isolated by the dispatch loop.
+    No-op when there are no listing sources or no enabled wants. Each source is
+    independent: a source whose pull raises is logged and skipped (and NOT
+    reconciled, so a transient failure can't mass-remove its listings).
     """
     async with get_session() as s:
         wants = await repo.list_wants(s, enabled_only=True)
@@ -168,7 +197,18 @@ async def _run_listing_pull() -> int:
     sources = [src for src in SOURCES.values() if isinstance(src, ListingSource)]
     if not sources or not criterias:
         return 0
-    return await _pull_listings(sources, criterias)
+    total = 0
+    for source in sources:
+        try:
+            seen = await _pull_source(source, criterias)
+        except Exception:
+            log.exception("listing pull failed; skipping reconcile", source=source.name)
+            continue
+        total += len(seen)
+        removed = await _reconcile_disappeared(source.name, seen)
+        if removed:
+            log.info("marked disappeared listings", source=source.name, count=removed)
+    return total
 
 
 # Strategy registration. Each entry's name appears in structured logs so a
