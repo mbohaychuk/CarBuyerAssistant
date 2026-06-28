@@ -21,6 +21,13 @@ async def test_build_comp_set_includes_disappeared_private_listings(
         title="2015 Toyota Tacoma", year=2015, make="Toyota", model="Tacoma",
         mileage_km=150000, asking_price_cad=Decimal("17500"),
         listing_status="sold", days_on_market=20,
+        disappeared_at=datetime.now(UTC) - timedelta(days=5),  # recent
+    )
+    stale = PrivateListing(
+        source="kijiji", source_listing_id="K3", url="http://k/3",
+        title="2015 Toyota Tacoma", year=2015, make="Toyota", model="Tacoma",
+        mileage_km=150000, asking_price_cad=Decimal("16000"),
+        listing_status="sold", disappeared_at=datetime.now(UTC) - timedelta(days=120),
     )
     active = PrivateListing(
         source="kijiji", source_listing_id="K2", url="http://k/2",
@@ -28,7 +35,7 @@ async def test_build_comp_set_includes_disappeared_private_listings(
         mileage_km=150000, asking_price_cad=Decimal("19000"),
         listing_status="active",
     )
-    session.add_all([sold, active])
+    session.add_all([sold, stale, active])
     await session.commit()
 
     comps = await build_comp_set(

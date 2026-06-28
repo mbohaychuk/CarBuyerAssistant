@@ -261,6 +261,7 @@ async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
         session,
         make=lot.make, model=lot.model, trim=lot.trim,
         year=lot.year, mileage_km=lot.mileage_km or 0,
+        exclude_offer_id=lot.id,  # don't let an offer comp against its own row
     )
     fv = compute_fair_value(
         comps,
@@ -298,18 +299,15 @@ async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
 
     # Channel-specific pricing: auction lots run BP/tax off the auction row;
     # private listings run the asking→sold haircut with no premium and no GST.
+    want_province: str | None = None
     if isinstance(lot, AuctionLot):
         assert auction is not None
         _apply_pricing(lot, auction=auction, expected_value=fv.expected_value_cad)
-        want_price = lot.current_high_bid_cad
         want_province = auction.pickup_province
     elif isinstance(lot, PrivateListing):
         _apply_listing_pricing(lot, expected_value=fv.expected_value_cad)
-        want_price = lot.asking_price_cad
         want_province = lot.location_province
-    else:
-        want_price = None
-        want_province = None
+    want_price = lot.offer_price  # channel-specific price via the model property
 
     if fv.confidence == ConfidenceBucket.INSUFFICIENT:
         # Distinguish "we tried, comp set too thin" from "ran the formula".

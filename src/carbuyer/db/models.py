@@ -363,6 +363,12 @@ class VehicleOffer(Base, TimestampMixin):
         index=True,
     )
 
+    @property
+    def offer_price(self) -> Decimal | None:
+        """Channel-specific headline price (auction high bid vs private asking);
+        overridden per subtype so callers don't isinstance-branch the price."""
+        return None
+
     __mapper_args__ = {  # noqa: RUF012 -- SQLAlchemy declarative dunder, not a ClassVar
         "polymorphic_on": offer_kind,
         "polymorphic_identity": "offer",
@@ -472,6 +478,10 @@ class AuctionLot(VehicleOffer):
         passive_deletes=True,  # delegate child DELETE to DB FK ondelete=CASCADE; skip child SELECT
     )
 
+    @property
+    def offer_price(self) -> Decimal | None:
+        return self.current_high_bid_cad
+
     __mapper_args__ = {"polymorphic_identity": "auction"}  # noqa: RUF012 -- SQLAlchemy dunder
 
     __table_args__ = (
@@ -517,6 +527,10 @@ class PrivateListing(VehicleOffer):
     )
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @property
+    def offer_price(self) -> Decimal | None:
+        return self.asking_price_cad
 
     __mapper_args__ = {"polymorphic_identity": "private"}  # noqa: RUF012 -- SQLAlchemy dunder
 

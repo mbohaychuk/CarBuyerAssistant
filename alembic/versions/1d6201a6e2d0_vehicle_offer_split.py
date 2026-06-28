@@ -179,6 +179,12 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("private_listing")
 
+    # The pre-split monolith can't represent non-auction offers (no auction_id /
+    # source_lot_id / lot_status), and the re-added NOT NULL columns below would
+    # fail on private parents (they have no auction_lot child to copy back from).
+    # Downgrading inherently discards private listings — delete them honestly.
+    op.execute("DELETE FROM vehicle_offer WHERE offer_kind <> 'auction'")
+
     # Reverse the parent-FK constraint renames.
     op.execute(
         "ALTER TABLE want_matches RENAME CONSTRAINT "

@@ -185,6 +185,33 @@ async def test_backfill_seeds_matches_from_valued_lots(session: AsyncSession) ->
     assert await _count_matches(session) == 1
 
 
+async def test_backfill_seeds_matches_from_valued_private_listings(
+    session: AsyncSession,
+) -> None:
+    from carbuyer.db.models import PrivateListing  # noqa: PLC0415 -- local to this test
+
+    session.add(PrivateListing(
+        source="kijiji", source_listing_id="K1", url="http://k/1",
+        make="Nissan", model="Xterra", year=2010,
+        asking_price_cad=Decimal("8000"), location_province="AB",
+        listing_status="active", valuation_status=ValuationStatus.DONE.value,
+    ))
+    session.add(PrivateListing(
+        source="kijiji", source_listing_id="K2", url="http://k/2",
+        make="Toyota", model="4Runner", year=2010,  # non-matching
+        asking_price_cad=Decimal("9000"), location_province="AB",
+        listing_status="active", valuation_status=ValuationStatus.DONE.value,
+    ))
+    want = await repo.create_want(
+        session, name="x", criteria=WantCriteria(makes=["Nissan"], models=["Xterra"]),
+    )
+    await session.flush()
+
+    n = await service.backfill_want(session, want)
+    assert n == 1
+    assert await _count_matches(session) == 1
+
+
 async def test_value_one_keeps_skipped_without_want_match(session: AsyncSession) -> None:
     auction = await _auction(session)
     lot = await _lot(session, auction)

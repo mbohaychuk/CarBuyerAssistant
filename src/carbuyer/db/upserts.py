@@ -294,7 +294,7 @@ async def upsert_private_listing(
             seller_type=raw.seller_type,
             days_on_market=raw.days_on_market,
             listing_status=raw.listing_status,
-            first_seen_at=raw.first_seen_at,
+            first_seen_at=raw.first_seen_at or datetime.now(UTC),
         )
         session.add(listing)
         await session.flush()
@@ -302,6 +302,7 @@ async def upsert_private_listing(
 
     pre_snapshot = {f: getattr(existing, f) for f in _CONTENT_TRIGGER_FIELDS}
     pre_parser_version = existing.parser_version
+    pre_asking = existing.asking_price_cad
 
     existing.url = raw.ref.url
     existing.parser_version = parser_version
@@ -323,4 +324,13 @@ async def upsert_private_listing(
     existing.updated_at = func.now()
     await session.flush()
     await _apply_content_cascade(session, existing, pre_snapshot, pre_parser_version)
+    # A price change with no content change must still re-value (the deal score
+    # + want matching are price-dependent — a drop into a want's budget has to
+    # re-fire). Re-pend valuation only, not enrichment (make/model unchanged).
+    if (
+        existing.asking_price_cad != pre_asking
+        and existing.valuation_status != ValuationStatus.PENDING
+    ):
+        existing.valuation_status = ValuationStatus.PENDING
+        await session.flush()
     return existing

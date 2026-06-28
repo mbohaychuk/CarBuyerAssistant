@@ -13,7 +13,6 @@ import asyncio
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import cast
 
 import aiohttp
@@ -65,15 +64,6 @@ class WantAlert:
     deal: WantDeal
 
 
-def _offer_price(lot: VehicleOffer) -> Decimal | None:
-    """Channel-specific price: auction high bid vs private asking price."""
-    if isinstance(lot, AuctionLot):
-        return lot.current_high_bid_cad
-    if isinstance(lot, PrivateListing):
-        return lot.asking_price_cad
-    return None
-
-
 async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[WantAlert]:
     """Un-notified, non-dismissed want_matches for this lot, each with its want
     name and a freshly-computed deal breakdown for the message."""
@@ -96,7 +86,7 @@ async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[Wa
         except ValidationError:
             log.warning("skipping want alert with invalid config", want_match_id=want_match_id)
             continue
-        deal = score_want_deal(lot, criteria, offer_price_cad=_offer_price(lot))
+        deal = score_want_deal(lot, criteria, offer_price_cad=lot.offer_price)
         alerts.append(WantAlert(want_match_id, want_name, deal))
     return alerts
 
@@ -192,7 +182,7 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
         model=lot.model,
         trim=lot.trim,
         location=location,
-        current_high_bid_cad=_offer_price(lot),
+        current_high_bid_cad=lot.offer_price,
         all_in_cad=lot.all_in_at_current_bid_cad,
         expected_value_cad=lot.expected_value_cad,
         value_low_cad=lot.value_low_cad,

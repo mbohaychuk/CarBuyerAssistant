@@ -151,6 +151,29 @@ def _assert_post_split(lot_a: int, lot_b: int) -> None:
                == 1, "purchases.linked_lot_id resolves to vehicle_offer")
 
 
+def _seed_private_post_split() -> None:
+    """Insert a private offer (parent + child) AFTER the split so the downgrade
+    has to handle a non-auction parent it can't represent (it must drop it)."""
+    with _scratch_conn() as c, c.cursor() as cur:
+        oid = _scalar(cur, (
+            "INSERT INTO vehicle_offer (offer_kind, url, make, model, year, valuation_status) "
+            "VALUES ('private', 'http://k/1', 'Lexus', 'GX 470', 2005, 'done') RETURNING id"
+        ))
+        cur.execute(
+            "INSERT INTO private_listing (id, asking_price_cad, listing_status) "
+            "VALUES (%s, 15000, 'active')",
+            (oid,),
+        )
+
+
+def _assert_private_present() -> None:
+    with _scratch_conn() as c, c.cursor() as cur:
+        _check(_scalar(cur, "SELECT count(*) FROM private_listing") == 1,
+               "private listing present post-split")
+        _check(_scalar(cur, "SELECT count(*) FROM vehicle_offer WHERE offer_kind='private'")
+               == 1, "private parent has offer_kind='private'")
+
+
 def _assert_post_downgrade(lot_a: int) -> None:
     with _scratch_conn() as c, c.cursor() as cur:
         _check(_scalar(cur, "SELECT to_regclass('public.auction_lots') IS NOT NULL"),
@@ -159,16 +182,25 @@ def _assert_post_downgrade(lot_a: int) -> None:
                "auction_lot child dropped")
         _check(_scalar(cur, "SELECT to_regclass('public.private_listing') IS NULL"),
                "private_listing dropped")
+        # The private offer can't be represented by the monolith → downgrade drops it.
         _check(_scalar(cur, "SELECT count(*) FROM auction_lots") == 2,
-               "auction_lots has 2 rows after round-trip")
+               "only the 2 auction rows remain (private offer dropped)")
         _check(_scalar(cur, f"SELECT make FROM auction_lots WHERE id = {lot_a}") == "Nissan",
                "make intact after round-trip")
         _check(_scalar(cur,
                f"SELECT current_high_bid_cad FROM auction_lots WHERE id = {lot_a}") == 8000,
                "current_high_bid_cad intact after round-trip")
+        _check(_scalar(cur, f"SELECT valuation_status FROM auction_lots WHERE id = {lot_a}")
+               == "done", "valuation_status survived round-trip")
         _check(_scalar(cur,
                "SELECT count(*) FROM auction_bid_history b JOIN auction_lots l ON l.id = b.lot_id")
                == 1, "bid_history FK intact after round-trip")
+        _check(_scalar(cur,
+               "SELECT count(*) FROM want_matches wm JOIN auction_lots l ON l.id = wm.lot_id")
+               == 1, "want_matches.lot_id resolves after round-trip")
+        _check(_scalar(cur,
+               "SELECT count(*) FROM purchases p JOIN auction_lots l ON l.id = p.linked_lot_id")
+               == 1, "purchases.linked_lot_id resolves after round-trip")
 
 
 def main() -> int:
@@ -183,6 +215,9 @@ def main() -> int:
         _upgrade(HEAD)
         print("asserting post-split invariants ...")
         _assert_post_split(lot_a, lot_b)
+        print("seeding a private offer post-split ...")
+        _seed_private_post_split()
+        _assert_private_present()
         print(f"downgrading back to {PRE_SPLIT} ...")
         _downgrade(PRE_SPLIT)
         print("asserting post-downgrade round-trip ...")

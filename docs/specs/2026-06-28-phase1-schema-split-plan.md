@@ -92,6 +92,18 @@ Other forced S1 edits (all verify-by-running): `queue._mark_in_progress` / `reco
 
 ---
 
+## 5b. Pre-merge review (2026-06-28)
+
+A 5-lens adversarial subagent review over the whole branch (22 findings, 16 confirmed after per-finding verification) was triaged and **all fixed before merge**, TDD where it was logic:
+- **`cmd_requeue` post-split crash** — `update(AuctionLot)` on a parent column → `update(VehicleOffer)` (the one missed bulk-update from S1).
+- **Private price-change didn't re-value** (the pivot's price-drop feature) — `upsert_private_listing` now re-pends valuation on an asking-price change; the ingester routes `valuation_pending` vs `enrichment_pending`.
+- **`backfill_want` ignored private listings** — added a private-listing pass so a new want surfaces already-valued private inventory.
+- **Migration downgrade** now drops non-auction parents before re-adding NOT NULL columns (and the gate seeds a private offer to exercise it).
+- Comp self-exclusion (`exclude_offer_id`), a private-comp recency bound, `first_seen_at` fallback, the `offer_price` model property (de-scatters the channel price accessor), a queue test for claiming a childless private offer, and stronger downgrade assertions in the gate.
+- **Kijiji scaffold no longer fetches the live site** before its parser exists — `search_listings` raises before any I/O.
+
+S6's private-comp source stays correct-and-inert until **Phase 2 disappearance detection** writes `listing_status`/`disappeared_at` (documented in `comps.py`).
+
 ## 6. Recommendation
 
 Do **S1 only** this round — land the schema split isolated, green, with its migration-verification gate — then pause for review before building private-listing features on top. It's the load-bearing, hard-to-reverse foundation; isolating it de-risks S2–S7 and matches the Phase 0 slice-and-sign-off rhythm.

@@ -98,6 +98,25 @@ async def test_upsert_resets_statuses_on_content_change(session: AsyncSession) -
     assert listing2.valuation_status == ValuationStatus.PENDING
 
 
+async def test_upsert_repends_valuation_on_price_change(session: AsyncSession) -> None:
+    listing = await upsert_private_listing(
+        session, _raw_listing(asking="15000"), parser_version="v1",
+    )
+    listing.enrichment_status = EnrichmentStatus.DONE
+    listing.valuation_status = ValuationStatus.DONE
+    await session.flush()
+
+    # Price-only re-ingest (content unchanged) must re-value so the deal score +
+    # want matching re-run, but must NOT re-enrich (make/model unchanged).
+    listing2 = await upsert_private_listing(
+        session, _raw_listing(asking="14000"), parser_version="v1",
+    )
+    await session.flush()
+    assert listing2.asking_price_cad == Decimal("14000")
+    assert listing2.valuation_status == ValuationStatus.PENDING
+    assert listing2.enrichment_status == EnrichmentStatus.DONE
+
+
 async def test_upsert_no_reset_on_idempotent_reingest(session: AsyncSession) -> None:
     listing = await upsert_private_listing(session, _raw_listing(), parser_version="v1")
     listing.enrichment_status = EnrichmentStatus.DONE

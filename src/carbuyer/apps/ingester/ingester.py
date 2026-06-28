@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable, Sequence
 import structlog
 from pydantic import ValidationError
 
+from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.notify import notify
 from carbuyer.db.session import get_session
 from carbuyer.db.upserts import (
@@ -139,7 +140,13 @@ async def _pull_listings(
                         listing = await upsert_private_listing(
                             session, raw, parser_version=source.version,
                         )
-                        await notify(session, "enrichment_pending", str(listing.id))
+                        # Route the wake-up: a fresh/content-changed listing
+                        # re-enriches (which then NOTIFYs valuation); a price-only
+                        # change re-values directly.
+                        if listing.enrichment_status == EnrichmentStatus.PENDING:
+                            await notify(session, "enrichment_pending", str(listing.id))
+                        elif listing.valuation_status == ValuationStatus.PENDING:
+                            await notify(session, "valuation_pending", str(listing.id))
                         count += 1
     return count
 

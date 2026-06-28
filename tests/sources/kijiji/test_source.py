@@ -1,8 +1,8 @@
-"""Kijiji source scaffold: registration, criteria→URL, fetch wiring runs, and
-the HTML parse is honestly stubbed pending real sample pages."""
+"""Kijiji source scaffold: registration + criteria→URL mapping. The HTML parse
+is unimplemented and must NOT touch the live site — search_listings raises
+before any I/O."""
 from __future__ import annotations
 
-import httpx
 import pytest
 
 from carbuyer.sources.base import SOURCES
@@ -16,29 +16,17 @@ def test_kijiji_is_registered_as_a_listing_source() -> None:
     assert src.kind == "listing"
 
 
-async def test_search_listings_builds_url_fetches_then_stubbed_parse() -> None:
-    captured: dict[str, str] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        return httpx.Response(200, text="<html>kijiji results</html>")
-
-    src = KijijiSource(transport=httpx.MockTransport(handler))
-    criteria = WantCriteria(makes=["Nissan"], models=["Xterra"])
-
-    # The fetch wiring runs (the MockTransport captures the request); the
-    # HTML→RawListing extraction is stubbed until real sample pages exist.
-    with pytest.raises(NotImplementedError, match="selectors"):
-        _ = [raw async for raw in src.search_listings(criteria)]
-
-    assert "nissan" in captured["url"].lower()
-    assert "xterra" in captured["url"].lower()
+def test_search_url_includes_make_and_model() -> None:
+    url = KijijiSource()._search_url(  # pyright: ignore[reportPrivateUsage]
+        WantCriteria(makes=["Nissan"], models=["Xterra"]),
+    )
+    assert "nissan" in url.lower()
+    assert "xterra" in url.lower()
 
 
-async def test_search_listings_propagates_http_errors() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, text="blocked")
-
-    src = KijijiSource(transport=httpx.MockTransport(handler))
-    with pytest.raises(httpx.HTTPStatusError):
+async def test_search_listings_raises_without_touching_the_network() -> None:
+    src = KijijiSource()
+    # No transport is injected and none is opened — the scaffold must not hit the
+    # live site before its selectors exist.
+    with pytest.raises(NotImplementedError, match="sample pages"):
         _ = [raw async for raw in src.search_listings(WantCriteria(makes=["Nissan"]))]

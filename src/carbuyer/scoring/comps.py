@@ -62,6 +62,11 @@ _COMP_ELIGIBLE_STATUSES: tuple[str, ...] = (
 # (gap). If longer, the same sale appears in both tables (double-counted).
 RECENT_AUCTION_LOTS_DAYS = 14
 
+# Recency window for disappeared private-listing comps, keyed on disappeared_at
+# (set by the Phase-2 disappearance detector). Wider than the auction window:
+# private listings turn over slower and there is no distiller promoting them.
+RECENT_PRIVATE_LISTING_DAYS = 60
+
 
 @dataclass(frozen=True, slots=True)
 class ComparableSale:
@@ -84,6 +89,7 @@ async def build_comp_set(
     mileage_km: int,
     year_window: int = 1,
     mileage_pct: float = 0.30,
+    exclude_offer_id: int | None = None,
 ) -> list[ComparableSale]:
     """Return historical + recent-auction comps within make/model/year/mileage band.
 
@@ -143,7 +149,15 @@ async def build_comp_set(
 
     # Disappeared private listings (sold/removed) as private-channel comps —
     # make/model/year/mileage live on the vehicle_offer parent (inherited),
-    # listing_status + asking_price on the private_listing child.
+    # listing_status + asking_price on the private_listing child. Bounded by
+    # disappeared_at recency, mirroring the auction window.
+    #
+    # NOTE: this source stays empty until disappearance DETECTION exists — the
+    # producer that transitions a listing active→sold/removed and stamps
+    # disappeared_at is Phase 2 (the want-list PULL only upserts listings a
+    # source still returns, so a vanished listing is never re-seen here). The
+    # branch is correct-and-inert until then.
+    pl_cutoff = datetime.now(UTC) - timedelta(days=RECENT_PRIVATE_LISTING_DAYS)
     pl_stmt = select(PrivateListing).where(
         func.upper(PrivateListing.make) == make_u,
         func.upper(PrivateListing.model) == model_u,
@@ -151,7 +165,11 @@ async def build_comp_set(
         PrivateListing.mileage_km.between(mileage_lo, mileage_hi),
         PrivateListing.listing_status.in_(_PRIVATE_COMP_STATUSES),
         PrivateListing.asking_price_cad.is_not(None),
+        PrivateListing.disappeared_at >= pl_cutoff,
     )
+    if exclude_offer_id is not None:
+        # Don't let an offer being valued comp against its own row.
+        pl_stmt = pl_stmt.where(PrivateListing.id != exclude_offer_id)
     if trim_u:
         pl_stmt = pl_stmt.where(
             or_(
