@@ -22,7 +22,7 @@ from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUs
     process_pending,
 )
 from carbuyer.db.enums import NotificationStatus, UserAction
-from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, Search, WantMatch
 
 
 def _seed_lot(
@@ -139,6 +139,58 @@ async def test_process_one_posts_want_match_and_stamps_ledger(
     )
 
     outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "done"
+    assert len(posted) == 1
+    assert posted[0][0] == 4242  # noqa: PLR2004 -- the configured wants channel id
+    assert "manual xterra" in posted[0][1]
+
+    session.expire_all()
+    refreshed = await session.get(WantMatch, wm_id)
+    assert refreshed is not None
+    assert refreshed.notified_at is not None
+
+
+@pytest.mark.asyncio
+async def test_process_one_posts_want_match_for_private_listing(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private listing (no auction child) fires its want alert and does not
+    crash on the absent auction; auction triggers simply don't apply."""
+    session = _patched_get_session
+    listing = PrivateListing(
+        source="kijiji", source_listing_id="K1", url="http://k/1",
+        title="2010 Nissan Xterra", description="x" * 200,
+        make="Nissan", model="Xterra", year=2010,
+        asking_price_cad=Decimal("8000"), seller_type="private",
+        location_province="AB", listing_status="active",
+        expected_value_cad=Decimal("10000"), value_mid_cad=Decimal("10000"),
+        comp_count=9, price_deal_score=0.2, rarity_score=0.0,
+        notification_status="pending",
+    )
+    session.add(listing)
+    want = Search(name="manual xterra", config={})
+    session.add(want)
+    await session.flush()
+    wm = WantMatch(search_id=want.id, lot_id=listing.id, want_relative_score=0.2)
+    session.add(wm)
+    await session.flush()
+    wm_id, lid = wm.id, listing.id
+
+    posted: list[tuple[int, str, int]] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lid_: int, *, session: object = None
+    ) -> bool:
+        posted.append((channel_id, content, lid_))
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lid, http_session=MagicMock())
     assert outcome == "done"
     assert len(posted) == 1
     assert posted[0][0] == 4242  # noqa: PLR2004 -- the configured wants channel id

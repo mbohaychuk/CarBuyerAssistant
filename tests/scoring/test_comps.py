@@ -6,8 +6,45 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale, PrivateListing
 from carbuyer.scoring.comps import ComparableSale, build_comp_set
+
+
+@pytest.mark.asyncio
+async def test_build_comp_set_includes_disappeared_private_listings(
+    session: AsyncSession,
+) -> None:
+    # A sold/removed private listing's last asking is a noisy sold proxy → a comp
+    # at the private (1.00) channel. An ACTIVE listing is not a sale → excluded.
+    sold = PrivateListing(
+        source="kijiji", source_listing_id="K1", url="http://k/1",
+        title="2015 Toyota Tacoma", year=2015, make="Toyota", model="Tacoma",
+        mileage_km=150000, asking_price_cad=Decimal("17500"),
+        listing_status="sold", days_on_market=20,
+        disappeared_at=datetime.now(UTC) - timedelta(days=5),  # recent
+    )
+    stale = PrivateListing(
+        source="kijiji", source_listing_id="K3", url="http://k/3",
+        title="2015 Toyota Tacoma", year=2015, make="Toyota", model="Tacoma",
+        mileage_km=150000, asking_price_cad=Decimal("16000"),
+        listing_status="sold", disappeared_at=datetime.now(UTC) - timedelta(days=120),
+    )
+    active = PrivateListing(
+        source="kijiji", source_listing_id="K2", url="http://k/2",
+        title="2015 Toyota Tacoma", year=2015, make="Toyota", model="Tacoma",
+        mileage_km=150000, asking_price_cad=Decimal("19000"),
+        listing_status="active",
+    )
+    session.add_all([sold, stale, active])
+    await session.commit()
+
+    comps = await build_comp_set(
+        session, make="Toyota", model="Tacoma", trim=None, year=2015, mileage_km=150000,
+    )
+    private_comps = [c for c in comps if c.source == "private_listing"]
+    assert len(private_comps) == 1
+    assert private_comps[0].sale_channel == "private"
+    assert private_comps[0].price_cad == Decimal("17500")
 
 
 def _historical(**overrides: object) -> HistoricalSale:

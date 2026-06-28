@@ -34,7 +34,14 @@ from carbuyer.apps.notifier.channel_resolver import resolve_channels
 from carbuyer.apps.notifier.discord_post import post_message, post_simple_message
 from carbuyer.apps.notifier.triggers import LotState, TriggerResult, evaluate_triggers
 from carbuyer.db.enums import NotificationStatus
-from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
+from carbuyer.db.models import (
+    Auction,
+    AuctionLot,
+    PrivateListing,
+    Search,
+    VehicleOffer,
+    WantMatch,
+)
 from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import claim_pending_lots, recover_orphans, select_pending_ids
 from carbuyer.db.session import get_session, get_session_maker
@@ -57,7 +64,7 @@ class WantAlert:
     deal: WantDeal
 
 
-async def _load_want_alerts(session: AsyncSession, lot: AuctionLot) -> list[WantAlert]:
+async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[WantAlert]:
     """Un-notified, non-dismissed want_matches for this lot, each with its want
     name and a freshly-computed deal breakdown for the message."""
     rows = (
@@ -79,7 +86,7 @@ async def _load_want_alerts(session: AsyncSession, lot: AuctionLot) -> list[Want
         except ValidationError:
             log.warning("skipping want alert with invalid config", want_match_id=want_match_id)
             continue
-        deal = score_want_deal(lot, criteria, offer_price_cad=lot.current_high_bid_cad)
+        deal = score_want_deal(lot, criteria, offer_price_cad=lot.offer_price)
         alerts.append(WantAlert(want_match_id, want_name, deal))
     return alerts
 
@@ -157,8 +164,15 @@ def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
     )
 
 
-def _embed_data(lot: AuctionLot, auction: Auction) -> LotEmbedData:
-    location = ", ".join(filter(None, [auction.pickup_city, auction.pickup_province])) or "?"
+def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
+    if auction is not None:
+        location = (
+            ", ".join(filter(None, [auction.pickup_city, auction.pickup_province])) or "?"
+        )
+        end_at = auction.scheduled_end_at
+    else:
+        location = (lot.location_province if isinstance(lot, PrivateListing) else None) or "?"
+        end_at = None
     return LotEmbedData(
         lot_id=lot.id,
         url=lot.url,
@@ -168,7 +182,7 @@ def _embed_data(lot: AuctionLot, auction: Auction) -> LotEmbedData:
         model=lot.model,
         trim=lot.trim,
         location=location,
-        current_high_bid_cad=lot.current_high_bid_cad,
+        current_high_bid_cad=lot.offer_price,
         all_in_cad=lot.all_in_at_current_bid_cad,
         expected_value_cad=lot.expected_value_cad,
         value_low_cad=lot.value_low_cad,
@@ -183,7 +197,7 @@ def _embed_data(lot: AuctionLot, auction: Auction) -> LotEmbedData:
             or [f.get("flag", "") for f in (lot.green_flags or [])][:3]
         ),
         suspicious_underprice=lot.suspicious_underprice_flag,
-        scheduled_end_at=auction.scheduled_end_at,
+        scheduled_end_at=end_at,
     )
 
 
@@ -215,7 +229,7 @@ def _in_quiet_hours(now: datetime, start_hour: int, end_hour: int) -> bool:
 
 
 def _trigger_overrides_quiet_hours(
-    trigger: TriggerResult, lot: AuctionLot, now: datetime,
+    trigger: TriggerResult, lot: VehicleOffer, now: datetime,
 ) -> bool:
     """Spec §6e exceptions: early_warning always fires; going_cheap fires if
     price_deal_score >= quiet_hours_override_score; closing-T-1h fires always.
@@ -267,32 +281,39 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     notification_status=DONE, so a Discord rate-limit / 4xx / network blip
     silently lost the notification while the DB showed the lot as notified.
     """
-    # Load lot + auction in a short read transaction.
+    # Load offer (+ auction, for auction lots) in a short read transaction.
     async with get_session() as s:
-        lot = await s.get(AuctionLot, lot_id)
+        lot = await s.get(VehicleOffer, lot_id)
         if lot is None:
             log.warning("lot disappeared between claim and load", lot_id=lot_id)
             return "missing"
-        auction = await s.get(Auction, lot.auction_id)
-        if auction is None:
-            log.warning("auction missing for lot", lot_id=lot_id)
-            return "missing"
+        auction: Auction | None = None
+        if isinstance(lot, AuctionLot):
+            auction = await s.get(Auction, lot.auction_id)
+            if auction is None:
+                log.warning("auction missing for lot", lot_id=lot_id)
+                return "missing"
         want_alerts = await _load_want_alerts(s, lot)
 
-    state = _state_from_lot(lot, auction)
     now = datetime.now(UTC)
-    triggers = evaluate_triggers(
-        state,
-        now=now,
-        rarity_threshold=settings.early_warning_rarity_threshold,
-        notify_threshold=settings.notify_threshold,
-        rescore_improvement_threshold=settings.rescore_improvement_threshold,
-        early_warning_min_hours=settings.early_warning_min_hours_to_close,
-    )
+    # Auction triggers (early-warning, going-cheap, closing-soon, …) gate on bid
+    # state + scheduled close, which private listings don't have — those alert
+    # only via want matches. So triggers are auction-only.
+    if isinstance(lot, AuctionLot) and auction is not None:
+        triggers = evaluate_triggers(
+            _state_from_lot(lot, auction),
+            now=now,
+            rarity_threshold=settings.early_warning_rarity_threshold,
+            notify_threshold=settings.notify_threshold,
+            rescore_improvement_threshold=settings.rescore_improvement_threshold,
+            early_warning_min_hours=settings.early_warning_min_hours_to_close,
+        )
+    else:
+        triggers = []
 
     if not triggers and not want_alerts:
         async with get_session() as s, s.begin():
-            row = await s.get(AuctionLot, lot_id)
+            row = await s.get(VehicleOffer, lot_id)
             if row is not None:
                 row.notification_status = NotificationStatus.SKIPPED
             else:
@@ -309,7 +330,9 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     # quiet hours. The 08:00 morning digest in the spec is a Phase 14
     # follow-on (needs a periodic flush job).
     had_suppressed_triggers = False
-    if _in_quiet_hours(now, settings.quiet_hours_start, settings.quiet_hours_end):
+    if auction is not None and _in_quiet_hours(
+        now, settings.quiet_hours_start, settings.quiet_hours_end,
+    ):
         closing_in_1h = (
             auction.scheduled_end_at is not None
             and (auction.scheduled_end_at - now) <= timedelta(hours=1)
@@ -328,7 +351,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
                 lot_id=lot_id, hour=now.hour,
             )
             async with get_session() as s, s.begin():
-                row = await s.get(AuctionLot, lot_id)
+                row = await s.get(VehicleOffer, lot_id)
                 if row is not None:
                     row.notification_status = NotificationStatus.PENDING
             return "deferred"
@@ -401,7 +424,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
                     .where(WantMatch.id.in_(stamped_want_ids))
                     .values(notified_at=now)
                 )
-            row = await s.get(AuctionLot, lot_id)
+            row = await s.get(VehicleOffer, lot_id)
             if row is None:
                 log.error(
                     "lot vanished after posts; timestamps lost"
@@ -440,7 +463,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     # No posts succeeded. If every trigger landed on a missing channel,
     # SKIP — re-running won't fix configuration. Otherwise it's transient.
     async with get_session() as s, s.begin():
-        row = await s.get(AuctionLot, lot_id)
+        row = await s.get(VehicleOffer, lot_id)
         if row is None:
             log.warning(
                 "lot vanished before transient/failed write", lot_id=lot_id,

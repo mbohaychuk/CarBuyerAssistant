@@ -96,6 +96,16 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     http_user_agent: str = DEFAULT_USER_AGENT
+    # Private-source scraping substrate (Phase 1 S4). curl_cffi TLS-impersonation
+    # target (e.g. "chrome", "chrome124", "safari17_0") and an optional CA
+    # residential proxy URL. Anti-bot sites fingerprint the TLS handshake, not
+    # just the UA, so the proxy alone isn't enough without impersonation.
+    http_impersonate: str = "chrome"
+    proxy_url: str | None = None
+    # Opt-in NHTSA vPIC make/model normalization in the enricher (adds one
+    # keyless HTTP call per lot; best-effort, off by default). Aligns comp keys
+    # across LLM output + scraped listings ("F150" → "F-150").
+    vpic_normalization_enabled: bool = False
 
     # HiBid plugin discovery target provinces. Override via env, e.g.
     # `HIBID_PROVINCES='["AB","BC","SK"]'` to scope discovery for testing.

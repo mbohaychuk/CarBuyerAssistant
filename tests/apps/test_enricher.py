@@ -18,6 +18,7 @@ from carbuyer.apps.enricher import enricher as enricher_mod
 from carbuyer.apps.enricher.enricher import (
     SPARSE_LISTING_CONFIDENCE_THRESHOLD,
     _apply_to_lot,
+    _canonical_model,
     _classify_failure,
     _EnrichmentResult,
     _process_one,
@@ -623,3 +624,87 @@ async def test_main_exits_when_openai_api_key_missing(
     )
     with pytest.raises(SystemExit, match="OPENAI_API_KEY not configured"):
         await main()
+
+
+# ─── S7: vPIC make/model normalization ───
+
+
+def _output_with_model(model: str) -> EnrichmentOutput:
+    return EnrichmentOutput(
+        normalized_vehicle=NormalizedVehicle(
+            year=2010, make="Ford", model=model, trim=None, engine="5.4L",
+            transmission="automatic", drivetrain="4wd", mileage_km=200000, vin=None,
+        ),
+        title_status="NORMAL", condition_categorical="good", condition_confidence=0.7,
+        red_flags=[], green_flags=[], showstopper_flags=[], carfax_url=None,
+        summary="ok", description_quality="adequate",
+        rarity=RarityAssessment(
+            desirable_trim_or_spec=False, classic_or_collector=False,
+            desirability_signals=[], desirability_evidence=[],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_canonical_model_noop_when_vpic_disabled() -> None:
+    # Off by default → returns the input model and opens no HTTP client.
+    assert await _canonical_model("Ford", "F150", 2015) == "F150"
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_canonical_model_overrides_llm(session: AsyncSession) -> None:
+    _, lot = _seed_auction_and_lot(session)
+    session.add(lot)
+    await session.flush()
+    result = _EnrichmentResult(output=_output_with_model("F150"), carfax_findings=None)
+
+    _apply_to_lot(lot, result, raw_carfax_url=None, canonical_model="F-150")
+    await session.flush()
+    assert lot.model == "F-150"
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_falls_back_to_llm_model_without_canonical(
+    session: AsyncSession,
+) -> None:
+    _, lot = _seed_auction_and_lot(session)
+    session.add(lot)
+    await session.flush()
+    result = _EnrichmentResult(output=_output_with_model("F150"), carfax_findings=None)
+
+    _apply_to_lot(lot, result, raw_carfax_url=None)  # no canonical override
+    await session.flush()
+    assert lot.model == "F150"
+
+
+@pytest.mark.asyncio
+async def test_process_one_applies_vpic_canonical_model(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the LLM emits 'F150', vPIC (enabled, mocked) snaps it to the
+    canonical 'F-150', and that is what lands on the row."""
+    session = _patched_get_session
+    _, lot = _seed_auction_and_lot(session)
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.vpic_normalization_enabled", True,
+    )
+    monkeypatch.setattr(
+        enricher_mod.vpic, "canonical_model", AsyncMock(return_value="F-150"),
+    )
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_output_with_model("F150"))
+
+    outcome = await _process_one(lot_id, provider=provider)
+
+    assert outcome == "done"
+    session.expire_all()
+    refreshed = await session.get(AuctionLot, lot_id)
+    assert refreshed is not None
+    assert refreshed.model == "F-150"

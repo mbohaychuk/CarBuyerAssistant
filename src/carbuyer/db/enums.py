@@ -59,6 +59,15 @@ class LotStatus(StrEnum):
     FORCE_CLOSED = "force_closed"
 
 
+class ListingStatus(StrEnum):
+    """Lifecycle of a private-sale listing (private_listing.listing_status)."""
+
+    ACTIVE = "active"
+    SOLD = "sold"
+    REMOVED = "removed"
+    PRICE_CHANGED = "price_changed"
+
+
 class AuctionStatus(StrEnum):
     UPCOMING = "upcoming"
     LIVE = "live"

@@ -12,19 +12,27 @@ concurrent invocations don't write conflicting upserts.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
+from pydantic import ValidationError
 
+from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
 from carbuyer.db.notify import notify
-from carbuyer.db.upserts import upsert_auction, upsert_lot_with_status_cascade
 from carbuyer.db.session import get_session
+from carbuyer.db.upserts import (
+    upsert_auction,
+    upsert_lot_with_status_cascade,
+    upsert_private_listing,
+)
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
-from carbuyer.sources.base import SOURCES
+from carbuyer.sources.base import SOURCES, ListingSource
 from carbuyer.sources.hibid.source import HibidSource
 from carbuyer.sources.mcdougall.source import McDougallSource
+from carbuyer.wants import repo
+from carbuyer.wants.criteria import WantCriteria
 
 log = get_logger("ingester")
 
@@ -106,6 +114,63 @@ async def _run_mcdougall_lot_first() -> int:
         return count
 
 
+async def _pull_listings(
+    sources: Sequence[ListingSource],
+    criterias: Sequence[WantCriteria],
+) -> int:
+    """Query each listing source per want criteria; upsert deduped listings.
+
+    Want-list PULL: a private source is asked for what matches each want rather
+    than crawled wholesale. One listing can satisfy several wants, so dedup on
+    (source, source_listing_id) within the run avoids re-upserting / re-NOTIFYing
+    the same listing once per matching want (the upsert is idempotent regardless,
+    but the seen-set skips the redundant round-trips).
+    """
+    seen: set[tuple[str, str]] = set()
+    count = 0
+    for source in sources:
+        async with source:
+            for criteria in criterias:
+                async for raw in source.search_listings(criteria):
+                    key = (raw.ref.source, raw.ref.source_listing_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    async with get_session() as session, session.begin():
+                        listing = await upsert_private_listing(
+                            session, raw, parser_version=source.version,
+                        )
+                        # Route the wake-up: a fresh/content-changed listing
+                        # re-enriches (which then NOTIFYs valuation); a price-only
+                        # change re-values directly.
+                        if listing.enrichment_status == EnrichmentStatus.PENDING:
+                            await notify(session, "enrichment_pending", str(listing.id))
+                        elif listing.valuation_status == ValuationStatus.PENDING:
+                            await notify(session, "valuation_pending", str(listing.id))
+                        count += 1
+    return count
+
+
+async def _run_listing_pull() -> int:
+    """Strategy: want-list PULL ingestion across registered listing sources.
+
+    No-op when there are no listing sources or no enabled wants. A source whose
+    parser isn't implemented yet raises and is isolated by the dispatch loop.
+    """
+    async with get_session() as s:
+        wants = await repo.list_wants(s, enabled_only=True)
+        criterias: list[WantCriteria] = []
+        for want in wants:
+            try:
+                criterias.append(WantCriteria.model_validate(want.config))
+            except ValidationError:
+                log.warning("skipping want with invalid config", want_id=want.id)
+    sources = [src for src in SOURCES.values() if isinstance(src, ListingSource)]
+    if not sources or not criterias:
+        return 0
+    return await _pull_listings(sources, criterias)
+
+
 # Strategy registration. Each entry's name appears in structured logs so a
 # dropped or hanging source is easy to spot in journalctl. Order matters
 # only for log readability; strategies are independent.
@@ -118,6 +183,7 @@ async def _run_mcdougall_lot_first() -> int:
 STRATEGIES: list[tuple[str, Strategy]] = [
     ("hibid_lot_first", _run_hibid_lot_first),
     ("mcdougall_lot_first", _run_mcdougall_lot_first),
+    ("listing_pull", _run_listing_pull),
 ]
 
 

@@ -1,12 +1,14 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, VehicleOffer
 from carbuyer.db.queue import (
     claim_pending_ids,
+    claim_pending_lots,
     recover_orphans,
     select_pending_ids,
 )
@@ -40,6 +42,37 @@ async def test_claim_pending_ids_marks_in_progress(session: AsyncSession) -> Non
         lot = await session.get(AuctionLot, lot_id)
         assert lot is not None
         assert lot.enrichment_status == EnrichmentStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_claim_serves_both_auction_and_childless_private_offers(
+    session: AsyncSession,
+) -> None:
+    """The whole point of the core-table FOR UPDATE claim: ONE queue serves both
+    an AuctionLot (parent + auction_lot child) and a PrivateListing (parent, NO
+    auction_lot child). The with_polymorphic entity select is an outer join, so
+    a naive FOR UPDATE on the nullable child side would crash."""
+    a = _seed_auction(session)
+    await session.flush()
+    session.add(AuctionLot(auction_id=a.id, source_lot_id="L1", url="u1"))
+    session.add(PrivateListing(
+        source="kijiji", source_listing_id="K1", url="http://k/1",
+        asking_price_cad=Decimal("8000"), listing_status="active",
+    ))
+    await session.flush()
+
+    lots = await claim_pending_lots(session, status_field="valuation_status", limit=10)
+
+    kinds = sorted(type(lot).__name__ for lot in lots)
+    assert kinds == ["AuctionLot", "PrivateListing"]  # both kinds claimed
+    for lot in lots:
+        assert lot.valuation_status == ValuationStatus.IN_PROGRESS
+    # The private offer loaded as the right polymorphic subclass with child cols.
+    listing = next(lot for lot in lots if isinstance(lot, PrivateListing))
+    assert listing.asking_price_cad == Decimal("8000")
+    # And it is genuinely childless (no auction_lot row).
+    assert await session.get(AuctionLot, listing.id) is None
+    assert await session.get(VehicleOffer, listing.id) is not None
 
 
 @pytest.mark.asyncio

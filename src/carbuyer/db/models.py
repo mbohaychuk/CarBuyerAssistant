@@ -1,11 +1,20 @@
 """ORM models for the auction MVP.
 
-Worker column-ownership rule: each block under AuctionLot is annotated with
-the worker that owns the columns. Workers UPDATE only their own columns; never
-session.merge(lot) the whole row back. Bid-poller updates bid-state; enricher
-updates enrichment + rarity (LLM); valuator updates valuation +
-historical_comp_count; vision-batcher updates vision_*; notifier updates
-*_notified_at; user actions come from the dashboard.
+Storage is supertype/subtype (joined-table inheritance): ``VehicleOffer`` is the
+source-agnostic parent (``vehicle_offer``) carrying the shared pipeline columns
++ the four status columns the queue drives; ``AuctionLot`` and ``PrivateListing``
+are children that share its primary key and add channel-specific columns. The
+discriminator is the parent ``offer_kind`` column; the absence of an
+``auction_lot`` child row is what makes an offer "private" conceptually.
+
+Worker column-ownership rule: each block is annotated with the worker that owns
+the columns. Workers UPDATE only their own columns; never session.merge() the
+whole row back. Bid-poller updates bid-state (auction child); enricher updates
+enrichment + rarity (parent, LLM); valuator updates valuation +
+historical_comp_count (parent); vision-batcher updates vision_* (parent);
+notifier updates notification bookkeeping (parent) + the per-trigger
+*_notified_at stamps (auction child); user actions come from the dashboard
+(parent).
 """
 
 from __future__ import annotations
@@ -116,22 +125,26 @@ class Auction(Base, TimestampMixin):
     )
 
 
-class AuctionLot(Base, TimestampMixin):
-    __tablename__ = "auction_lots"
+class VehicleOffer(Base, TimestampMixin):
+    """Source-agnostic parent of every offer (auction lot or private listing).
 
-    # ── Owned by: lot-scraper (initial insert + URL/photo refresh) ──────────
+    Holds the shared pipeline columns: vehicle facts, enrichment, vision,
+    valuation, the four pipeline-status columns the queue drives, and the
+    user-action fields. ``offer_kind`` is the polymorphic discriminator;
+    children share this row's primary key.
+    """
+
+    __tablename__ = "vehicle_offer"
+
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    auction_id: Mapped[int] = mapped_column(
-        ForeignKey("auctions.id", ondelete="CASCADE"),
-        index=True,
-    )
-    source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    # HiBid exposes two ids per lot: stable `itemId` (vehicle identity, stored
-    # in source_lot_id, used as upsert key) and a per-listing row `id` (used
-    # by HiBid's eventItemIds filter for single-lot lookups in bid_poller).
-    # Other sources don't need this and leave it NULL.
-    source_lot_row_id: Mapped[int | None] = mapped_column(BigInteger)
-    lot_number: Mapped[str | None] = mapped_column(String(64))
+    # Discriminator: written from each subclass's polymorphic_identity on ORM
+    # insert; the raw upsert paths set it explicitly. No subclass uses 'offer'.
+    offer_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    # ── Owned by: source-scraper (initial insert + URL/photo refresh) ───────
+    # Source-agnostic listing content. parser_version + title/description/photos
+    # live here because the content-change cascade reads them as a single-row
+    # snapshot; year/make/model/... are normalized in place by the enricher.
     url: Mapped[str] = mapped_column(Text, nullable=False)
     # parser_version: the source plugin's parser version at the time this row
     # was scraped. Used to detect rows that need re-enrichment after a parser
@@ -145,15 +158,8 @@ class AuctionLot(Base, TimestampMixin):
         server_default=text("'{}'::text[]"),
         nullable=False,
     )
-    # Per-lot end time. NULL for HiBid (auction.scheduled_end_at covers the
-    # whole event); populated for McDougall where each lot in an auction-event
-    # has its own close time. bid_poller coalesces auction-then-lot when
-    # priority-sorting and force-close-checking.
-    scheduled_end_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True,
-    )
 
-    # ── Owned by: lot-scraper (initial), description-enricher (LLM normalization) ──
+    # ── Owned by: source-scraper (initial), description-enricher (LLM) ──────
     year: Mapped[int | None] = mapped_column(Integer)
     make: Mapped[str | None] = mapped_column(String(64), index=True)
     model: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -237,21 +243,6 @@ class AuctionLot(Base, TimestampMixin):
         server_default=text("'[]'::jsonb"),
         nullable=False,
     )
-
-    # ── Owned by: bid-poller (continuous tiered cadence) ────────────────────
-    current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
-    last_bid_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    bid_count_visible: Mapped[int | None] = mapped_column(Integer)
-    reserve_met: Mapped[bool | None] = mapped_column(Boolean)
-    lot_status: Mapped[str] = mapped_column(
-        String(32),
-        nullable=False,
-        default="open",
-        server_default="open",
-        index=True,
-    )
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
     # ── Owned by: valuator ──────────────────────────────────────────────────
     comp_count: Mapped[int | None] = mapped_column(Integer)
@@ -356,12 +347,9 @@ class AuctionLot(Base, TimestampMixin):
     # of low-evidence listings.
     description_quality: Mapped[str | None] = mapped_column(String(16))
 
-    # ── Owned by: notifier (one timestamp per trigger type) ─────────────────
-    early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    cheap_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    closing_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    trajectory_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    extended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ── Owned by: notifier (delivery bookkeeping; pairs with status) ────────
+    # The per-trigger fire-once *_notified_at stamps live on the auction child
+    # (they are auction-trigger state); private listings alert via want_matches.
     last_notified_channel: Mapped[str | None] = mapped_column(String(64))
 
     # ── Owned by: dashboard (user input) ────────────────────────────────────
@@ -375,6 +363,113 @@ class AuctionLot(Base, TimestampMixin):
         index=True,
     )
 
+    @property
+    def offer_price(self) -> Decimal | None:
+        """Channel-specific headline price (auction high bid vs private asking);
+        overridden per subtype so callers don't isinstance-branch the price."""
+        return None
+
+    __mapper_args__ = {  # noqa: RUF012 -- SQLAlchemy declarative dunder, not a ClassVar
+        "polymorphic_on": offer_kind,
+        "polymorphic_identity": "offer",
+        # Load child columns inline via LEFT OUTER JOIN on any select(VehicleOffer)
+        # so a polymorphic load is a single query. Async forbids the per-row lazy
+        # second query SQLAlchemy would otherwise issue to fetch subclass columns.
+        "with_polymorphic": "*",
+    }
+
+    __table_args__ = (
+        Index("ix_vehicle_offer_make_model_year", "make", "model", "year"),
+        # Decomposed from the old composite (price_deal_score, lot_status):
+        # lot_status now lives on the auction child, so it gets its own index
+        # there; the deal-score scan keys on the parent column alone.
+        Index("ix_vehicle_offer_price_deal_score", "price_deal_score"),
+        Index("ix_vehicle_offer_rarity_score", "rarity_score"),
+        # Partial indexes for queue claims — most rows are non-pending, so a
+        # full-table b-tree on the status column is mostly dead weight.
+        Index(
+            "ix_vehicle_offer_enrichment_pending",
+            "id",
+            postgresql_where=text("enrichment_status = 'pending'"),
+        ),
+        Index(
+            "ix_vehicle_offer_valuation_pending",
+            "id",
+            postgresql_where=text("valuation_status = 'pending'"),
+        ),
+        Index(
+            "ix_vehicle_offer_vision_pending",
+            "id",
+            postgresql_where=text("vision_status = 'pending'"),
+        ),
+        Index(
+            "ix_vehicle_offer_notification_pending",
+            "id",
+            postgresql_where=text("notification_status = 'pending'"),
+        ),
+    )
+
+
+class AuctionLot(VehicleOffer):
+    """Auction-specific child of VehicleOffer (shared PK).
+
+    Carries bid state, lot lifecycle, and the per-trigger fire-once notify
+    stamps. The bid-poller is the only worker that touches bid columns; the
+    absence of one of these rows marks a parent offer as non-auction.
+    """
+
+    __tablename__ = "auction_lot"
+
+    # Shared PK → parent. Cascade so deleting the offer removes the child.
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("vehicle_offer.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+
+    # ── Owned by: lot-scraper ───────────────────────────────────────────────
+    auction_id: Mapped[int] = mapped_column(
+        ForeignKey("auctions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_lot_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # HiBid exposes two ids per lot: stable `itemId` (vehicle identity, stored
+    # in source_lot_id, used as upsert key) and a per-listing row `id` (used
+    # by HiBid's eventItemIds filter for single-lot lookups in bid_poller).
+    # Other sources don't need this and leave it NULL.
+    source_lot_row_id: Mapped[int | None] = mapped_column(BigInteger)
+    lot_number: Mapped[str | None] = mapped_column(String(64))
+    # Per-lot end time. NULL for HiBid (auction.scheduled_end_at covers the
+    # whole event); populated for McDougall where each lot in an auction-event
+    # has its own close time. bid_poller coalesces auction-then-lot when
+    # priority-sorting and force-close-checking.
+    scheduled_end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True,
+    )
+
+    # ── Owned by: bid-poller (continuous tiered cadence) ────────────────────
+    current_high_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    last_bid_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bid_count_visible: Mapped[int | None] = mapped_column(Integer)
+    reserve_met: Mapped[bool | None] = mapped_column(Boolean)
+    lot_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="open",
+        server_default="open",
+        index=True,
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+
+    # ── Owned by: notifier (one timestamp per auction trigger type) ─────────
+    early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cheap_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closing_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trajectory_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    extended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     auction: Mapped[Auction] = relationship(back_populates="lots", lazy="raise")
     bid_history: Mapped[list[AuctionBidHistory]] = relationship(
         back_populates="lot",
@@ -383,38 +478,65 @@ class AuctionLot(Base, TimestampMixin):
         passive_deletes=True,  # delegate child DELETE to DB FK ondelete=CASCADE; skip child SELECT
     )
 
+    @property
+    def offer_price(self) -> Decimal | None:
+        return self.current_high_bid_cad
+
+    __mapper_args__ = {"polymorphic_identity": "auction"}  # noqa: RUF012 -- SQLAlchemy dunder
+
     __table_args__ = (
         UniqueConstraint(
             "auction_id",
             "source_lot_id",
-            name="uq_auction_lots_auction_source_lot",
+            name="uq_auction_lot_auction_source_lot",
         ),
-        Index("ix_auction_lots_make_model_year", "make", "model", "year"),
-        Index("ix_auction_lots_price_deal_score", "price_deal_score", "lot_status"),
-        # rarity_score + auction.scheduled_end_at would be ideal but spans tables;
-        # the lot-level partial index works for early-warning triage at query time.
-        Index("ix_auction_lots_rarity_score", "rarity_score"),
-        # Partial indexes for queue claims — most rows are non-pending, so a
-        # full-table b-tree on the status column is mostly dead weight.
-        Index(
-            "ix_auction_lots_enrichment_pending",
-            "id",
-            postgresql_where=text("enrichment_status = 'pending'"),
-        ),
-        Index(
-            "ix_auction_lots_valuation_pending",
-            "id",
-            postgresql_where=text("valuation_status = 'pending'"),
-        ),
-        Index(
-            "ix_auction_lots_vision_pending",
-            "id",
-            postgresql_where=text("vision_status = 'pending'"),
-        ),
-        Index(
-            "ix_auction_lots_notification_pending",
-            "id",
-            postgresql_where=text("notification_status = 'pending'"),
+    )
+
+
+class PrivateListing(VehicleOffer):
+    """Private-sale child of VehicleOffer (shared PK).
+
+    Ships empty in Phase 1 S1; the listing write path + natural key land in S2.
+    Carries asking-price economics and listing lifecycle; never stores seller
+    PII or rehosted photos (metadata + deep-link only — Trader v. CarGurus).
+    """
+
+    __tablename__ = "private_listing"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("vehicle_offer.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    # Natural key — the source plugin + its stable per-listing id. Upsert dedup
+    # is keyed on (source, source_listing_id).
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_listing_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Where the vehicle is (for landed-cost distance + want province matching).
+    # The listing's location, analogous to an auction's pickup_province.
+    location_province: Mapped[str | None] = mapped_column(String(8))
+    asking_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    seller_type: Mapped[str | None] = mapped_column(String(32))
+    days_on_market: Mapped[int | None] = mapped_column(Integer)
+    listing_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disappeared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @property
+    def offer_price(self) -> Decimal | None:
+        return self.asking_price_cad
+
+    __mapper_args__ = {"polymorphic_identity": "private"}  # noqa: RUF012 -- SQLAlchemy dunder
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source", "source_listing_id", name="uq_private_listing_source_listing",
         ),
     )
 
@@ -424,7 +546,7 @@ class AuctionBidHistory(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     lot_id: Mapped[int] = mapped_column(
-        ForeignKey("auction_lots.id", ondelete="CASCADE"),
+        ForeignKey("auction_lot.id", ondelete="CASCADE"),
         index=True,
     )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -512,7 +634,8 @@ class Purchase(Base, TimestampMixin):
     inspection_cost_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     repair_cost_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     notes: Mapped[str | None] = mapped_column(Text)
-    linked_lot_id: Mapped[int | None] = mapped_column(ForeignKey("auction_lots.id"))
+    # Links to the offer parent (auction lot or private listing) it was bought from.
+    linked_lot_id: Mapped[int | None] = mapped_column(ForeignKey("vehicle_offer.id"))
 
 
 class Search(Base, TimestampMixin):
@@ -541,16 +664,16 @@ class Search(Base, TimestampMixin):
 
 
 class WantMatch(Base, TimestampMixin):
-    """One row per (want, lot) the matcher has linked — the fire-once ledger.
+    """One row per (want, offer) the matcher has linked — the fire-once ledger.
 
-    A lot can satisfy several wants, and each want must alert independently, so
-    dedup is keyed on (search_id, lot_id) here rather than on the per-lot
+    An offer can satisfy several wants, and each want must alert independently,
+    so dedup is keyed on (search_id, lot_id) here rather than on the per-offer
     *_notified_at columns. created_at (TimestampMixin) is the match time;
     notified_at gates the want alert (NULL = not yet sent); dismissed mutes it;
     want_relative_score is filled by the want-relative deal scorer.
 
-    lot_id FKs auction_lots today; at the Phase-1 vehicle_offer split it repoints
-    to the offer parent (the id value is preserved by the shared-PK design).
+    lot_id references the vehicle_offer parent (the column name is retained for
+    continuity); the shared-PK design preserves the id values across the split.
     """
 
     __tablename__ = "want_matches"
@@ -562,7 +685,7 @@ class WantMatch(Base, TimestampMixin):
         index=True,
     )
     lot_id: Mapped[int] = mapped_column(
-        ForeignKey("auction_lots.id", ondelete="CASCADE"),
+        ForeignKey("vehicle_offer.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

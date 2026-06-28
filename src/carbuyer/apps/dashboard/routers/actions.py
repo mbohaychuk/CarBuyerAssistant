@@ -15,7 +15,7 @@ from carbuyer.apps.dashboard.deps import (
     require_admin,
 )
 from carbuyer.db.enums import UserAction, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.models import Auction, AuctionLot, VehicleOffer
 from carbuyer.db.notify import notify
 from carbuyer.shared.logging import get_logger
 
@@ -146,7 +146,7 @@ async def rescore_all(
     _admin: Annotated[CurrentUser, Depends(require_admin)],
 ) -> Response:
     await session.execute(
-        update(AuctionLot).values(valuation_status=ValuationStatus.PENDING.value),
+        update(VehicleOffer).values(valuation_status=ValuationStatus.PENDING.value),
     )
     # Bulk wake-up: valuator's catchup sweep won't run until next restart,
     # and a single NOTIFY drains every pending row (payload ignored).

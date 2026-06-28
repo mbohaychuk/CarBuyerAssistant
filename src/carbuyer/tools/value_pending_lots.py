@@ -34,7 +34,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.sql import text
 
 from carbuyer.db.enums import ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale, VehicleOffer
 from carbuyer.db.notify import notify
 from carbuyer.db.session import get_session
 
@@ -229,9 +229,11 @@ async def cmd_requeue(args: argparse.Namespace) -> None:
         )
         target_ids = [r[0] for r in (await s.execute(target_ids_stmt)).all()]
         if target_ids:
+            # valuation_status lives on the vehicle_offer parent post-split;
+            # target_ids already came from the AuctionLot+Auction join above.
             await s.execute(
-                update(AuctionLot)
-                .where(AuctionLot.id.in_(target_ids))
+                update(VehicleOffer)
+                .where(VehicleOffer.id.in_(target_ids))
                 .values(valuation_status=ValuationStatus.PENDING),
             )
         ids = target_ids
@@ -254,11 +256,12 @@ async def cmd_summary(args: argparse.Namespace) -> None:
     """Show pipeline state — how many lots are at each valuation status."""
     async with get_session() as s:
         rows = (await s.execute(text(
-            "SELECT l.valuation_status, count(*) "
-            "FROM auction_lots l "
+            "SELECT vo.valuation_status, count(*) "
+            "FROM auction_lot l "
+            "JOIN vehicle_offer vo ON vo.id = l.id "
             "JOIN auctions a ON a.id = l.auction_id "
             "WHERE a.scheduled_end_at > now() "
-            "GROUP BY l.valuation_status ORDER BY count(*) DESC",
+            "GROUP BY vo.valuation_status ORDER BY count(*) DESC",
         ))).all()
         synth = (await s.execute(text(
             "SELECT count(*) FROM historical_sales "

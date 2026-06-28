@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import Any, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
+
+if TYPE_CHECKING:
+    from carbuyer.wants.criteria import WantCriteria
 
 SourceType = Literal["listing", "auction"]
 
@@ -139,6 +142,55 @@ class RawLot:
     extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
 
 
+@dataclass(frozen=True, slots=True)
+class ListingRef:
+    source: str
+    source_listing_id: str
+    url: str
+
+
+@dataclass(slots=True)
+class RawListing:
+    """One private-sale listing's parsed fields, ready to upsert.
+
+    Plugin author contract (mirrors RawLot, narrowed to fixed-price listings):
+
+    1. **`ref.source_listing_id` must be stable across re-ingestion** — it's half
+       of the `(source, source_listing_id)` upsert key. A per-session id that
+       rotates silently duplicates the listing every ingest cycle.
+
+    2. **`year`, `make`, `model`, `vin` are written only on INSERT** — they're raw
+       inputs the enricher later normalizes; a rescrape won't clobber them.
+
+    3. **Never set seller PII or rehosted photos.** `photos` holds source URLs for
+       deep-linking only; never store names/phones (PIPEDA) or copy photo bytes
+       (Trader v. CarGurus).
+
+    4. **`listing_status` permitted values** map to `db.enums.ListingStatus`
+       (active/sold/removed/price_changed).
+    """
+
+    ref: ListingRef
+    title: str | None
+    description: str | None
+    photos: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    year: int | None = None
+    make: str | None = None
+    model: str | None = None
+    trim: str | None = None
+    mileage_km: int | None = None
+    vin: str | None = None
+    asking_price_cad: Decimal | None = None
+    seller_type: str | None = None
+    days_on_market: int | None = None
+    listing_status: str = "active"
+    # Where the vehicle is — drives landed-cost distance + want province match.
+    location_province: str | None = None
+    first_seen_at: datetime | None = None
+    # See RawLot.extra. Source-specific fields awaiting a canonical column.
+    extra: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+
+
 @dataclass(slots=True)
 class BidObservation:
     ref: LotRef
@@ -225,6 +277,23 @@ class BidPoller(Source):
 
 class AuctionSource(AuctionDiscoverer, AuctionFetcher, BidPoller):
     """Convenience union for plugins that implement all three auction roles."""
+
+
+class ListingSource(Source):
+    """Base for private-sale listing plugins (Kijiji, …).
+
+    A sibling of the auction roles, not a subtype — listings have no bids, so
+    there is no BidPoller. The want-list PULL model queries each source per
+    active want, so the contract is ``search_listings`` over a want's criteria
+    rather than a crawl-everything discover.
+    """
+
+    kind: ClassVar[SourceType] = "listing"
+
+    @abstractmethod
+    def search_listings(self, criteria: WantCriteria) -> AsyncIterator[RawListing]:
+        """Yield the listings on this source matching a want's criteria."""
+        ...
 
 
 # ── Registry ────────────────────────────────────────────────────────────────

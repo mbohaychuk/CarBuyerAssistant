@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from carbuyer.db.models import AuctionLot
+from carbuyer.db.models import VehicleOffer
 from carbuyer.wants.criteria import WantCriteria
 
 
@@ -30,7 +30,7 @@ class WantDeal:
 
 
 def score_want_deal(
-    lot: AuctionLot,
+    lot: VehicleOffer,
     criteria: WantCriteria,
     *,
     offer_price_cad: Decimal | int | None,

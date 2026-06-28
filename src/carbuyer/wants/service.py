@@ -18,8 +18,15 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from carbuyer.db.enums import LotStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
+from carbuyer.db.enums import ListingStatus, LotStatus, ValuationStatus
+from carbuyer.db.models import (
+    Auction,
+    AuctionLot,
+    PrivateListing,
+    Search,
+    VehicleOffer,
+    WantMatch,
+)
 from carbuyer.shared.logging import get_logger
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
@@ -50,7 +57,7 @@ def _criteria_or_none(want: Search) -> WantCriteria | None:
 
 async def evaluate_lot_against_wants(
     session: AsyncSession,
-    lot: AuctionLot,
+    lot: VehicleOffer,
     *,
     pickup_province: str | None = None,
     offer_price_cad: Decimal | int | None = None,
@@ -108,6 +115,33 @@ async def backfill_want(session: AsyncSession, want: Search) -> int:
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.current_high_bid_cad)
         await repo.upsert_want_match(
             session, search_id=want.id, lot_id=lot.id, want_relative_score=deal.score
+        )
+        count += 1
+
+    # Private listings already valued — same predicate, channel-specific price +
+    # province injected (the matcher is source-agnostic). Active candidates only;
+    # sold/removed listings are comps, not buy candidates.
+    listings = (
+        await session.execute(
+            select(PrivateListing)
+            .where(
+                PrivateListing.listing_status == ListingStatus.ACTIVE.value,
+                PrivateListing.valuation_status == ValuationStatus.DONE.value,
+                PrivateListing.make.is_not(None),
+            )
+            .limit(_BACKFILL_LIMIT)
+        )
+    ).scalars().all()
+    for listing in listings:
+        if not matches(
+            listing, criteria,
+            pickup_province=listing.location_province,
+            offer_price_cad=listing.asking_price_cad,
+        ):
+            continue
+        deal = score_want_deal(listing, criteria, offer_price_cad=listing.asking_price_cad)
+        await repo.upsert_want_match(
+            session, search_id=want.id, lot_id=listing.id, want_relative_score=deal.score,
         )
         count += 1
     return count
