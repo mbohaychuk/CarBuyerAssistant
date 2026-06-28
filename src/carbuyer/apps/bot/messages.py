@@ -39,6 +39,9 @@ class LotEmbedData:
     top_green_flags: tuple[str, ...]
     suspicious_underprice: bool
     scheduled_end_at: datetime | None
+    # Private-listing price-drop re-alert: the asking price before the latest
+    # drop (None for auctions / no prior drop).
+    previous_asking_cad: Decimal | None = None
 
 
 def _vehicle_title(d: LotEmbedData) -> str:
@@ -128,6 +131,17 @@ def render_want_match_text(
     gracefully to '(not enough comps to price)' when the lot is uncomped."""
     title = _vehicle_title(d)
     price = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no price yet)"
+    drop_line = ""
+    if (
+        d.previous_asking_cad is not None
+        and d.current_high_bid_cad is not None
+        and d.previous_asking_cad > d.current_high_bid_cad
+    ):
+        drop = int(d.previous_asking_cad - d.current_high_bid_cad)
+        drop_line = (
+            f"\U0001f4c9 Price drop: ${int(d.previous_asking_cad):,} -> "
+            f"${int(d.current_high_bid_cad):,} (down ${drop:,})\n"
+        )
     parts: list[str] = []
     if pct_below_market is not None and dollars_below_market_cad is not None:
         pct = round(pct_below_market * 100)
@@ -144,6 +158,7 @@ def render_want_match_text(
         budget = f"\n${int(dollars_under_ceiling_cad):,} under your budget"
     return (
         f"\U0001f3af Matches your want “{want_name}”\n"
+        f"{drop_line}"
         f"{title} ({d.location})\n"
         f"Price: {price} · {deal_line}{budget}\n"
         f"{d.url}"

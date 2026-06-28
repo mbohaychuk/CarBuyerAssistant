@@ -517,6 +517,9 @@ class PrivateListing(VehicleOffer):
     # The listing's location, analogous to an auction's pickup_province.
     location_province: Mapped[str | None] = mapped_column(String(8))
     asking_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    # The asking price before the most recent change — drives the price-drop
+    # re-alert (was → now) when it is higher than the current asking.
+    previous_asking_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     seller_type: Mapped[str | None] = mapped_column(String(32))
     days_on_market: Mapped[int | None] = mapped_column(Integer)
     listing_status: Mapped[str] = mapped_column(

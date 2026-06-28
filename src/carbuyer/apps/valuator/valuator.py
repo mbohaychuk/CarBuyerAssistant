@@ -46,6 +46,7 @@ from carbuyer.db.models import (
     HistoricalSale,
     PrivateListing,
     VehicleOffer,
+    WantMatch,
 )
 from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import (
@@ -320,16 +321,26 @@ async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
         lot.notification_status = _decide_notification_status(lot)
 
     # Want-list match: a lot the user explicitly asked for must alert regardless
-    # of the system deal filter (it may even be INSUFFICIENT-priced). A new match
-    # forces PENDING; re-matching an already-known lot only refreshes its score.
-    new_want_matches = await evaluate_lot_against_wants(
+    # of the system deal filter (it may even be INSUFFICIENT-priced). Force
+    # PENDING when ANY want match is un-notified — covers a brand-new match AND
+    # a match whose fire-once stamp was cleared by a price drop (re-alert).
+    await evaluate_lot_against_wants(
         session,
         lot,
         pickup_province=want_province,
         offer_price_cad=want_price,
     )
-    if new_want_matches:
+    if await _has_unnotified_want_match(session, lot.id):
         lot.notification_status = NotificationStatus.PENDING
+
+
+async def _has_unnotified_want_match(session: AsyncSession, offer_id: int) -> bool:
+    stmt = select(WantMatch.id).where(
+        WantMatch.lot_id == offer_id,
+        WantMatch.notified_at.is_(None),
+        WantMatch.dismissed.is_(False),
+    ).limit(1)
+    return (await session.execute(stmt)).first() is not None
 
 
 async def _process_one(lot_id: int) -> str:

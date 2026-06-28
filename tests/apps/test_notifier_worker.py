@@ -203,6 +203,54 @@ async def test_process_one_posts_want_match_for_private_listing(
 
 
 @pytest.mark.asyncio
+async def test_process_one_renders_price_drop_for_private_listing(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private listing whose asking dropped (previous_asking > asking) and
+    whose want_match was re-opened fires a want alert rendered as a price drop."""
+    session = _patched_get_session
+    listing = PrivateListing(
+        source="kijiji", source_listing_id="K1", url="http://k/1",
+        title="2005 Lexus GX 470", description="x" * 200,
+        make="Lexus", model="GX 470", year=2005,
+        asking_price_cad=Decimal("13500"), previous_asking_price_cad=Decimal("15000"),
+        seller_type="private", location_province="AB", listing_status="active",
+        expected_value_cad=Decimal("17000"), value_mid_cad=Decimal("17000"),
+        comp_count=6, price_deal_score=0.2, rarity_score=0.0,
+        notification_status="pending",
+    )
+    session.add(listing)
+    want = Search(name="gx470 base", config={})
+    session.add(want)
+    await session.flush()
+    # Un-notified (re-opened by the price-drop reset).
+    session.add(WantMatch(search_id=want.id, lot_id=listing.id, want_relative_score=0.2))
+    await session.flush()
+    lid = listing.id
+
+    posted: list[str] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lid_: int, *, session: object = None
+    ) -> bool:
+        posted.append(content)
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lid, http_session=MagicMock())
+    assert outcome == "done"
+    assert len(posted) == 1
+    assert "Price drop" in posted[0]
+    assert "$15,000" in posted[0]  # was
+    assert "$13,500" in posted[0]  # now
+
+
+@pytest.mark.asyncio
 async def test_process_one_skips_already_notified_want_match(
     _patched_get_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

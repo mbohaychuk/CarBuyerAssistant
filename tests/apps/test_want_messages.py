@@ -59,6 +59,45 @@ def test_render_want_match_full() -> None:
     assert "http://x/lot" in text
 
 
+def test_render_want_match_shows_price_drop() -> None:
+    text = render_want_match_text(
+        _data(previous_asking_cad=Decimal("10000"), current_high_bid_cad=Decimal("8000")),
+        want_name="GX470",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "Price drop" in text
+    assert "$10,000" in text  # was
+    assert "$8,000" in text   # now
+
+
+def test_render_want_match_no_drop_line_without_previous() -> None:
+    text = render_want_match_text(
+        _data(),  # previous_asking_cad defaults to None
+        want_name="w",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "Price drop" not in text
+
+
+def test_render_want_match_no_drop_line_on_increase() -> None:
+    # previous < current (price went up) → no drop line.
+    text = render_want_match_text(
+        _data(previous_asking_cad=Decimal("8000"), current_high_bid_cad=Decimal("9000")),
+        want_name="w",
+        pct_below_market=None,
+        dollars_below_market_cad=None,
+        dollars_under_ceiling_cad=None,
+        comp_count=None,
+    )
+    assert "Price drop" not in text
+
+
 def test_render_want_match_uncomped() -> None:
     text = render_want_match_text(
         _data(),

@@ -165,6 +165,7 @@ def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
 
 
 def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
+    previous_asking = None
     if auction is not None:
         location = (
             ", ".join(filter(None, [auction.pickup_city, auction.pickup_province])) or "?"
@@ -173,6 +174,7 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
     else:
         location = (lot.location_province if isinstance(lot, PrivateListing) else None) or "?"
         end_at = None
+        previous_asking = lot.previous_asking_price_cad if isinstance(lot, PrivateListing) else None
     return LotEmbedData(
         lot_id=lot.id,
         url=lot.url,
@@ -198,6 +200,7 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
         ),
         suspicious_underprice=lot.suspicious_underprice_flag,
         scheduled_end_at=end_at,
+        previous_asking_cad=previous_asking,
     )
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,7 @@ from carbuyer.db.enums import (
     ValuationStatus,
     VisionStatus,
 )
-from carbuyer.db.models import Auction, AuctionLot, PrivateListing, VehicleOffer
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, VehicleOffer, WantMatch
 from carbuyer.sources.base import RawAuction, RawListing, RawLot
 from carbuyer.sources.resolver import canonicalize_url
 
@@ -327,10 +327,22 @@ async def upsert_private_listing(
     # A price change with no content change must still re-value (the deal score
     # + want matching are price-dependent — a drop into a want's budget has to
     # re-fire). Re-pend valuation only, not enrichment (make/model unchanged).
-    if (
-        existing.asking_price_cad != pre_asking
-        and existing.valuation_status != ValuationStatus.PENDING
-    ):
-        existing.valuation_status = ValuationStatus.PENDING
+    if existing.asking_price_cad != pre_asking:
+        existing.previous_asking_price_cad = pre_asking
+        if existing.valuation_status != ValuationStatus.PENDING:
+            existing.valuation_status = ValuationStatus.PENDING
+        # Price DROP on an already-matched listing → re-alert: clear the
+        # fire-once stamp on its active want matches so the notifier re-delivers
+        # (rendered as a price drop). The re-value re-pends notification.
+        if (
+            pre_asking is not None
+            and existing.asking_price_cad is not None
+            and existing.asking_price_cad < pre_asking
+        ):
+            await session.execute(
+                update(WantMatch)
+                .where(WantMatch.lot_id == existing.id, WantMatch.dismissed.is_(False))
+                .values(notified_at=None)
+            )
         await session.flush()
     return existing
