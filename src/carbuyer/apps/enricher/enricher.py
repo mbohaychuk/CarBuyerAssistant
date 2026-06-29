@@ -444,8 +444,12 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:  # noqa
 
     nv = result.output.normalized_vehicle
     year = nv.year or snap.year
-    canonical = await _canonical_model(nv.make, nv.model, year)
-    recall_count, complaint_count = await _reliability(nv.make, canonical or nv.model, year)
+    try:
+        canonical = await _canonical_model(nv.make, nv.model, year)
+        recall_count, complaint_count = await _reliability(nv.make, canonical or nv.model, year)
+    except Exception:
+        log.exception("post-enrichment normalization failed; proceeding without it", lot_id=lot_id)
+        canonical, recall_count, complaint_count = None, None, None
 
     async with get_session() as s, s.begin():
         lot = await s.get(VehicleOffer, lot_id)

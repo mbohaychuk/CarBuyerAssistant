@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.notifier.notifier import _load_want_alerts
 from carbuyer.apps.valuator.valuator import _has_unnotified_want_match
-from carbuyer.db.models import Auction, AuctionLot, PrivateListing, WantMatch
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, Search, WantMatch
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.service import backfill_want
@@ -169,7 +169,7 @@ async def test_dismissed_duplicate_does_not_alert_on_either_path(session: AsyncS
 
     assert await _has_unnotified_want_match(session, primary.id) is True   # primary alerts
     assert await _has_unnotified_want_match(session, dup.id) is False       # dup does not
-    assert await _load_want_alerts(session, dup) == []                      # nor in the notifier
+    assert await _load_want_alerts(session, dup, pickup_province=None) == []  # nor in the notifier
 
 
 async def test_reeval_of_dismissed_duplicate_stays_dismissed(session: AsyncSession) -> None:
@@ -211,3 +211,19 @@ async def test_backfill_dedups_same_vin(session: AsyncSession) -> None:
     ).scalars().all()
     assert {m.lot_id for m in rows} == {lot.id, listing.id}  # both match rows exist
     assert sum(1 for m in rows if not m.dismissed) == 1  # exactly one is live
+
+
+async def test_has_unnotified_want_match_ignores_disabled_search(session: AsyncSession) -> None:
+    """FIX 6: a disabled Search with an un-notified match must not force PENDING."""
+    auction = await _auction(session)
+    lot = _auction_lot(auction, vin=None, sid="L-disabled")
+    session.add(lot)
+    want = Search(name="disabled-want", config={}, enabled=False)
+    session.add(want)
+    await session.flush()
+    wm = WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.1)
+    session.add(wm)
+    await session.flush()
+
+    result = await _has_unnotified_want_match(session, lot.id)
+    assert result is False

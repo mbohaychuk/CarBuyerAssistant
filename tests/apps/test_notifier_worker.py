@@ -687,3 +687,40 @@ async def test_catchup_sweep_recovers_orphaned_in_progress(
     await session.refresh(lot)
     # Recovery + downstream processing both ran; the lot is no longer stuck.
     assert lot.notification_status != NotificationStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_process_one_skips_stale_want_match_criteria_no_longer_satisfied(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A want_match that is un-notified but whose criteria the lot no longer
+    satisfies (e.g. price dropped the want ceiling below the bid) must not re-fire.
+    FIX 3: _load_want_alerts re-checks matches() before queuing an alert."""
+    session = _patched_get_session
+    _, lot = _seed_lot(session, price_deal_score=0.0)
+    lot.current_high_bid_cad = Decimal("10000")  # above the 5000 ceiling below
+    # Want whose price ceiling is below the lot's current bid.
+    want = Search(name="stale-want", config={"price_ceiling_cad": 5000})
+    session.add(want)
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.2))
+    await session.flush()
+    lot_id = lot.id
+
+    posted: list[int] = []
+
+    async def fake_post(
+        channel_id: int, content: str, lid: int, *, session: object = None,
+    ) -> bool:
+        posted.append(lid)
+        return True
+
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr(
+        "carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242}
+    )
+
+    outcome = await _process_one(lot_id, http_session=MagicMock())
+    assert outcome == "skipped"
+    assert posted == []

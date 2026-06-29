@@ -8,6 +8,8 @@ make case-insensitively); only the model spelling is canonicalized.
 """
 from __future__ import annotations
 
+from typing import cast
+
 import httpx
 
 from carbuyer.shared.logging import get_logger
@@ -36,13 +38,18 @@ async def canonical_model(
     try:
         resp = await client.get(url)
         resp.raise_for_status()
-        results = resp.json().get("Results", [])
-    except (httpx.HTTPError, ValueError) as exc:
+        payload = resp.json()
+        results: list[object] = (
+            cast("dict[str, object]", payload).get("Results", [])  # type: ignore[arg-type]
+            if isinstance(payload, dict) else []
+        )
+        target = _key(model)
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            name = cast("dict[str, object]", row).get("Model_Name")
+            if isinstance(name, str) and _key(name) == target:
+                return name
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
         log.warning("vpic lookup failed", make=make, year=year, error=str(exc))
-        return model
-    target = _key(model)
-    for row in results:
-        name = row.get("Model_Name")
-        if isinstance(name, str) and _key(name) == target:
-            return name
     return model

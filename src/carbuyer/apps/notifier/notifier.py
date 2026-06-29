@@ -48,6 +48,7 @@ from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.deal import WantDeal, score_want_deal
+from carbuyer.wants.matcher import matches
 
 log = get_logger("notifier")
 
@@ -62,7 +63,12 @@ class WantAlert:
     deal: WantDeal
 
 
-async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[WantAlert]:
+async def _load_want_alerts(
+    session: AsyncSession,
+    lot: VehicleOffer,
+    *,
+    pickup_province: str | None,
+) -> list[WantAlert]:
     """Un-notified, non-dismissed want_matches for this lot, each with its want
     name and a freshly-computed deal breakdown for the message."""
     rows = (
@@ -83,6 +89,10 @@ async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[Wa
             criteria = WantCriteria.model_validate(config)
         except ValidationError:
             log.warning("skipping want alert with invalid config", want_match_id=want_match_id)
+            continue
+        if not matches(
+            lot, criteria, pickup_province=pickup_province, offer_price_cad=lot.offer_price,
+        ):
             continue
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.offer_price)
         alerts.append(WantAlert(want_match_id, want_name, deal))
@@ -232,7 +242,13 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
             if auction is None:
                 log.warning("auction missing for lot", lot_id=lot_id)
                 return "missing"
-        want_alerts = await _load_want_alerts(s, lot)
+        want_alerts = await _load_want_alerts(
+            s, lot,
+            pickup_province=(
+                auction.pickup_province if auction is not None
+                else (lot.location_province if isinstance(lot, PrivateListing) else None)
+            ),
+        )
 
     now = datetime.now(UTC)
     # Auction triggers (closing_soon, lot_extended) gate on bid state + scheduled

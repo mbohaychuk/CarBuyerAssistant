@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.dashboard.app import templates
 from carbuyer.apps.dashboard.deps import CurrentUser, current_user, get_session
-from carbuyer.db.models import AuctionLot, WantMatch
+from carbuyer.db.models import VehicleOffer, WantMatch
 from carbuyer.llm.openai_provider import OpenAIProvider
 from carbuyer.llm.schemas import ExpandedModel
 from carbuyer.shared.logging import get_logger
@@ -162,6 +162,14 @@ async def wants_create(
                 max_mileage_km=_int_or_none(max_mileage_km),
                 provinces=provinces, condition_min=condition_min,
             )
+        if not criteria.model_specs and not criteria.makes and not criteria.models:
+            return await _render_list(
+                request, session,
+                error=(
+                    "Add at least one make/model — expand an archetype"
+                    " and keep a row, or use the manual form."
+                ),
+            )
         want = await repo.create_want(session, name=name, criteria=criteria)
         await service.backfill_want(session, want)  # seed matches from existing lots
     except ValidationError as exc:
@@ -207,8 +215,8 @@ async def want_detail(
         raise HTTPException(status_code=404)
     rows = (
         await session.execute(
-            select(WantMatch, AuctionLot)
-            .join(AuctionLot, AuctionLot.id == WantMatch.lot_id)
+            select(WantMatch, VehicleOffer)
+            .join(VehicleOffer, VehicleOffer.id == WantMatch.lot_id)
             .where(WantMatch.search_id == want_id, WantMatch.dismissed.is_(False))
             .order_by(WantMatch.want_relative_score.desc().nulls_last())
         )

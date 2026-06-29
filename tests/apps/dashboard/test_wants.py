@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
 from carbuyer.apps.dashboard.routers.wants import _parse_model_specs
-from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
+from carbuyer.db.models import Auction, AuctionLot, PrivateListing, Search, WantMatch
 from carbuyer.llm.schemas import ExpandedModel
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import ModelSpec, WantCriteria
@@ -168,6 +168,38 @@ async def test_expand_endpoint_renders_rows(
     assert "GX 470" in r.text
     assert "2003" in r.text
     assert "J120 4Runner platform" in r.text
+
+
+async def test_want_detail_shows_private_listing_match(_patch_deps: AsyncSession) -> None:
+    """FIX 4: want_detail must show PrivateListing matches, not only AuctionLot rows."""
+    session = _patch_deps
+    listing = PrivateListing(
+        source="kijiji", source_listing_id="PL1", url="http://k/1",
+        title="2010 Nissan Xterra", make="Nissan", model="Xterra", year=2010,
+        asking_price_cad=Decimal("8000"), listing_status="active",
+    )
+    want = Search(name="private xterra", config={})
+    session.add_all([listing, want])
+    await session.flush()
+    wm = WantMatch(search_id=want.id, lot_id=listing.id, want_relative_score=0.2)
+    session.add(wm)
+    await session.commit()
+
+    async with _client() as c:
+        r = await c.get(f"/wants/{want.id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "Xterra" in r.text
+
+
+async def test_create_want_with_no_makes_or_models_shows_error(_patch_deps: AsyncSession) -> None:
+    """FIX 5: submitting the archetype form with all rows unchecked (empty model_specs)
+    and no flat makes/models must not create a match-everything want."""
+    session = _patch_deps
+    async with _client() as c:
+        r = await c.post("/wants", data={"name": "empty-want"})
+    assert r.status_code == 200  # noqa: PLR2004 -- re-render with error, not redirect
+    assert "make/model" in r.text.lower()
+    assert await repo.list_wants(session) == []
 
 
 def test_parse_model_specs_keeps_only_included_rows() -> None:

@@ -42,6 +42,7 @@ from carbuyer.db.models import (
     Auction,
     AuctionLot,
     PrivateListing,
+    Search,
     VehicleOffer,
     WantMatch,
 )
@@ -281,11 +282,17 @@ async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
 
 
 async def _has_unnotified_want_match(session: AsyncSession, offer_id: int) -> bool:
-    stmt = select(WantMatch.id).where(
-        WantMatch.lot_id == offer_id,
-        WantMatch.notified_at.is_(None),
-        WantMatch.dismissed.is_(False),
-    ).limit(1)
+    stmt = (
+        select(WantMatch.id)
+        .join(Search, Search.id == WantMatch.search_id)
+        .where(
+            WantMatch.lot_id == offer_id,
+            WantMatch.notified_at.is_(None),
+            WantMatch.dismissed.is_(False),
+            Search.enabled.is_(True),
+        )
+        .limit(1)
+    )
     return (await session.execute(stmt)).first() is not None
 
 

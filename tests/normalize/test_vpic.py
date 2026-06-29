@@ -45,3 +45,21 @@ async def test_missing_year_or_fields_returns_input() -> None:
         assert await vpic.canonical_model("Ford", "F150", None, client=client) == "F150"
         assert await vpic.canonical_model(None, "F150", 2015, client=client) == "F150"
         assert await vpic.canonical_model("Ford", None, 2015, client=client) is None
+
+
+async def test_null_json_body_returns_input() -> None:
+    """200 whose body is JSON null must not raise — returns input model."""
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"null", headers={"content-type": "application/json"})
+    async with _client(httpx.MockTransport(handler)) as client:
+        out = await vpic.canonical_model("Ford", "F150", 2015, client=client)
+    assert out == "F150"
+
+
+async def test_non_dict_results_element_returns_input() -> None:
+    """200 whose Results list contains a non-dict entry must not raise."""
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"Results": ["not-a-dict", None, 42]})
+    async with _client(httpx.MockTransport(handler)) as client:
+        out = await vpic.canonical_model("Ford", "F150", 2015, client=client)
+    assert out == "F150"
