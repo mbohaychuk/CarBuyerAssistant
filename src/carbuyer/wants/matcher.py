@@ -63,6 +63,47 @@ def matches(
     return all(checks)
 
 
+def could_match_any_want(
+    *,
+    make: str | None,
+    model: str | None,
+    year: int | None,
+    title: str | None,
+    criteria_list: Sequence[WantCriteria],
+) -> bool:
+    """Cheap upstream gate (WG1): does this RAW offer plausibly match at least one
+    want, using only scraped fields — no LLM? Keeps cost off the firehose: a lot
+    that matches no want is never enriched/valued/stored.
+
+    Make/model are checked against the parsed fields OR the raw title text, so a lot
+    whose make lives only in the title isn't dropped. Year only excludes when known
+    and out of range. Everything the LLM fills (trim/transmission/condition) is
+    ignored here — the precise `matches()` runs post-enrichment to create the actual
+    want_match. Empty `criteria_list` (no active wants) matches nothing.
+    """
+    # ponytail: substring title scan, not word-boundary — a coarse gate's false
+    # positives cost one enrichment; tighten to \b boundaries only if they show up.
+    hay = f"{make or ''} {model or ''} {title or ''}".lower()
+    return any(_coarse_match(c, year, hay) for c in criteria_list)
+
+
+def _coarse_match(c: WantCriteria, year: int | None, hay: str) -> bool:
+    if c.makes and not _any_term_in(c.makes, hay):
+        return False
+    if c.models and not _any_term_in(c.models, hay):
+        return False
+    if year is not None:  # unknown year is lenient (kept); known year must fit
+        if c.year_min is not None and year < c.year_min:
+            return False
+        if c.year_max is not None and year > c.year_max:
+            return False
+    return True
+
+
+def _any_term_in(terms: Sequence[str], hay: str) -> bool:
+    return any(t.strip().lower() in hay for t in terms if t.strip())
+
+
 def _in_set(value: str | None, allowed: Sequence[str], *, lenient_unknown: bool) -> bool:
     """Case-insensitive membership. Empty `allowed` = "any". A missing value —
     None, blank, or the "unknown" sentinel — is lenient (kept) or strict

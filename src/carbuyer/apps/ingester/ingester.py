@@ -30,13 +30,37 @@ from carbuyer.db.upserts import (
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
-from carbuyer.sources.base import SOURCES, ListingSource
+from carbuyer.sources.base import SOURCES, ListingSource, RawLot
 from carbuyer.sources.hibid.source import HibidSource
 from carbuyer.sources.mcdougall.source import McDougallSource
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.matcher import could_match_any_want
 
 log = get_logger("ingester")
+
+
+async def _load_active_criteria() -> list[WantCriteria]:
+    """Validated criteria of every enabled want (one bad row skipped, not fatal).
+    The want-first gate: no active wants → nothing is wanted."""
+    async with get_session() as s:
+        wants = await repo.list_wants(s, enabled_only=True)
+    out: list[WantCriteria] = []
+    for want in wants:
+        try:
+            out.append(WantCriteria.model_validate(want.config))
+        except ValidationError:
+            log.warning("skipping want with invalid config", want_id=want.id)
+    return out
+
+
+def _lot_wanted(raw_lot: RawLot, criteria_list: Sequence[WantCriteria]) -> bool:
+    """WG2 gate: keep an auction lot only if it could match some active want, using
+    scraped fields (parsed make/model/year or the title) — no LLM, no DB write yet."""
+    return could_match_any_want(
+        make=raw_lot.make, model=raw_lot.model, year=raw_lot.year,
+        title=raw_lot.title, criteria_list=criteria_list,
+    )
 
 # A strategy is an async function that returns lots-ingested count.
 # Registered in STRATEGIES below; dispatched once each per ingester run, with
@@ -50,10 +74,15 @@ _HIBID_PARSER_VERSION = "hibid/v2.0-cross-auction"
 _MCDOUGALL_PARSER_VERSION = "mcdougall/v1.0-catalog-walker"
 
 
-async def _ingest_one_hibid_province(source: HibidSource, province: str) -> int:
-    """Walk one province's HiBid lot stream end-to-end; return lots ingested."""
+async def _ingest_one_hibid_province(
+    source: HibidSource, province: str, criteria_list: Sequence[WantCriteria],
+) -> int:
+    """Walk one province's HiBid lot stream end-to-end; return lots ingested. Lots
+    matching no active want are dropped before any DB write (WG2)."""
     count = 0
     async for raw_auction, raw_lot in source.discover_vehicle_lots(province):
+        if not _lot_wanted(raw_lot, criteria_list):
+            continue
         async with get_session() as session, session.begin():
             auction = await upsert_auction(
                 session, raw_auction, discovered_via="ingester",
@@ -77,12 +106,16 @@ async def _run_hibid_lot_first() -> int:
     hibid_source = SOURCES.get(HibidSource.name)
     if not isinstance(hibid_source, HibidSource):
         raise RuntimeError("hibid plugin did not self-register")
+    criteria_list = await _load_active_criteria()
+    if not criteria_list:  # want-first: no active wants → don't even scrape
+        log.info("no active wants; skipping auction ingest", source=HibidSource.name)
+        return 0
     with structlog.contextvars.bound_contextvars(source=HibidSource.name):
         total = 0
         async with hibid_source:
             for province in settings.hibid_provinces:
                 log.info("ingest province start", province=province)
-                n = await _ingest_one_hibid_province(hibid_source, province)
+                n = await _ingest_one_hibid_province(hibid_source, province, criteria_list)
                 log.info("ingest province done", province=province, lots=n)
                 total += n
         log.info("ingest complete", total_lots=total)
@@ -99,10 +132,16 @@ async def _run_mcdougall_lot_first() -> int:
     mcdougall = SOURCES.get(McDougallSource.name)
     if not isinstance(mcdougall, McDougallSource):
         raise RuntimeError("mcdougall plugin did not self-register")
+    criteria_list = await _load_active_criteria()
+    if not criteria_list:  # want-first: no active wants → don't even scrape
+        log.info("no active wants; skipping auction ingest", source=McDougallSource.name)
+        return 0
     with structlog.contextvars.bound_contextvars(source=McDougallSource.name):
         count = 0
         async with mcdougall:
             async for raw_auction, raw_lot in mcdougall.discover_vehicle_lots():
+                if not _lot_wanted(raw_lot, criteria_list):
+                    continue
                 async with get_session() as session, session.begin():
                     auction = await upsert_auction(
                         session, raw_auction, discovered_via="ingester",
@@ -186,14 +225,7 @@ async def _run_listing_pull() -> int:
     independent: a source whose pull raises is logged and skipped (and NOT
     reconciled, so a transient failure can't mass-remove its listings).
     """
-    async with get_session() as s:
-        wants = await repo.list_wants(s, enabled_only=True)
-        criterias: list[WantCriteria] = []
-        for want in wants:
-            try:
-                criterias.append(WantCriteria.model_validate(want.config))
-            except ValidationError:
-                log.warning("skipping want with invalid config", want_id=want.id)
+    criterias = await _load_active_criteria()
     sources = [src for src in SOURCES.values() if isinstance(src, ListingSource)]
     if not sources or not criterias:
         return 0
