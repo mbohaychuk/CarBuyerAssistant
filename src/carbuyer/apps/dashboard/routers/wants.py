@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
@@ -11,10 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.dashboard.app import templates
 from carbuyer.apps.dashboard.deps import CurrentUser, current_user, get_session
 from carbuyer.db.models import AuctionLot, WantMatch
+from carbuyer.llm.openai_provider import OpenAIProvider
+from carbuyer.shared.logging import get_logger
 from carbuyer.wants import repo, service
-from carbuyer.wants.criteria import WantCriteria, first_error
+from carbuyer.wants.archetype import expand_archetype
+from carbuyer.wants.criteria import ModelSpec, WantCriteria, first_error
 
 router = APIRouter()
+log = get_logger("dashboard.wants")
 
 
 def _int_or_none(value: str | None) -> int | None:
@@ -46,6 +51,55 @@ async def _render_list(
     )
 
 
+async def _expand(text: str) -> list[ModelSpec]:
+    """Build a request-scoped provider + http client and expand. The single
+    monkeypatch seam for dashboard tests."""
+    async with OpenAIProvider() as provider, httpx.AsyncClient() as client:
+        return await expand_archetype(text, provider=provider, client=client)
+
+
+def _parse_model_specs(
+    makes: list[str], models: list[str],
+    year_mins: list[str], year_maxs: list[str], trims: list[str],
+    include: list[str],
+) -> list[ModelSpec]:
+    """Zip the parallel per-row form arrays into ModelSpec, keeping only rows
+    whose index is in `include` (the checked checkboxes)."""
+    keep = {int(i) for i in include if i.strip().isdigit()}
+    specs: list[ModelSpec] = []
+    for i, make in enumerate(makes):
+        if i not in keep or not make.strip() or not models[i].strip():
+            continue
+        specs.append(ModelSpec(
+            make=make.strip(),
+            model=models[i].strip(),
+            year_min=_int_or_none(year_mins[i]) if i < len(year_mins) else None,
+            year_max=_int_or_none(year_maxs[i]) if i < len(year_maxs) else None,
+            trims=[t.strip() for t in (trims[i] if i < len(trims) else "").split(",") if t.strip()],
+        ))
+    return specs
+
+
+@router.post("/wants/expand", response_class=HTMLResponse)
+async def wants_expand(
+    request: Request,
+    _user: Annotated[CurrentUser, Depends(current_user)],
+    archetype_text: Annotated[str, Form()],
+) -> HTMLResponse:
+    try:
+        specs = await _expand(archetype_text)
+    except Exception:  # provider/network failure → manual fallback
+        log.exception("archetype expansion failed")
+        specs = []
+        error = "Couldn't expand the archetype right now — add models manually below."
+    else:
+        error = None if specs else "No models matched — add them manually below."
+    return templates.TemplateResponse(
+        request, "partials/want_specs.html",
+        {"specs": specs, "archetype_text": archetype_text, "error": error},
+    )
+
+
 @router.get("/", response_class=HTMLResponse)  # want-list is the dashboard landing
 @router.get("/wants", response_class=HTMLResponse)
 async def wants_list(
@@ -72,16 +126,43 @@ async def wants_create(
     max_mileage_km: Annotated[str | None, Form()] = None,
     provinces: Annotated[str | None, Form()] = None,
     condition_min: Annotated[str | None, Form()] = None,
+    archetype_text: Annotated[str | None, Form()] = None,
+    spec_make: Annotated[list[str], Form()] = [],  # noqa: B006
+    spec_model: Annotated[list[str], Form()] = [],  # noqa: B006
+    spec_year_min: Annotated[list[str], Form()] = [],  # noqa: B006
+    spec_year_max: Annotated[list[str], Form()] = [],  # noqa: B006
+    spec_trims: Annotated[list[str], Form()] = [],  # noqa: B006
+    spec_include: Annotated[list[str], Form()] = [],  # noqa: B006
 ) -> HTMLResponse | RedirectResponse:
     try:
-        criteria = WantCriteria.from_inputs(
-            makes=makes, models=models, trims=trims,
-            transmissions=transmissions, drivetrains=drivetrains,
-            year_min=_int_or_none(year_min), year_max=_int_or_none(year_max),
-            max_price_cad=_int_or_none(max_price_cad),
-            max_mileage_km=_int_or_none(max_mileage_km),
-            provinces=provinces, condition_min=condition_min,
+        model_specs = _parse_model_specs(
+            spec_make, spec_model, spec_year_min, spec_year_max, spec_trims, spec_include,
         )
+        if model_specs:
+            # Archetype want: specs carry identity; flat make/model stay empty.
+            criteria = WantCriteria(
+                archetype_text=(archetype_text or None),
+                model_specs=model_specs,
+                transmissions=[
+                    t.strip().lower() for t in (transmissions or "").split(",") if t.strip()
+                ],
+                drivetrains=[
+                    d.strip().lower() for d in (drivetrains or "").split(",") if d.strip()
+                ],
+                price_ceiling_cad=_int_or_none(max_price_cad),
+                max_mileage_km=_int_or_none(max_mileage_km),
+                provinces=[p.strip() for p in (provinces or "").split(",") if p.strip()],
+                condition_min=((condition_min or "").strip().lower() or None),
+            )
+        else:
+            criteria = WantCriteria.from_inputs(
+                makes=makes, models=models, trims=trims,
+                transmissions=transmissions, drivetrains=drivetrains,
+                year_min=_int_or_none(year_min), year_max=_int_or_none(year_max),
+                max_price_cad=_int_or_none(max_price_cad),
+                max_mileage_km=_int_or_none(max_mileage_km),
+                provinces=provinces, condition_min=condition_min,
+            )
         want = await repo.create_want(session, name=name, criteria=criteria)
         await service.backfill_want(session, want)  # seed matches from existing lots
     except ValidationError as exc:

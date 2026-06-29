@@ -11,7 +11,7 @@ from carbuyer.apps.dashboard import deps as deps_mod
 from carbuyer.apps.dashboard.app import app
 from carbuyer.db.models import Auction, AuctionLot, Search, WantMatch
 from carbuyer.wants import repo
-from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.criteria import ModelSpec, WantCriteria
 
 
 @pytest.fixture
@@ -150,3 +150,53 @@ async def test_dismiss_match(_patch_deps: AsyncSession) -> None:
         assert r.status_code == 303  # noqa: PLR2004
     session.expire_all()
     assert (await session.get(WantMatch, wm_id)).dismissed is True  # type: ignore[union-attr]
+
+
+async def test_expand_endpoint_renders_rows(
+    _patch_deps: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_expand(text: str) -> list[ModelSpec]:
+        return [ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009, trims=[])]
+    monkeypatch.setattr("carbuyer.apps.dashboard.routers.wants._expand", fake_expand)
+
+    async with _client() as c:
+        r = await c.post("/wants/expand", data={"archetype_text": "4runner platform"})
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "GX 470" in r.text
+    assert "2003" in r.text
+
+
+async def test_expand_endpoint_handles_provider_error(
+    _patch_deps: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def boom(text: str) -> list[ModelSpec]:
+        raise RuntimeError("openai down")
+    monkeypatch.setattr("carbuyer.apps.dashboard.routers.wants._expand", boom)
+
+    async with _client() as c:
+        r = await c.post("/wants/expand", data={"archetype_text": "x"})
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "manually" in r.text.lower()
+
+
+async def test_save_archetype_want_persists_model_specs(_patch_deps: AsyncSession) -> None:
+    session = _patch_deps
+    async with _client(follow=False) as c:
+        r = await c.post("/wants", data={
+            "name": "4runner platform",
+            "archetype_text": "cheap reliable 4runner-platform offroad",
+            "spec_make": "Lexus", "spec_model": "GX 470",
+            "spec_year_min": "2003", "spec_year_max": "2009", "spec_trims": "",
+            "spec_include": "0",
+            "max_price_cad": "18000",
+        })
+    assert r.status_code == 303  # noqa: PLR2004
+
+    from carbuyer.wants import repo
+    from carbuyer.wants.criteria import WantCriteria
+    wants = await repo.list_wants(session)
+    crit = WantCriteria.model_validate(wants[-1].config)
+    assert crit.archetype_text == "cheap reliable 4runner-platform offroad"
+    assert crit.model_specs == [
+        ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009, trims=[])
+    ]

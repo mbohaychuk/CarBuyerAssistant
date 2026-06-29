@@ -7,6 +7,23 @@
   {% if error %}<p class="tag" style="color:#b00020">{{ error }}</p>{% endif %}
 
   <form method="post" action="/wants" class="want-form">
+    <input name="name" placeholder="Name (e.g. cheap 4Runner-platform offroad)" required>
+    <div class="archetype-row">
+      <input name="archetype_text" id="archetype-text"
+             placeholder="Describe an archetype (e.g. reliable body-on-frame offroad under $18k)">
+      <button type="button"
+              hx-post="/wants/expand"
+              hx-include="[name='archetype_text']"
+              hx-target="#spec-rows" hx-swap="innerHTML">Expand →</button>
+    </div>
+    <div id="spec-rows"></div>
+    <input name="max_price_cad" type="number" placeholder="Max price $">
+    <input name="provinces" placeholder="Provinces (AB, BC)">
+    <input name="condition_min" placeholder="Min condition (decent, good)">
+    <button type="submit">Save want</button>
+  </form>
+
+  <form method="post" action="/wants" class="want-form">
     <input name="name" placeholder="Name (e.g. manual Xterra)" required>
     <input name="makes" placeholder="Makes — comma-sep (Nissan, Toyota)">
     <input name="models" placeholder="Models (Xterra, 4Runner)">

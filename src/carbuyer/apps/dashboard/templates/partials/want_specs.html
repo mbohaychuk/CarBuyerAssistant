@@ -1,0 +1,18 @@
+{% if error %}<p class="muted">{{ error }}</p>{% endif %}
+<input type="hidden" name="archetype_text" value="{{ archetype_text or '' }}">
+<table class="spec-table">
+  <thead><tr><th></th><th>Make</th><th>Model</th><th>Yr min</th><th>Yr max</th><th>Trims</th><th>Why</th></tr></thead>
+  <tbody>
+    {% for s in specs %}
+      <tr>
+        <td><input type="checkbox" name="spec_include" value="{{ loop.index0 }}" checked></td>
+        <td><input name="spec_make" value="{{ s.make }}"></td>
+        <td><input name="spec_model" value="{{ s.model }}"></td>
+        <td><input name="spec_year_min" type="number" value="{{ s.year_min if s.year_min is not none else '' }}"></td>
+        <td><input name="spec_year_max" type="number" value="{{ s.year_max if s.year_max is not none else '' }}"></td>
+        <td><input name="spec_trims" value="{{ s.trims | join(', ') }}"></td>
+        <td class="muted">{{ s.reason if s.reason is defined else '' }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

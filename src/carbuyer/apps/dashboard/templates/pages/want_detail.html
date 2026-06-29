@@ -3,6 +3,10 @@
 {% block nav %}wants{% endblock %}
 {% block content %}
   <h1>{{ want.name }}</h1>
+  {% set crit = want.config %}
+  {% if crit.get('archetype_text') %}
+    <p class="muted">expanded from: "{{ crit['archetype_text'] }}"</p>
+  {% endif %}
   <p>
     <a href="/wants">← all wants</a>
     · <span class="muted">{{ '🔔 active' if want.enabled else '🔕 muted' }}</span>
