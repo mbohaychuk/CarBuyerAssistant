@@ -25,7 +25,7 @@ from typing import get_args
 
 from carbuyer.db.models import VehicleOffer
 from carbuyer.llm.schemas import Condition
-from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.criteria import ModelSpec, WantCriteria
 
 # Worst → best; index gives an orderable rank for the condition floor. Guarded
 # against drift from the Condition vocabulary it mirrors (set-equality, so the
@@ -45,12 +45,9 @@ def matches(
 ) -> bool:
     checks = (
         not (criteria.hide_showstoppers and lot.showstopper_flags),
-        _in_set(lot.make, criteria.makes, lenient_unknown=False),
-        _in_set(lot.model, criteria.models, lenient_unknown=False),
-        _in_set(lot.trim, criteria.trims, lenient_unknown=True),
+        _identity_ok(lot, criteria),
         _in_set(lot.transmission, criteria.transmissions, lenient_unknown=True),
         _in_set(lot.drivetrain, criteria.drivetrains, lenient_unknown=True),
-        _year_in_range(lot.year, criteria.year_min, criteria.year_max),
         _at_most(offer_price_cad, criteria.price_ceiling_cad),
         _at_most(lot.mileage_km, criteria.max_mileage_km),
         _province_ok(pickup_province, criteria.provinces),
@@ -61,6 +58,28 @@ def matches(
         ),
     )
     return all(checks)
+
+
+def _identity_ok(lot: VehicleOffer, criteria: WantCriteria) -> bool:
+    """Vehicle identity (make/model/year/trim). model_specs (archetype) takes
+    precedence and is OR'd across specs; otherwise the flat makes/models path."""
+    if criteria.model_specs:
+        return any(_spec_matches(lot, s) for s in criteria.model_specs)
+    return (
+        _in_set(lot.make, criteria.makes, lenient_unknown=False)
+        and _in_set(lot.model, criteria.models, lenient_unknown=False)
+        and _in_set(lot.trim, criteria.trims, lenient_unknown=True)
+        and _year_in_range(lot.year, criteria.year_min, criteria.year_max)
+    )
+
+
+def _spec_matches(lot: VehicleOffer, spec: ModelSpec) -> bool:
+    return (
+        _in_set(lot.make, [spec.make], lenient_unknown=False)
+        and _in_set(lot.model, [spec.model], lenient_unknown=False)
+        and _year_in_range(lot.year, spec.year_min, spec.year_max)
+        and _in_set(lot.trim, spec.trims, lenient_unknown=True)
+    )
 
 
 def could_match_any_want(
@@ -88,16 +107,29 @@ def could_match_any_want(
 
 
 def _coarse_match(c: WantCriteria, year: int | None, hay: str) -> bool:
+    if c.model_specs:
+        return any(_coarse_spec(s, year, hay) for s in c.model_specs)
     if c.makes and not _any_term_in(c.makes, hay):
         return False
     if c.models and not _any_term_in(c.models, hay):
         return False
-    if year is not None:  # unknown year is lenient (kept); known year must fit
-        if c.year_min is not None and year < c.year_min:
-            return False
-        if c.year_max is not None and year > c.year_max:
-            return False
-    return True
+    return _year_ok(year, c.year_min, c.year_max)
+
+
+def _coarse_spec(s: ModelSpec, year: int | None, hay: str) -> bool:
+    if not _any_term_in([s.make], hay):
+        return False
+    if not _any_term_in([s.model], hay):
+        return False
+    return _year_ok(year, s.year_min, s.year_max)
+
+
+def _year_ok(year: int | None, ymin: int | None, ymax: int | None) -> bool:
+    if year is None:  # unknown year is lenient (kept)
+        return True
+    if ymin is not None and year < ymin:
+        return False
+    return not (ymax is not None and year > ymax)
 
 
 def _any_term_in(terms: Sequence[str], hay: str) -> bool:

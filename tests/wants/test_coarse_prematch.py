@@ -78,3 +78,19 @@ def test_empty_criteria_list_matches_nothing() -> None:
     assert not could_match_any_want(
         make="Nissan", model="Xterra", year=2010, title="x", criteria_list=[]
     )
+
+
+def test_coarse_gate_ors_over_model_specs() -> None:
+    from carbuyer.wants.criteria import ModelSpec, WantCriteria
+    from carbuyer.wants.matcher import could_match_any_want
+    crit = WantCriteria(model_specs=[
+        ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009),
+    ])
+    assert could_match_any_want(
+        make=None, model=None, year=2005,
+        title="2005 Lexus GX 470 4x4", criteria_list=[crit],
+    ) is True
+    assert could_match_any_want(
+        make=None, model=None, year=2005,
+        title="2005 Toyota Camry", criteria_list=[crit],
+    ) is False
