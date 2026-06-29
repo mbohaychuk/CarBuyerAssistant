@@ -146,6 +146,33 @@ Return the structured EnrichmentOutput.
 """
 
 
+def _desirable_trims_seed() -> str:
+    lines: list[str] = []
+    for d in DESIRABLE_TRIMS:
+        make = d["make"]
+        model = d["model"]
+        trim = d["trim"]
+        note = d["note"]
+        lines.append(f"- {make} {model} {trim}".rstrip() + (f" — {note}" if note else ""))
+    return "\n".join(lines)
+
+
+def archetype_system_prompt() -> str:
+    return (
+        "You expand a used-vehicle buyer's fuzzy archetype into concrete, "
+        "North-American-market models with realistic model-year ranges and "
+        "optional trim hints. Use enthusiast/platform knowledge (shared "
+        "platforms, engine swaps, desirable trims) — e.g. a Lexus GX 470 is the "
+        "J120 4Runner platform; an Xterra offroad want implies the manual "
+        "Off-Road trim. Return only the genuinely-fitting models (the platform "
+        "siblings a knowledgeable buyer would cross-shop), not every vehicle in "
+        "the segment. Each model needs make, model, year_min, year_max, trims "
+        "(empty list = any trim), and a one-line reason.\n\n"
+        "Known desirable models for reference (seed, not a whitelist):\n"
+        f"{_desirable_trims_seed()}"
+    )
+
+
 VISION_PER_IMAGE_PROMPT = """You are inspecting a single photo of a used vehicle for a deal-finder.
 
 Output the structured PerImageOutput. Rules:

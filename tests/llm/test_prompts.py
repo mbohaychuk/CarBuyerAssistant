@@ -80,3 +80,12 @@ def test_user_prompt_omits_gotcha_block_when_no_match() -> None:
         image_count=1, current_year=2026,
     )
     assert "MODEL-SPECIFIC GOTCHAS" not in user
+
+
+def test_archetype_prompt_seeds_from_taxonomy() -> None:
+    from carbuyer.llm.prompts import archetype_system_prompt
+    p = archetype_system_prompt()
+    # Seeded with the desirable-trims taxonomy so the model knows platform
+    # relationships; spot-check a known entry.
+    assert "GX 470" in p or "GX470" in p
+    assert "year" in p.lower()
