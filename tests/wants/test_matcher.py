@@ -181,6 +181,17 @@ def test_model_spec_excludes_sibling_out_of_its_range() -> None:
     assert matches(_lot(make="Lexus", model="GX 470", year=2015), crit) is False
 
 
+def test_model_spec_unknown_year_excluded_when_spec_bounded() -> None:
+    # Year is core identity (see matcher module docstring): a lot whose year is
+    # unknown cannot be confirmed inside a spec's year range, so it is excluded —
+    # identical to the flat path's treatment of year. (The coarse WG1 gate is
+    # leniently inclusive of unknown years; the precise matcher here is strict.)
+    crit = WantCriteria(model_specs=[
+        ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009),
+    ])
+    assert matches(_lot(make="Lexus", model="GX 470", year=None), crit) is False
+
+
 def test_model_spec_trims_scoped_per_spec() -> None:
     crit = WantCriteria(model_specs=[
         ModelSpec(make="Toyota", model="4Runner", year_min=2003, year_max=2009, trims=["TRD"]),
