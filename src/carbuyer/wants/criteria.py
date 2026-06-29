@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from carbuyer.llm.schemas import Condition, Drivetrain, Transmission
 
 
-def _split_csv(value: str | None) -> list[str]:
+def split_csv(value: str | None) -> list[str]:
     """Comma-separated free-text (slash command / web form) → list, blanks dropped."""
     return [part.strip() for part in value.split(",") if part.strip()] if value else []
 
@@ -105,16 +105,16 @@ class WantCriteria(BaseModel):
         # vocabularies; lower the inputs so "Manual"/"4WD"/"Good" are accepted, to
         # match the case-insensitivity of make/model/trim/province downstream.
         return cls.model_validate({
-            "makes": _split_csv(makes),
-            "models": _split_csv(models),
-            "trims": _split_csv(trims),
-            "transmissions": [t.lower() for t in _split_csv(transmissions)],
-            "drivetrains": [d.lower() for d in _split_csv(drivetrains)],
+            "makes": split_csv(makes),
+            "models": split_csv(models),
+            "trims": split_csv(trims),
+            "transmissions": [t.lower() for t in split_csv(transmissions)],
+            "drivetrains": [d.lower() for d in split_csv(drivetrains)],
             "year_min": year_min,
             "year_max": year_max,
             "price_ceiling_cad": max_price_cad,
             "max_mileage_km": max_mileage_km,
-            "provinces": _split_csv(provinces),
+            "provinces": split_csv(provinces),
             "condition_min": (condition_min or "").strip().lower() or None,
         })
 

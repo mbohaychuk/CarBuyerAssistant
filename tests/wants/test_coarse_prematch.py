@@ -4,7 +4,7 @@ any LLM enrichment. Lenient: unknown LLM-only fields never exclude; the precise
 matcher still runs post-enrichment to create the actual want_match."""
 from __future__ import annotations
 
-from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.criteria import ModelSpec, WantCriteria
 from carbuyer.wants.matcher import could_match_any_want
 
 
@@ -81,8 +81,6 @@ def test_empty_criteria_list_matches_nothing() -> None:
 
 
 def test_coarse_gate_ors_over_model_specs() -> None:
-    from carbuyer.wants.criteria import ModelSpec, WantCriteria
-    from carbuyer.wants.matcher import could_match_any_want
     crit = WantCriteria(model_specs=[
         ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009),
     ])

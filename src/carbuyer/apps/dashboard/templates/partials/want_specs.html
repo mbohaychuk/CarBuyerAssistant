@@ -11,7 +11,7 @@
         <td><input name="spec_year_min" type="number" value="{{ s.year_min if s.year_min is not none else '' }}"></td>
         <td><input name="spec_year_max" type="number" value="{{ s.year_max if s.year_max is not none else '' }}"></td>
         <td><input name="spec_trims" value="{{ s.trims | join(', ') }}"></td>
-        <td class="muted">{{ s.reason if s.reason is defined else '' }}</td>
+        <td class="muted">{{ s.reason }}</td>
       </tr>
     {% endfor %}
   </tbody>

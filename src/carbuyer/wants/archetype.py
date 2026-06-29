@@ -12,8 +12,8 @@ from __future__ import annotations
 import httpx
 
 from carbuyer.llm.base import ArchetypeProvider
+from carbuyer.llm.schemas import ExpandedModel
 from carbuyer.normalize.vpic import canonical_model
-from carbuyer.wants.criteria import ModelSpec
 
 
 async def expand_archetype(
@@ -21,19 +21,12 @@ async def expand_archetype(
     *,
     provider: ArchetypeProvider,
     client: httpx.AsyncClient,
-) -> list[ModelSpec]:
+) -> list[ExpandedModel]:
+    """Return LLM-expanded models with vPIC-canonical spellings and preserved reason."""
     expansion = await provider.expand_archetype(text)
-    specs: list[ModelSpec] = []
+    rows: list[ExpandedModel] = []
     for m in expansion.models:
         year = m.year_min if m.year_min is not None else m.year_max
         canonical = await canonical_model(m.make, m.model, year, client=client)
-        specs.append(
-            ModelSpec(
-                make=m.make,
-                model=canonical or m.model,
-                year_min=m.year_min,
-                year_max=m.year_max,
-                trims=m.trims,
-            )
-        )
-    return specs
+        rows.append(m.model_copy(update={"model": canonical or m.model}))
+    return rows

@@ -13,10 +13,11 @@ from carbuyer.apps.dashboard.app import templates
 from carbuyer.apps.dashboard.deps import CurrentUser, current_user, get_session
 from carbuyer.db.models import AuctionLot, WantMatch
 from carbuyer.llm.openai_provider import OpenAIProvider
+from carbuyer.llm.schemas import ExpandedModel
 from carbuyer.shared.logging import get_logger
 from carbuyer.wants import repo, service
 from carbuyer.wants.archetype import expand_archetype
-from carbuyer.wants.criteria import ModelSpec, WantCriteria, first_error
+from carbuyer.wants.criteria import ModelSpec, WantCriteria, first_error, split_csv
 
 router = APIRouter()
 log = get_logger("dashboard.wants")
@@ -51,7 +52,7 @@ async def _render_list(
     )
 
 
-async def _expand(text: str) -> list[ModelSpec]:
+async def _expand(text: str) -> list[ExpandedModel]:
     """Build a request-scoped provider + http client and expand. The single
     monkeypatch seam for dashboard tests."""
     async with OpenAIProvider() as provider, httpx.AsyncClient() as client:
@@ -68,7 +69,7 @@ def _parse_model_specs(
     keep = {int(i) for i in include if i.strip().isdigit()}
     specs: list[ModelSpec] = []
     for i, make in enumerate(makes):
-        if i not in keep or not make.strip() or not models[i].strip():
+        if i not in keep or not make.strip() or i >= len(models) or not models[i].strip():
             continue
         specs.append(ModelSpec(
             make=make.strip(),
@@ -140,20 +141,18 @@ async def wants_create(
         )
         if model_specs:
             # Archetype want: specs carry identity; flat make/model stay empty.
-            criteria = WantCriteria(
-                archetype_text=(archetype_text or None),
-                model_specs=model_specs,
-                transmissions=[
-                    t.strip().lower() for t in (transmissions or "").split(",") if t.strip()
-                ],
-                drivetrains=[
-                    d.strip().lower() for d in (drivetrains or "").split(",") if d.strip()
-                ],
-                price_ceiling_cad=_int_or_none(max_price_cad),
-                max_mileage_km=_int_or_none(max_mileage_km),
-                provinces=[p.strip() for p in (provinces or "").split(",") if p.strip()],
-                condition_min=((condition_min or "").strip().lower() or None),
-            )
+            # model_validate used (like from_inputs) so str literals for
+            # Literal-typed fields are accepted without type errors.
+            criteria = WantCriteria.model_validate({
+                "archetype_text": archetype_text or None,
+                "model_specs": model_specs,
+                "transmissions": [t.lower() for t in split_csv(transmissions)],
+                "drivetrains": [d.lower() for d in split_csv(drivetrains)],
+                "price_ceiling_cad": _int_or_none(max_price_cad),
+                "max_mileage_km": _int_or_none(max_mileage_km),
+                "provinces": split_csv(provinces),
+                "condition_min": (condition_min or "").strip().lower() or None,
+            })
         else:
             criteria = WantCriteria.from_inputs(
                 makes=makes, models=models, trims=trims,

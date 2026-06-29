@@ -14,7 +14,8 @@ def test_model_spec_round_trips_through_config() -> None:
         archetype_text="cheap reliable 4runner-platform offroad",
         model_specs=[
             ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009, trims=[]),
-            ModelSpec(make="Toyota", model="4Runner", year_min=2003, year_max=2009, trims=["SR5", "TRD"]),
+            ModelSpec(make="Toyota", model="4Runner", year_min=2003, year_max=2009,
+                      trims=["SR5", "TRD"]),
         ],
         price_ceiling_cad=18000,
         provinces=["AB", "BC"],
@@ -22,7 +23,7 @@ def test_model_spec_round_trips_through_config() -> None:
     dumped = c.model_dump(mode="json")
     restored = WantCriteria.model_validate(dumped)
     assert restored.archetype_text == "cheap reliable 4runner-platform offroad"
-    assert len(restored.model_specs) == 2
+    assert len(restored.model_specs) == 2  # noqa: PLR2004
     assert restored.model_specs[1].trims == ["SR5", "TRD"]
 
 
@@ -36,8 +37,6 @@ def test_legacy_flat_config_still_validates() -> None:
 
 
 def test_model_spec_year_order_validated() -> None:
-    import pytest
-    from pydantic import ValidationError
     with pytest.raises(ValidationError):
         ModelSpec(make="Lexus", model="GX 470", year_min=2010, year_max=2003)
 

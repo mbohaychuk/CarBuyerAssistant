@@ -5,7 +5,6 @@ import pytest
 
 from carbuyer.llm.schemas import ArchetypeExpansion, ExpandedModel
 from carbuyer.wants.archetype import expand_archetype
-from carbuyer.wants.criteria import ModelSpec
 
 
 class _StubProvider:
@@ -19,7 +18,7 @@ class _StubProvider:
 
 
 async def test_expand_normalizes_each_model_via_vpic(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_canonical(make, model, year, *, client):  # noqa: ANN001, ANN202
+    async def fake_canonical(make, model, year, *, client):  # type: ignore[no-untyped-def]
         return "GX 470" if model == "GX470" else model
     monkeypatch.setattr("carbuyer.wants.archetype.canonical_model", fake_canonical)
 
@@ -28,12 +27,13 @@ async def test_expand_normalizes_each_model_via_vpic(monkeypatch: pytest.MonkeyP
                       trims=[], reason="J120 4Runner platform"),
     ]))
     async with httpx.AsyncClient() as client:
-        specs = await expand_archetype("4runner platform offroad", provider=provider, client=client)
+        rows = await expand_archetype("4runner platform offroad", provider=provider, client=client)
 
-    assert specs == [ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009, trims=[])]
+    assert rows[0].model == "GX 470"
+    assert rows[0].reason == "J120 4Runner platform"
 
 
-async def test_expand_empty_expansion_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_expand_empty_expansion_returns_empty() -> None:
     provider = _StubProvider(ArchetypeExpansion(models=[]))
     async with httpx.AsyncClient() as client:
         specs = await expand_archetype("nonsense", provider=provider, client=client)
