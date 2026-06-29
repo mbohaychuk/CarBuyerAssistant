@@ -46,6 +46,7 @@ async def _render_list(
     )
 
 
+@router.get("/", response_class=HTMLResponse)  # want-list is the dashboard landing
 @router.get("/wants", response_class=HTMLResponse)
 async def wants_list(
     request: Request,

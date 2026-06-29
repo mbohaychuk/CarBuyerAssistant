@@ -46,23 +46,12 @@ def create_app() -> FastAPI:
     from carbuyer.apps.dashboard.routers import (  # noqa: PLC0415
         actions,
         admin,
-        auctions,
-        closing,
-        comps,
-        feed,
         health,
         lots,
         needs_plugin,
-        purchases,
-        sold,
-        today,
         wants,
-        watched,
     )
-    for router in (
-        today, feed, closing, watched, wants, lots, comps, sold, purchases, health,
-        actions, needs_plugin, auctions, admin,
-    ):
+    for router in (wants, lots, health, actions, needs_plugin, admin):
         app.include_router(router.router)
     return app
 

@@ -45,7 +45,7 @@ def is_htmx(request: Request) -> bool:
 #
 # `request: Request` is accepted now (unused) so the future real implementation
 # can read headers/cookies without changing every caller's signature.
-def current_user(request: Request) -> CurrentUser:  # noqa: ARG001
+def current_user(request: Request) -> CurrentUser:
     return CurrentUser(id="me", role="dev")
 
 
