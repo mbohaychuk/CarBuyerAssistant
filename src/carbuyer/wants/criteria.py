@@ -32,8 +32,37 @@ def first_error(exc: ValidationError) -> str:
     return f"{loc}: {msg}" if loc else msg
 
 
+class ModelSpec(BaseModel):
+    """One concrete model in an archetype's fan-out: a precise make+model with
+    its own year range and trim hints. The matcher ORs across a want's specs."""
+    model_config = ConfigDict(extra="forbid")
+
+    make: str
+    model: str
+    year_min: int | None = None
+    year_max: int | None = None
+    trims: list[str] = []
+
+    @model_validator(mode="after")
+    def _year_range_ordered(self) -> ModelSpec:
+        if (
+            self.year_min is not None
+            and self.year_max is not None
+            and self.year_min > self.year_max
+        ):
+            raise ValueError("year_min must not be greater than year_max")
+        return self
+
+
 class WantCriteria(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    # Archetype fan-out (Phase 2). archetype_text is the original fuzzy text the
+    # LLM expanded; model_specs is the confirmed concrete set. Both default-empty
+    # so legacy flat wants validate unchanged. A want uses EITHER model_specs
+    # (archetype) OR the flat makes/models (manual) for identity — not both.
+    archetype_text: str | None = None
+    model_specs: list[ModelSpec] = []
 
     # Vehicle identity. Empty list = "any" for that field; multiple values fan
     # the want out (e.g. models=["GX 470","4Runner"] for a cross-platform want).

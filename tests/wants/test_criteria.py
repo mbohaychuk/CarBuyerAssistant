@@ -6,7 +6,40 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.models import Search
-from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.criteria import ModelSpec, WantCriteria
+
+
+def test_model_spec_round_trips_through_config() -> None:
+    c = WantCriteria(
+        archetype_text="cheap reliable 4runner-platform offroad",
+        model_specs=[
+            ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009, trims=[]),
+            ModelSpec(make="Toyota", model="4Runner", year_min=2003, year_max=2009, trims=["SR5", "TRD"]),
+        ],
+        price_ceiling_cad=18000,
+        provinces=["AB", "BC"],
+    )
+    dumped = c.model_dump(mode="json")
+    restored = WantCriteria.model_validate(dumped)
+    assert restored.archetype_text == "cheap reliable 4runner-platform offroad"
+    assert len(restored.model_specs) == 2
+    assert restored.model_specs[1].trims == ["SR5", "TRD"]
+
+
+def test_legacy_flat_config_still_validates() -> None:
+    # A want created before this feature has no archetype_text / model_specs.
+    legacy = {"makes": ["Nissan"], "models": ["Xterra"], "transmissions": ["manual"]}
+    c = WantCriteria.model_validate(legacy)
+    assert c.makes == ["Nissan"]
+    assert c.model_specs == []
+    assert c.archetype_text is None
+
+
+def test_model_spec_year_order_validated() -> None:
+    import pytest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ModelSpec(make="Lexus", model="GX 470", year_min=2010, year_max=2003)
 
 
 def _manual_xterra() -> WantCriteria:
