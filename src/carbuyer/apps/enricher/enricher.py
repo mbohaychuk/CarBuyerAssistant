@@ -42,7 +42,7 @@ from openai import (
 from pydantic import ValidationError
 
 from carbuyer.apps._runner import run_worker
-from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
+from carbuyer.db.enums import EnrichmentStatus, NotificationStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot, PrivateListing, VehicleOffer
 from carbuyer.db.notify import listen, notify
 from carbuyer.db.queue import (
@@ -65,6 +65,8 @@ from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.http import make_client
+from carbuyer.wants.matcher import could_match_any_want
+from carbuyer.wants.service import load_active_criteria
 
 log = get_logger("enricher")
 
@@ -376,7 +378,7 @@ def _classify_failure(exc: BaseException) -> str:
     return "transient"
 
 
-async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
+async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:  # noqa: PLR0911 -- terminal-status state machine; each return is a distinct outcome
     """Process one claimed lot id end-to-end.
 
     Returns:
@@ -392,6 +394,26 @@ async def _process_one(lot_id: int, *, provider: OpenAIProvider) -> str:
     if snap is None:
         log.warning("lot disappeared between claim and load", lot_id=lot_id)
         return "missing"
+
+    # WG3 want-gate: skip the LLM for a lot that matches no active want (e.g. its
+    # want was deleted between ingest and enrich). Lenient when there are no wants
+    # at all — WG2 already keeps a wantless system from ingesting anything.
+    async with get_session() as s:
+        criteria_list = await load_active_criteria(s)
+    if criteria_list and not could_match_any_want(
+        make=snap.make, model=snap.model, year=snap.year, title=snap.title,
+        criteria_list=criteria_list,
+    ):
+        async with get_session() as s, s.begin():
+            lot = await s.get(VehicleOffer, lot_id)
+            if lot is None:
+                return "missing"
+            lot.enrichment_status = EnrichmentStatus.SKIPPED
+            lot.valuation_status = ValuationStatus.SKIPPED
+            lot.notification_status = NotificationStatus.SKIPPED
+        log.info("skipped lot matching no active want", lot_id=lot_id)
+        return "skipped"
+
     raw_carfax_url = find_carfax_url(snap.description)
     try:
         result = await _compute_enrichment(

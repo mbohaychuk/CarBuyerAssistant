@@ -15,7 +15,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 
 import structlog
-from pydantic import ValidationError
 from sqlalchemy import func, update
 
 from carbuyer.db.enums import EnrichmentStatus, ListingStatus, ValuationStatus
@@ -33,25 +32,18 @@ from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES, ListingSource, RawLot
 from carbuyer.sources.hibid.source import HibidSource
 from carbuyer.sources.mcdougall.source import McDougallSource
-from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.matcher import could_match_any_want
+from carbuyer.wants.service import load_active_criteria
 
 log = get_logger("ingester")
 
 
 async def _load_active_criteria() -> list[WantCriteria]:
-    """Validated criteria of every enabled want (one bad row skipped, not fatal).
-    The want-first gate: no active wants → nothing is wanted."""
+    """Active want criteria in a fresh read session (the strategies run outside
+    one). Want-first gate: no active wants → nothing is wanted."""
     async with get_session() as s:
-        wants = await repo.list_wants(s, enabled_only=True)
-    out: list[WantCriteria] = []
-    for want in wants:
-        try:
-            out.append(WantCriteria.model_validate(want.config))
-        except ValidationError:
-            log.warning("skipping want with invalid config", want_id=want.id)
-    return out
+        return await load_active_criteria(s)
 
 
 def _lot_wanted(raw_lot: RawLot, criteria_list: Sequence[WantCriteria]) -> bool:

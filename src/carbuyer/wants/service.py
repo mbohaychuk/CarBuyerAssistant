@@ -55,6 +55,14 @@ def _criteria_or_none(want: Search) -> WantCriteria | None:
         return None
 
 
+async def load_active_criteria(session: AsyncSession) -> list[WantCriteria]:
+    """Validated criteria of every enabled want (corrupt rows skipped). The
+    want-first gate's source of truth, shared by the ingester (WG2) and enricher
+    (WG3). Empty list ⇒ no active wants."""
+    wants = await repo.list_wants(session, enabled_only=True)
+    return [c for w in wants if (c := _criteria_or_none(w)) is not None]
+
+
 async def evaluate_lot_against_wants(
     session: AsyncSession,
     lot: VehicleOffer,

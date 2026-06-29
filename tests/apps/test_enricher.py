@@ -26,8 +26,8 @@ from carbuyer.apps.enricher.enricher import (
     main,
     process_pending,
 )
-from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.enums import EnrichmentStatus, NotificationStatus, ValuationStatus
+from carbuyer.db.models import Auction, AuctionLot, Search
 from carbuyer.llm.schemas import (
     CarfaxFindings,
     EnrichmentOutput,
@@ -35,6 +35,7 @@ from carbuyer.llm.schemas import (
     NormalizedVehicle,
     RarityAssessment,
 )
+from carbuyer.wants.criteria import WantCriteria
 
 
 def _enrichment(
@@ -765,3 +766,59 @@ async def test_process_one_applies_nhtsa_reliability(
     expected_recalls, expected_complaints = 3, 47
     assert refreshed.recall_count == expected_recalls
     assert refreshed.complaint_count == expected_complaints
+
+
+# ─── WG3: want-gated enrichment ───
+
+
+def _want(name: str, **crit: object) -> Search:
+    return Search(name=name, config=WantCriteria(**crit).model_dump(mode="json"))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_process_one_skips_lot_matching_no_active_want(
+    _patched_get_session: AsyncSession,
+) -> None:
+    session = _patched_get_session
+    _, lot = _seed_auction_and_lot(session)  # title "2010 Ford F150"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+    session.add(_want("nissan only", makes=["Nissan"]))  # does NOT match the Ford
+    await session.commit()
+
+    provider = MagicMock()
+    provider.describe = AsyncMock(return_value=_output_with_model("F-150"))
+
+    outcome = await _process_one(lot_id, provider=provider)
+
+    assert outcome == "skipped"
+    provider.describe.assert_not_awaited()  # the LLM was never called
+    session.expire_all()
+    refreshed = await session.get(AuctionLot, lot_id)
+    assert refreshed is not None
+    assert refreshed.enrichment_status == EnrichmentStatus.SKIPPED
+    assert refreshed.notification_status == NotificationStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_process_one_enriches_lot_matching_a_want(
+    _patched_get_session: AsyncSession,
+) -> None:
+    session = _patched_get_session
+    _, lot = _seed_auction_and_lot(session)  # title "2010 Ford F150"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+    session.add(_want("ford", makes=["Ford"]))  # matches via the title
+    await session.commit()
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_output_with_model("F-150"))
+
+    outcome = await _process_one(lot_id, provider=provider)
+
+    assert outcome == "done"
+    provider.describe.assert_awaited()

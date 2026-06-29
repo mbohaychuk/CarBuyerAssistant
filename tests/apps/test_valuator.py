@@ -26,6 +26,8 @@ from carbuyer.apps.valuator.valuator import (
 from carbuyer.db.enums import NotificationStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 from carbuyer.scoring.fair_value import ConfidenceBucket
+from carbuyer.wants import repo
+from carbuyer.wants.criteria import WantCriteria
 
 
 def _seed_auction(session: AsyncSession, **overrides: object) -> Auction:
@@ -170,6 +172,30 @@ async def test_value_one_marks_insufficient_when_no_comps(
     # No comps means we can't compute a deal — notification is skipped, not
     # spammed with low-confidence guesses.
     assert lot.notification_status == NotificationStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_value_one_want_match_alerts_despite_no_comps(
+    session: AsyncSession,
+) -> None:
+    """WG4 / best-effort deal scoring: a lot the user explicitly wants must still
+    alert when we can't price it (no comps → INSUFFICIENT). The want forces
+    notification PENDING — contrast the no-want case above, which SKIPs."""
+    a = _seed_auction(session)
+    await session.flush()
+    lot = _seed_lot(session, a)  # Toyota Tacoma, no comps seeded
+    await repo.create_want(
+        session, name="tacoma",
+        criteria=WantCriteria(makes=["Toyota"], models=["Tacoma"]),
+    )
+    await session.commit()
+
+    await value_one(session, lot)
+    await session.commit()
+
+    assert lot.valuation_status == ValuationStatus.INSUFFICIENT  # still couldn't price it
+    assert lot.expected_value_cad is None  # no deal score attached
+    assert lot.notification_status == NotificationStatus.PENDING  # but the want alerts
 
 
 @pytest.mark.asyncio
