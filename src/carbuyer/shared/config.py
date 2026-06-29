@@ -56,18 +56,6 @@ class Settings(BaseSettings):
     discord_channels: dict[str, int | str] = Field(default_factory=dict)
     home_province: Province = "AB"
 
-    notify_threshold: float = 0.15
-    early_warning_rarity_threshold: float = 2.0
-    early_warning_min_hours_to_close: int = 48
-    rescore_improvement_threshold: float = 0.05
-
-    quiet_hours_start: int = 22
-    quiet_hours_end: int = 8
-    quiet_hours_override_score: float = 0.30
-
-    flip_margin_min_cad: int = 1500
-    flip_margin_pct: float = 0.10
-
     # Phase 4 valuator. batch_size mirrors enrichment_batch_size but the
     # valuator does no LLM I/O, so it can drain larger batches.
     valuation_batch_size: int = 30

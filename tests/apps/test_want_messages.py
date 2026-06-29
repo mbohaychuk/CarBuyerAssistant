@@ -19,16 +19,8 @@ def _data(**over: Any) -> LotEmbedData:
         "location": "Calgary, AB",
         "current_high_bid_cad": Decimal("8000"),
         "all_in_cad": None,
-        "expected_value_cad": Decimal("10000"),
         "value_low_cad": None,
         "value_high_cad": None,
-        "price_deal_score": None,
-        "rarity_score": None,
-        "confidence_bucket": None,
-        "condition_categorical": None,
-        "top_red_flags": (),
-        "top_green_flags": (),
-        "suspicious_underprice": False,
         "scheduled_end_at": None,
     }
     base.update(over)

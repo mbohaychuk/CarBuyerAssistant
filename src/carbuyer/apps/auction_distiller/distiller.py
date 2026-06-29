@@ -84,10 +84,7 @@ async def distill_lot(session: AsyncSession, lot: AuctionLot, auction: Auction) 
         was_notified=any(
             ts is not None
             for ts in (
-                lot.cheap_notified_at,
-                lot.early_warning_notified_at,
                 lot.closing_notified_at,
-                lot.trajectory_notified_at,
                 lot.extended_notified_at,
             )
         ),

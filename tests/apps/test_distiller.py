@@ -72,10 +72,7 @@ def _make_lot(
     final_bid_cad: Decimal | None = Decimal("8000.00"),
     user_action: str | None = None,
     was_purchased_by_us: bool = False,
-    cheap_notified_at: datetime | None = None,
-    early_warning_notified_at: datetime | None = None,
     closing_notified_at: datetime | None = None,
-    trajectory_notified_at: datetime | None = None,
     extended_notified_at: datetime | None = None,
 ) -> AuctionLot:
     lot = AuctionLot(
@@ -92,10 +89,7 @@ def _make_lot(
         final_bid_cad=final_bid_cad,
         user_action=user_action,
         was_purchased_by_us=was_purchased_by_us,
-        cheap_notified_at=cheap_notified_at,
-        early_warning_notified_at=early_warning_notified_at,
         closing_notified_at=closing_notified_at,
-        trajectory_notified_at=trajectory_notified_at,
         extended_notified_at=extended_notified_at,
     )
     session.add(lot)
@@ -169,44 +163,6 @@ async def test_distill_lot_unsold_disposition(session: AsyncSession) -> None:
     assert sales[0].final_price_with_premium_cad is None
 
 
-async def test_distill_lot_was_notified_true_when_cheap_notified_set(
-    session: AsyncSession,
-) -> None:
-    auction = _make_auction(session, source_auction_id="A3")
-    lot = _make_lot(
-        session,
-        auction,
-        source_lot_id="L3",
-        cheap_notified_at=_NOW - timedelta(days=25),
-    )
-    await session.flush()
-
-    await distill_lot(session, lot, auction)
-    await session.flush()
-
-    sales = (await session.execute(sa_select(HistoricalSale))).scalars().all()
-    assert sales[0].was_notified is True
-
-
-async def test_distill_lot_was_notified_true_when_early_warning_set(
-    session: AsyncSession,
-) -> None:
-    auction = _make_auction(session, source_auction_id="A4")
-    lot = _make_lot(
-        session,
-        auction,
-        source_lot_id="L4",
-        early_warning_notified_at=_NOW - timedelta(days=25),
-    )
-    await session.flush()
-
-    await distill_lot(session, lot, auction)
-    await session.flush()
-
-    sales = (await session.execute(sa_select(HistoricalSale))).scalars().all()
-    assert sales[0].was_notified is True
-
-
 async def test_distill_lot_was_notified_true_when_closing_notified_set(
     session: AsyncSession,
 ) -> None:
@@ -216,25 +172,6 @@ async def test_distill_lot_was_notified_true_when_closing_notified_set(
         auction,
         source_lot_id="L5",
         closing_notified_at=_NOW - timedelta(days=25),
-    )
-    await session.flush()
-
-    await distill_lot(session, lot, auction)
-    await session.flush()
-
-    sales = (await session.execute(sa_select(HistoricalSale))).scalars().all()
-    assert sales[0].was_notified is True
-
-
-async def test_distill_lot_was_notified_true_when_trajectory_notified_set(
-    session: AsyncSession,
-) -> None:
-    auction = _make_auction(session, source_auction_id="A5b")
-    lot = _make_lot(
-        session,
-        auction,
-        source_lot_id="L5b",
-        trajectory_notified_at=_NOW - timedelta(days=25),
     )
     await session.flush()
 

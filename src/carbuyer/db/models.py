@@ -10,8 +10,8 @@ discriminator is the parent ``offer_kind`` column; the absence of an
 Worker column-ownership rule: each block is annotated with the worker that owns
 the columns. Workers UPDATE only their own columns; never session.merge() the
 whole row back. Bid-poller updates bid-state (auction child); enricher updates
-enrichment + rarity (parent, LLM); valuator updates valuation +
-historical_comp_count (parent); vision-batcher updates vision_* (parent);
+enrichment (parent, LLM); valuator updates valuation (parent);
+vision-batcher updates vision_* (parent);
 notifier updates notification bookkeeping (parent) + the per-trigger
 *_notified_at stamps (auction child); user actions come from the dashboard
 (parent).
@@ -227,11 +227,6 @@ class VehicleOffer(Base, TimestampMixin):
         server_default=text("'[]'::jsonb"),
         nullable=False,
     )
-    # historical_comp_count: written by valuator (DB-derived signal).
-    historical_comp_count: Mapped[int | None] = mapped_column(Integer)
-    recent_appreciation: Mapped[float | None] = mapped_column()
-    # rarity_score: combined LLM + DB; written by valuator.
-    rarity_score: Mapped[float | None] = mapped_column()
     # Reliability signal — NHTSA recall campaign + consumer-complaint counts for
     # this make/model/year (written by the enricher when enabled; the "known
     # issues" hard signal for the reliable/easy-to-fix archetype). NULL = not
@@ -258,9 +253,7 @@ class VehicleOffer(Base, TimestampMixin):
     expected_value_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     landed_cost_premium_cad: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     all_in_at_current_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
-    recommended_max_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     price_deal_score: Mapped[float | None] = mapped_column()
-    flag_score: Mapped[int | None] = mapped_column(Integer)
     confidence_bucket: Mapped[str | None] = mapped_column(String(16))
     suspicious_underprice_flag: Mapped[bool] = mapped_column(
         Boolean,
@@ -390,7 +383,6 @@ class VehicleOffer(Base, TimestampMixin):
         # lot_status now lives on the auction child, so it gets its own index
         # there; the deal-score scan keys on the parent column alone.
         Index("ix_vehicle_offer_price_deal_score", "price_deal_score"),
-        Index("ix_vehicle_offer_rarity_score", "rarity_score"),
         # Partial indexes for queue claims — most rows are non-pending, so a
         # full-table b-tree on the status column is mostly dead weight.
         Index(
@@ -470,10 +462,7 @@ class AuctionLot(VehicleOffer):
     final_bid_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
     # ── Owned by: notifier (one timestamp per auction trigger type) ─────────
-    early_warning_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    cheap_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closing_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    trajectory_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     extended_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     auction: Mapped[Auction] = relationship(back_populates="lots", lazy="raise")

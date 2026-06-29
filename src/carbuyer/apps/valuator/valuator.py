@@ -2,8 +2,8 @@
 
 Consumes lots whose enrichment is DONE (via the ``valuation_pending``
 NOTIFY channel) and writes the full valuation row: comp count, value range,
-expected value, deal score, rarity score, recommended max bid, landed cost,
-flag score, and the notification-status verdict.
+expected value, deal score, all-in cost, landed cost, and the
+notification-status verdict.
 
 Patterns (mirroring the Phase 3 enricher):
 - ``claim_pending_ids`` returns ``list[int]``; per-id work opens its own
@@ -22,8 +22,6 @@ Patterns (mirroring the Phase 3 enricher):
 Phase 4 overlay items consumed:
 - #8/#9: ``condition_inferred_from_sparse_listing`` threads through
   ``compute_fair_value(..., sparse=...)``.
-- #10: ``description_quality`` threads through
-  ``flag_score(..., description_quality=...)``.
 - #12: showstopper flags OR raw cumulative weight at/below
   ``settings.excessive_red_flag_weight_threshold`` mark
   ``notification_status = SKIPPED``.
@@ -35,7 +33,7 @@ import hashlib
 import json
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps._runner import run_worker
@@ -43,7 +41,6 @@ from carbuyer.db.enums import NotificationStatus, ValuationStatus
 from carbuyer.db.models import (
     Auction,
     AuctionLot,
-    HistoricalSale,
     PrivateListing,
     VehicleOffer,
     WantMatch,
@@ -60,13 +57,9 @@ from carbuyer.scoring.comps import build_comp_set
 from carbuyer.scoring.fair_value import ConfidenceBucket, compute_fair_value
 from carbuyer.scoring.landed_cost import distance_km_between, landed_cost_premium
 from carbuyer.scoring.score import (
-    RarityInputs,
     all_in_cost,
     cumulative_flag_weight,
-    flag_score,
     price_deal_score,
-    rarity_score,
-    recommended_max_bid,
 )
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
@@ -91,10 +84,6 @@ def _weights_hash() -> str:
     should invalidate previously-computed scores on backfill."""
     payload = json.dumps({
         "scoring_version": settings.scoring_version,
-        "notify_threshold": settings.notify_threshold,
-        "rarity_threshold": settings.early_warning_rarity_threshold,
-        "flip_margin_min": settings.flip_margin_min_cad,
-        "flip_margin_pct": settings.flip_margin_pct,
         "excessive_red_flag_weight_threshold": settings.excessive_red_flag_weight_threshold,
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
@@ -116,15 +105,6 @@ def _decide_notification_status(lot: VehicleOffer) -> NotificationStatus:
     if raw_cumulative <= settings.excessive_red_flag_weight_threshold:
         return NotificationStatus.SKIPPED
     return NotificationStatus.PENDING
-
-
-async def _historical_comp_count(session: AsyncSession, *, make: str, model: str) -> int:
-    """Broader-than-comp-set count for rarity scoring: same make+model
-    regardless of year window or trim. Cheap on the (make, model) index."""
-    stmt = select(func.count()).where(
-        HistoricalSale.make == make, HistoricalSale.model == model,
-    )
-    return (await session.execute(stmt)).scalar_one()
 
 
 def _apply_pricing(
@@ -166,20 +146,6 @@ def _apply_pricing(
     else:
         lot.all_in_at_current_bid_cad = None
         lot.price_deal_score = None
-
-    if expected_value is not None:
-        margin = max(
-            Decimal(settings.flip_margin_min_cad),
-            expected_value * Decimal(str(settings.flip_margin_pct)),
-        )
-        lot.recommended_max_bid_cad = recommended_max_bid(
-            expected_value=expected_value,
-            buyer_premium_pct=bp, gst_pct=gst, pst_pct=pst,
-            landed_cost_premium=landed, flip_margin=margin,
-            buyer_premium_max_cad=bp_max, buyer_premium_min_cad=bp_min,
-        )
-    else:
-        lot.recommended_max_bid_cad = None
 
     value_low = lot.value_low_cad
     if value_low is not None and current_bid is not None:
@@ -223,8 +189,6 @@ def _apply_listing_pricing(
     else:
         lot.all_in_at_current_bid_cad = None
         lot.price_deal_score = None
-    # recommended_max_bid is a flipper concept — N/A for a fixed-price listing.
-    lot.recommended_max_bid_cad = None
 
     value_low = lot.value_low_cad
     if value_low is not None and asking is not None:
@@ -279,24 +243,6 @@ async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
     lot.scoring_version = settings.scoring_version
     lot.weights_hash = _weights_hash()
     lot.last_valuation_error = None
-
-    historical_count = await _historical_comp_count(
-        session, make=lot.make, model=lot.model,
-    )
-    lot.historical_comp_count = historical_count
-
-    lot.rarity_score = rarity_score(RarityInputs(
-        desirable_trim_or_spec=lot.desirable_trim_or_spec,
-        classic_or_collector=lot.classic_or_collector,
-        historical_comp_count=historical_count,
-        recent_appreciation=lot.recent_appreciation,
-    ))
-
-    lot.flag_score = flag_score(
-        lot.red_flags or [],
-        lot.green_flags or [],
-        description_quality=lot.description_quality,
-    )
 
     # Channel-specific pricing: auction lots run BP/tax off the auction row;
     # private listings run the asking→sold haircut with no premium and no GST.

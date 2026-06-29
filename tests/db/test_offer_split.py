@@ -61,8 +61,7 @@ def test_parent_owns_shared_columns_child_owns_auction_columns() -> None:
         "auction_id", "source_lot_id", "source_lot_row_id", "lot_number",
         "scheduled_end_at", "current_high_bid_cad", "bid_count_visible",
         "reserve_met", "lot_status", "final_bid_cad",
-        "early_warning_notified_at", "cheap_notified_at", "closing_notified_at",
-        "trajectory_notified_at", "extended_notified_at",
+        "closing_notified_at", "extended_notified_at",
     ):
         assert col in child, f"{col} should be on auction_lot"
         assert col not in parent, f"{col} should NOT be on vehicle_offer"

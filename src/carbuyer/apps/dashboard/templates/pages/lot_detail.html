@@ -119,14 +119,8 @@
           </div>
         {% endif %}
 
-        <hr class="decision-card__rule">
-
-        <div class="decision-card__row">
-          <div class="decision-card__label">Recommended max</div>
-        </div>
-        <div class="decision-card__max">{{ money(lot.recommended_max_bid_cad, variant='main') }}</div>
-
         {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+          <hr class="decision-card__rule">
           <div class="decision-card__deal">{{ "%.0f"|format(lot.price_deal_score * 100) }}% under fair</div>
         {% endif %}
 
@@ -176,10 +170,6 @@
     <div class="bid-console__price">
       <div class="bid-console__label">Bid</div>
       <div class="bid-console__value">{{ money(lot.current_high_bid_cad) }}</div>
-    </div>
-    <div class="bid-console__max">
-      <div class="bid-console__label">Max</div>
-      <div class="bid-console__value">{{ money(lot.recommended_max_bid_cad) }}</div>
     </div>
     <div class="bid-console__countdown">{{ countdown_chip(auction.scheduled_end_at) }}</div>
     <div class="bid-console__actions" id="lot-{{ lot.id }}-mobile">
