@@ -3,6 +3,10 @@
 {% block nav %}wants{% endblock %}
 {% block content %}
   <h1>{{ want.name }}</h1>
+  {% set crit = want.config %}
+  {% if crit.get('archetype_text') %}
+    <p class="muted">expanded from: "{{ crit['archetype_text'] }}"</p>
+  {% endif %}
   <p>
     <a href="/wants">← all wants</a>
     · <span class="muted">{{ '🔔 active' if want.enabled else '🔕 muted' }}</span>
@@ -16,8 +20,8 @@
           {{ item.lot.year or '' }} {{ item.lot.make or '' }} {{ item.lot.model or '' }} {{ item.lot.trim or '' }}
         </a>
         <span class="muted">
-          {% if item.lot.current_high_bid_cad is not none %}
-            · ${{ '{:,}'.format(item.lot.current_high_bid_cad | int) }}
+          {% if item.lot.offer_price is not none %}
+            · ${{ '{:,}'.format(item.lot.offer_price | int) }}
           {% endif %}
           {% if item.match.want_relative_score is not none %}
             · {{ (item.match.want_relative_score * 100) | round | int }}% vs market

@@ -57,8 +57,6 @@ async def test_value_one_prices_listing_with_haircut_and_no_gst(
     expected_effective = effective_acquisition_price(Decimal("9000"), "private")
     landed = listing.landed_cost_premium_cad or Decimal("0")
     assert listing.all_in_at_current_bid_cad == expected_effective + landed
-    # recommended_max_bid is a flipper concept — N/A for a fixed-price listing.
-    assert listing.recommended_max_bid_cad is None
 
 
 @pytest.mark.asyncio

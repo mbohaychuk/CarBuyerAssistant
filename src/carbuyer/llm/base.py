@@ -19,7 +19,7 @@ from decimal import Decimal
 from types import TracebackType
 from typing import Self
 
-from carbuyer.llm.schemas import EnrichmentOutput, VisionOutput
+from carbuyer.llm.schemas import ArchetypeExpansion, EnrichmentOutput, VisionOutput
 
 
 @dataclass(slots=True)
@@ -89,6 +89,13 @@ class VisionProvider(_AsyncCM, ABC):
 
     @abstractmethod
     async def vision(self, payload: VisionInput) -> VisionOutput: ...
+
+
+class ArchetypeProvider(_AsyncCM, ABC):
+    name: str = "abstract"
+
+    @abstractmethod
+    async def expand_archetype(self, text: str) -> ArchetypeExpansion: ...
 
 
 class LLMProvider(DescribeProvider, VisionProvider, ABC):

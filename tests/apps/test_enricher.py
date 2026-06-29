@@ -22,11 +22,12 @@ from carbuyer.apps.enricher.enricher import (
     _classify_failure,
     _EnrichmentResult,
     _process_one,
+    _reliability,
     main,
     process_pending,
 )
-from carbuyer.db.enums import EnrichmentStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot
+from carbuyer.db.enums import EnrichmentStatus, NotificationStatus, ValuationStatus
+from carbuyer.db.models import Auction, AuctionLot, Search
 from carbuyer.llm.schemas import (
     CarfaxFindings,
     EnrichmentOutput,
@@ -34,6 +35,7 @@ from carbuyer.llm.schemas import (
     NormalizedVehicle,
     RarityAssessment,
 )
+from carbuyer.wants.criteria import WantCriteria
 
 
 def _enrichment(
@@ -708,3 +710,115 @@ async def test_process_one_applies_vpic_canonical_model(
     refreshed = await session.get(AuctionLot, lot_id)
     assert refreshed is not None
     assert refreshed.model == "F-150"
+
+
+# ─── NHTSA reliability signal ───
+
+
+@pytest.mark.asyncio
+async def test_reliability_noop_when_nhtsa_disabled() -> None:
+    # Off by default → no counts, no HTTP client opened.
+    assert await _reliability("Ford", "F-150", 2015) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_apply_to_lot_writes_reliability_counts(session: AsyncSession) -> None:
+    _, lot = _seed_auction_and_lot(session)
+    session.add(lot)
+    await session.flush()
+    result = _EnrichmentResult(output=_output_with_model("F-150"), carfax_findings=None)
+
+    _apply_to_lot(lot, result, raw_carfax_url=None, recall_count=3, complaint_count=47)
+    await session.flush()
+    expected_recalls, expected_complaints = 3, 47
+    assert lot.recall_count == expected_recalls
+    assert lot.complaint_count == expected_complaints
+
+
+@pytest.mark.asyncio
+async def test_process_one_applies_nhtsa_reliability(
+    _patched_get_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _patched_get_session
+    _, lot = _seed_auction_and_lot(session)
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+
+    monkeypatch.setattr(
+        "carbuyer.apps.enricher.enricher.settings.nhtsa_reliability_enabled", True,
+    )
+    monkeypatch.setattr(
+        enricher_mod.nhtsa, "fetch_reliability", AsyncMock(return_value=(3, 47)),
+    )
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_output_with_model("F-150"))
+
+    outcome = await _process_one(lot_id, provider=provider)
+
+    assert outcome == "done"
+    session.expire_all()
+    refreshed = await session.get(AuctionLot, lot_id)
+    assert refreshed is not None
+    expected_recalls, expected_complaints = 3, 47
+    assert refreshed.recall_count == expected_recalls
+    assert refreshed.complaint_count == expected_complaints
+
+
+# ─── WG3: want-gated enrichment ───
+
+
+def _want(name: str, **crit: object) -> Search:
+    return Search(name=name, config=WantCriteria(**crit).model_dump(mode="json"))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_process_one_skips_lot_matching_no_active_want(
+    _patched_get_session: AsyncSession,
+) -> None:
+    session = _patched_get_session
+    _, lot = _seed_auction_and_lot(session)  # title "2010 Ford F150"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+    session.add(_want("nissan only", makes=["Nissan"]))  # does NOT match the Ford
+    await session.commit()
+
+    provider = MagicMock()
+    provider.describe = AsyncMock(return_value=_output_with_model("F-150"))
+
+    outcome = await _process_one(lot_id, provider=provider)
+
+    assert outcome == "skipped"
+    provider.describe.assert_not_awaited()  # the LLM was never called
+    session.expire_all()
+    refreshed = await session.get(AuctionLot, lot_id)
+    assert refreshed is not None
+    assert refreshed.enrichment_status == EnrichmentStatus.SKIPPED
+    assert refreshed.notification_status == NotificationStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_process_one_enriches_lot_matching_a_want(
+    _patched_get_session: AsyncSession,
+) -> None:
+    session = _patched_get_session
+    _, lot = _seed_auction_and_lot(session)  # title "2010 Ford F150"
+    session.add(lot)
+    await session.flush()
+    lot_id = lot.id
+    session.add(_want("ford", makes=["Ford"]))  # matches via the title
+    await session.commit()
+
+    provider = MagicMock()
+    provider.client = MagicMock()
+    provider.model = "gpt-4o-mini"
+    provider.describe = AsyncMock(return_value=_output_with_model("F-150"))
+
+    outcome = await _process_one(lot_id, provider=provider)
+
+    assert outcome == "done"
+    provider.describe.assert_awaited()

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import cast
 
 import aiohttp
@@ -24,8 +24,6 @@ from carbuyer.apps.bot.channels import select_channel
 from carbuyer.apps.bot.messages import (
     LotEmbedData,
     render_closing_soon_text,
-    render_early_warning_text,
-    render_going_cheap_text,
     render_lot_extended_text,
     render_needs_plugin_text,
     render_want_match_text,
@@ -50,6 +48,7 @@ from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.deal import WantDeal, score_want_deal
+from carbuyer.wants.matcher import matches
 
 log = get_logger("notifier")
 
@@ -64,7 +63,12 @@ class WantAlert:
     deal: WantDeal
 
 
-async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[WantAlert]:
+async def _load_want_alerts(
+    session: AsyncSession,
+    lot: VehicleOffer,
+    *,
+    pickup_province: str | None,
+) -> list[WantAlert]:
     """Un-notified, non-dismissed want_matches for this lot, each with its want
     name and a freshly-computed deal breakdown for the message."""
     rows = (
@@ -85,6 +89,10 @@ async def _load_want_alerts(session: AsyncSession, lot: VehicleOffer) -> list[Wa
             criteria = WantCriteria.model_validate(config)
         except ValidationError:
             log.warning("skipping want alert with invalid config", want_match_id=want_match_id)
+            continue
+        if not matches(
+            lot, criteria, pickup_province=pickup_province, offer_price_cad=lot.offer_price,
+        ):
             continue
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.offer_price)
         alerts.append(WantAlert(want_match_id, want_name, deal))
@@ -147,17 +155,8 @@ async def _post_want_alerts(
 def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
     return LotState(
         lot_id=lot.id,
-        rarity_score=lot.rarity_score,
-        price_deal_score=lot.price_deal_score,
-        flag_score=lot.flag_score,
-        confidence_bucket=lot.confidence_bucket,
-        has_showstopper=bool(lot.showstopper_flags),
         user_action=lot.user_action,
         scheduled_end_at=auction.scheduled_end_at,
-        early_warning_notified_at=lot.early_warning_notified_at,
-        cheap_notified_at=lot.cheap_notified_at,
-        # No DB column yet — rescore path inactive until a future phase adds it.
-        last_cheap_score=None,
         lot_status=lot.lot_status,
         closing_notified_at=lot.closing_notified_at,
         extended_notified_at=lot.extended_notified_at,
@@ -165,6 +164,7 @@ def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
 
 
 def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
+    previous_asking = None
     if auction is not None:
         location = (
             ", ".join(filter(None, [auction.pickup_city, auction.pickup_province])) or "?"
@@ -173,6 +173,7 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
     else:
         location = (lot.location_province if isinstance(lot, PrivateListing) else None) or "?"
         end_at = None
+        previous_asking = lot.previous_asking_price_cad if isinstance(lot, PrivateListing) else None
     return LotEmbedData(
         lot_id=lot.id,
         url=lot.url,
@@ -184,28 +185,16 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
         location=location,
         current_high_bid_cad=lot.offer_price,
         all_in_cad=lot.all_in_at_current_bid_cad,
-        expected_value_cad=lot.expected_value_cad,
         value_low_cad=lot.value_low_cad,
         value_high_cad=lot.value_high_cad,
-        price_deal_score=lot.price_deal_score,
-        rarity_score=lot.rarity_score,
-        confidence_bucket=lot.confidence_bucket,
-        condition_categorical=lot.condition_categorical,
-        top_red_flags=tuple([f.get("flag", "") for f in (lot.red_flags or [])][:3]),
-        top_green_flags=tuple(
-            (lot.desirability_signals or [])[:3]
-            or [f.get("flag", "") for f in (lot.green_flags or [])][:3]
-        ),
-        suspicious_underprice=lot.suspicious_underprice_flag,
         scheduled_end_at=end_at,
+        previous_asking_cad=previous_asking,
+        recall_count=lot.recall_count,
+        complaint_count=lot.complaint_count,
     )
 
 
 def _render(trigger: TriggerResult, data: LotEmbedData) -> str:
-    if trigger.trigger == "early_warning":
-        return render_early_warning_text(data)
-    if trigger.trigger == "going_cheap":
-        return render_going_cheap_text(data)
     if trigger.trigger == "closing_soon":
         return render_closing_soon_text(data)
     if trigger.trigger == "lot_extended":
@@ -214,49 +203,9 @@ def _render(trigger: TriggerResult, data: LotEmbedData) -> str:
     return f"Lot {data.lot_id}: {trigger.trigger} — {trigger.reason}"
 
 
-def _in_quiet_hours(now: datetime, start_hour: int, end_hour: int) -> bool:
-    """Quiet hours window wraps midnight when start > end (typical: 22..08).
-
-    The 'now' input is in UTC by convention across this codebase; spec says
-    'local time', but local-time quiet hours on a single-user MVP can use UTC
-    plus a per-user offset later. Today: hour-of-day in UTC.
-    """
-    h = now.hour
-    if start_hour <= end_hour:
-        return start_hour <= h < end_hour
-    # Wraparound: start_hour..23 or 0..end_hour
-    return h >= start_hour or h < end_hour
-
-
-def _trigger_overrides_quiet_hours(
-    trigger: TriggerResult, lot: VehicleOffer, now: datetime,
-) -> bool:
-    """Spec §6e exceptions: early_warning always fires; going_cheap fires if
-    price_deal_score >= quiet_hours_override_score; closing-T-1h fires always.
-
-    closing_soon and lot_extended are inherently urgency-class — they only fire
-    on lots the user already flagged interested/maybe AND only at the imminent
-    boundary (T-1h for closing_soon, soft-close extension event for extended).
-    Waiting for the morning digest defeats the trigger's whole purpose.
-    """
-    if trigger.trigger in {"early_warning", "closing_soon", "lot_extended"}:
-        return True
-    if (
-        lot.price_deal_score is not None
-        and lot.price_deal_score >= settings.quiet_hours_override_score
-    ):
-        return True
-    # Closing-T-1h timing check (applies to any other trigger on a lot
-    # closing within 1h) is handled in _process_one because it needs
-    # auction.scheduled_end_at, which doesn't live on AuctionLot.
-    return False
-
-
 def _timestamp_field_for_trigger(trigger: str) -> str | None:
     """Map trigger name to the AuctionLot timestamp column it stamps."""
     return {
-        "early_warning": "early_warning_notified_at",
-        "going_cheap": "cheap_notified_at",
         "closing_soon": "closing_notified_at",
         "lot_extended": "extended_notified_at",
     }.get(trigger)
@@ -293,21 +242,20 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
             if auction is None:
                 log.warning("auction missing for lot", lot_id=lot_id)
                 return "missing"
-        want_alerts = await _load_want_alerts(s, lot)
+        want_alerts = await _load_want_alerts(
+            s, lot,
+            pickup_province=(
+                auction.pickup_province if auction is not None
+                else (lot.location_province if isinstance(lot, PrivateListing) else None)
+            ),
+        )
 
     now = datetime.now(UTC)
-    # Auction triggers (early-warning, going-cheap, closing-soon, …) gate on bid
-    # state + scheduled close, which private listings don't have — those alert
-    # only via want matches. So triggers are auction-only.
+    # Auction triggers (closing_soon, lot_extended) gate on bid state + scheduled
+    # close, which private listings don't have — those alert only via want
+    # matches. So triggers are auction-only.
     if isinstance(lot, AuctionLot) and auction is not None:
-        triggers = evaluate_triggers(
-            _state_from_lot(lot, auction),
-            now=now,
-            rarity_threshold=settings.early_warning_rarity_threshold,
-            notify_threshold=settings.notify_threshold,
-            rescore_improvement_threshold=settings.rescore_improvement_threshold,
-            early_warning_min_hours=settings.early_warning_min_hours_to_close,
-        )
+        triggers = evaluate_triggers(_state_from_lot(lot, auction), now=now)
     else:
         triggers = []
 
@@ -319,42 +267,6 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
             else:
                 log.warning("lot vanished before SKIPPED write", lot_id=lot_id)
         return "skipped"
-
-    # Quiet-hours filter (spec §6e): 22:00-08:00 local, suppress non-priority
-    # triggers. Priority overrides:
-    #   - early_warning (always — rare-car lead time has value any hour)
-    #   - going_cheap with price_deal_score >= quiet_hours_override_score
-    #   - any trigger on a lot closing within 1h (auction-closing T-1h)
-    # Suppressed triggers leave the lot PENDING with attempts NOT incremented;
-    # the next external NOTIFY (bid change, rescore, etc.) re-evaluates after
-    # quiet hours. The 08:00 morning digest in the spec is a Phase 14
-    # follow-on (needs a periodic flush job).
-    had_suppressed_triggers = False
-    if auction is not None and _in_quiet_hours(
-        now, settings.quiet_hours_start, settings.quiet_hours_end,
-    ):
-        closing_in_1h = (
-            auction.scheduled_end_at is not None
-            and (auction.scheduled_end_at - now) <= timedelta(hours=1)
-        )
-        before = len(triggers)
-        triggers = [
-            t for t in triggers
-            if closing_in_1h or _trigger_overrides_quiet_hours(t, lot, now)
-        ]
-        had_suppressed_triggers = len(triggers) < before
-        # Want alerts bypass quiet hours (the user explicitly wants these), so
-        # only defer when there are no want alerts AND no overriding triggers.
-        if not triggers and not want_alerts:
-            log.info(
-                "quiet hours: deferring notification",
-                lot_id=lot_id, hour=now.hour,
-            )
-            async with get_session() as s, s.begin():
-                row = await s.get(VehicleOffer, lot_id)
-                if row is not None:
-                    row.notification_status = NotificationStatus.PENDING
-            return "deferred"
 
     data = _embed_data(lot, auction)
 
@@ -448,13 +360,6 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
                 else:
                     row.notification_status = NotificationStatus.PENDING
                     final = "transient"
-            elif had_suppressed_triggers:
-                # A want alert delivered (bypassing quiet hours) but a non-priority
-                # system trigger was suppressed; keep PENDING so it defers rather
-                # than being lost when the lot is finalized.
-                row.notification_status = NotificationStatus.PENDING
-                row.last_notification_error = None
-                final = "deferred"
             else:
                 row.notification_status = NotificationStatus.DONE
                 row.last_notification_error = None

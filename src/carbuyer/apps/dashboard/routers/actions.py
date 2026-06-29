@@ -15,7 +15,7 @@ from carbuyer.apps.dashboard.deps import (
     require_admin,
 )
 from carbuyer.db.enums import UserAction, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot, VehicleOffer
+from carbuyer.db.models import AuctionLot, VehicleOffer
 from carbuyer.db.notify import notify
 from carbuyer.shared.logging import get_logger
 
@@ -93,31 +93,21 @@ async def mark_lot(
     # stored value — known transitional limitation until the workflow
     # migration ships, documented in [[dashboard-redesign-direction-a]].
     # On a toggle-off, effective_state is None so no button renders active.
+    # The mark action now lives only on lot detail (the browse feed was retired in
+    # WG5), whose buttons swap a bare action-buttons wrapper — mobile uses the
+    # bid-console wrapper, everything else the decision-card rail.
     hx_target = request.headers.get("HX-Target", "") or ""
-    is_button_fragment_target = (
-        hx_target.endswith("-desktop") or hx_target.endswith("-mobile")
+    wrapper_class = (
+        "bid-console__actions" if hx_target.endswith("-mobile")
+        else "decision-card__actions"
     )
-    if is_button_fragment_target:
-        wrapper_class = (
-            "decision-card__actions" if hx_target.endswith("-desktop")
-            else "bid-console__actions"
-        )
-        return templates.TemplateResponse(
-            request,
-            "partials/action_buttons_fragment.html",
-            {
-                "lot_id": lot.id,
-                "target_id": hx_target,
-                "wrapper_class": wrapper_class,
-                "effective_state": effective_state,
-            },
-        )
-    auction = await session.get(Auction, lot.auction_id)
     return templates.TemplateResponse(
         request,
-        "partials/lot_card.html",
+        "partials/action_buttons_fragment.html",
         {
-            "item": {"lot": lot, "auction": auction},
+            "lot_id": lot.id,
+            "target_id": hx_target,
+            "wrapper_class": wrapper_class,
             "effective_state": effective_state,
         },
     )

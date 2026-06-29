@@ -8,13 +8,22 @@ them back with WantCriteria.model_validate(search.config).
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from carbuyer.db.models import Search, WantMatch
+from carbuyer.db.enums import ListingStatus, LotStatus
+from carbuyer.db.models import AuctionLot, PrivateListing, Search, VehicleOffer, WantMatch
 from carbuyer.wants.criteria import WantCriteria
 
 _MAX_NAME_LEN = 128  # matches Search.name String(128)
+
+# Auction-lot statuses where the lot is still biddable (a live sibling that can
+# legitimately suppress a same-VIN duplicate). Mirrors wants.service._OPEN_STATUSES.
+_LIVE_LOT_STATUSES = (
+    LotStatus.OPEN.value,
+    LotStatus.CLOSING_SOON.value,
+    LotStatus.EXTENDED.value,
+)
 
 
 async def create_want(
@@ -112,6 +121,57 @@ async def upsert_want_match(
     match = WantMatch(
         search_id=search_id, lot_id=lot_id, want_relative_score=want_relative_score
     )
+    # Cross-source VIN dedup: the same physical vehicle can be listed on several
+    # sources (separate offer rows, one VIN). Auto-dismiss this match if the same
+    # VIN already matched this want via another *live* offer, so the vehicle alerts
+    # once. dismissed is what the notifier + dashboard already filter on, so no new
+    # state is needed.
+    # Known limits of reusing `dismissed` (revisit if cross-source listings get
+    # common): (1) it can't be told apart from a user dismissal, so a price drop on
+    # the suppressed copy won't re-alert (upsert_private_listing's clear filters
+    # dismissed); (2) if the live winner later sells, nothing re-opens an
+    # already-suppressed duplicate — a failover reconciliation would be a separate
+    # piece. The live-sibling check below covers the common auction->retail flip
+    # where the winner is already dead when the duplicate first appears.
+    if await _vin_already_matched(session, search_id=search_id, lot_id=lot_id):
+        match.dismissed = True
     session.add(match)
     await session.flush()
     return match, True
+
+
+async def _vin_already_matched(
+    session: AsyncSession, *, search_id: int, lot_id: int,
+) -> bool:
+    """True if a non-dismissed match for this want already covers this offer's VIN
+    via a different, still-LIVE offer (open auction lot or active listing). VIN-less
+    offers can't be deduped (returns False); a sold/removed sibling doesn't count."""
+    vin = (
+        await session.execute(select(VehicleOffer.vin).where(VehicleOffer.id == lot_id))
+    ).scalar_one_or_none()
+    if not vin:
+        return False
+    vo, al, pl, wm = (
+        VehicleOffer.__table__, AuctionLot.__table__, PrivateListing.__table__,
+        WantMatch.__table__,
+    )
+    stmt = (
+        select(wm.c.id)
+        .select_from(
+            wm.join(vo, vo.c.id == wm.c.lot_id)
+            .outerjoin(al, al.c.id == vo.c.id)
+            .outerjoin(pl, pl.c.id == vo.c.id)
+        )
+        .where(
+            wm.c.search_id == search_id,
+            wm.c.lot_id != lot_id,
+            wm.c.dismissed.is_(False),
+            func.upper(vo.c.vin) == vin.upper(),
+            or_(
+                al.c.lot_status.in_(_LIVE_LOT_STATUSES),
+                pl.c.listing_status == ListingStatus.ACTIVE.value,
+            ),
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None

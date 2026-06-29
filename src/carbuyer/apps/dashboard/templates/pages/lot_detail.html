@@ -88,6 +88,7 @@
           {% if lot.title_status %}<div><dt>Title</dt><dd>{{ lot.title_status }}</dd></div>{% endif %}
           {% if lot.province_of_origin %}<div><dt>Origin</dt><dd>{{ lot.province_of_origin }}</dd></div>{% endif %}
           {% if lot.condition_categorical %}<div><dt>Condition</dt><dd>{{ lot.condition_categorical }}</dd></div>{% endif %}
+          {% if lot.recall_count is not none or lot.complaint_count is not none %}<div><dt>NHTSA reliability</dt><dd>{{ lot.recall_count if lot.recall_count is not none else '?' }} recalls · {{ lot.complaint_count if lot.complaint_count is not none else '?' }} complaints</dd></div>{% endif %}
           {% if auction.pickup_window_text %}<div><dt>Pickup</dt><dd>{{ auction.pickup_window_text }}</dd></div>{% endif %}
           {% if auction.terms_text %}<div><dt>Terms</dt><dd class="t-meta">{{ auction.terms_text }}</dd></div>{% endif %}
         </dl>
@@ -118,14 +119,8 @@
           </div>
         {% endif %}
 
-        <hr class="decision-card__rule">
-
-        <div class="decision-card__row">
-          <div class="decision-card__label">Recommended max</div>
-        </div>
-        <div class="decision-card__max">{{ money(lot.recommended_max_bid_cad, variant='main') }}</div>
-
         {% if lot.price_deal_score and lot.price_deal_score >= 0.15 %}
+          <hr class="decision-card__rule">
           <div class="decision-card__deal">{{ "%.0f"|format(lot.price_deal_score * 100) }}% under fair</div>
         {% endif %}
 
@@ -175,10 +170,6 @@
     <div class="bid-console__price">
       <div class="bid-console__label">Bid</div>
       <div class="bid-console__value">{{ money(lot.current_high_bid_cad) }}</div>
-    </div>
-    <div class="bid-console__max">
-      <div class="bid-console__label">Max</div>
-      <div class="bid-console__value">{{ money(lot.recommended_max_bid_cad) }}</div>
     </div>
     <div class="bid-console__countdown">{{ countdown_chip(auction.scheduled_end_at) }}</div>
     <div class="bid-console__actions" id="lot-{{ lot.id }}-mobile">

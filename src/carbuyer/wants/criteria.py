@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from carbuyer.llm.schemas import Condition, Drivetrain, Transmission
 
 
-def _split_csv(value: str | None) -> list[str]:
+def split_csv(value: str | None) -> list[str]:
     """Comma-separated free-text (slash command / web form) → list, blanks dropped."""
     return [part.strip() for part in value.split(",") if part.strip()] if value else []
 
@@ -32,8 +32,37 @@ def first_error(exc: ValidationError) -> str:
     return f"{loc}: {msg}" if loc else msg
 
 
+class ModelSpec(BaseModel):
+    """One concrete model in an archetype's fan-out: a precise make+model with
+    its own year range and trim hints. The matcher ORs across a want's specs."""
+    model_config = ConfigDict(extra="forbid")
+
+    make: str
+    model: str
+    year_min: int | None = None
+    year_max: int | None = None
+    trims: list[str] = []
+
+    @model_validator(mode="after")
+    def _year_range_ordered(self) -> ModelSpec:
+        if (
+            self.year_min is not None
+            and self.year_max is not None
+            and self.year_min > self.year_max
+        ):
+            raise ValueError("year_min must not be greater than year_max")
+        return self
+
+
 class WantCriteria(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    # Archetype fan-out (Phase 2). archetype_text is the original fuzzy text the
+    # LLM expanded; model_specs is the confirmed concrete set. Both default-empty
+    # so legacy flat wants validate unchanged. A want uses EITHER model_specs
+    # (archetype) OR the flat makes/models (manual) for identity — not both.
+    archetype_text: str | None = None
+    model_specs: list[ModelSpec] = []
 
     # Vehicle identity. Empty list = "any" for that field; multiple values fan
     # the want out (e.g. models=["GX 470","4Runner"] for a cross-platform want).
@@ -76,16 +105,16 @@ class WantCriteria(BaseModel):
         # vocabularies; lower the inputs so "Manual"/"4WD"/"Good" are accepted, to
         # match the case-insensitivity of make/model/trim/province downstream.
         return cls.model_validate({
-            "makes": _split_csv(makes),
-            "models": _split_csv(models),
-            "trims": _split_csv(trims),
-            "transmissions": [t.lower() for t in _split_csv(transmissions)],
-            "drivetrains": [d.lower() for d in _split_csv(drivetrains)],
+            "makes": split_csv(makes),
+            "models": split_csv(models),
+            "trims": split_csv(trims),
+            "transmissions": [t.lower() for t in split_csv(transmissions)],
+            "drivetrains": [d.lower() for d in split_csv(drivetrains)],
             "year_min": year_min,
             "year_max": year_max,
             "price_ceiling_cad": max_price_cad,
             "max_mileage_km": max_mileage_km,
-            "provinces": _split_csv(provinces),
+            "provinces": split_csv(provinces),
             "condition_min": (condition_min or "").strip().lower() or None,
         })
 

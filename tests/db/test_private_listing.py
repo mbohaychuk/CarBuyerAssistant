@@ -8,13 +8,14 @@ content change.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.db.enums import EnrichmentStatus, ListingStatus, ValuationStatus
-from carbuyer.db.models import PrivateListing, VehicleOffer
+from carbuyer.db.models import PrivateListing, Search, VehicleOffer, WantMatch
 from carbuyer.db.upserts import upsert_private_listing
 from carbuyer.sources.base import ListingRef, ListingSource, RawListing, SourceType
 
@@ -115,6 +116,55 @@ async def test_upsert_repends_valuation_on_price_change(session: AsyncSession) -
     assert listing2.asking_price_cad == Decimal("14000")
     assert listing2.valuation_status == ValuationStatus.PENDING
     assert listing2.enrichment_status == EnrichmentStatus.DONE
+
+
+async def _notified_match(session: AsyncSession, listing: PrivateListing) -> int:
+    """Seed a want + an already-notified want_match for the listing; return wm id."""
+    want = Search(name="gx", config={})
+    session.add(want)
+    await session.flush()
+    wm = WantMatch(search_id=want.id, lot_id=listing.id, notified_at=datetime.now(UTC))
+    session.add(wm)
+    await session.flush()
+    return wm.id
+
+
+async def test_price_drop_records_previous_and_re_alerts(session: AsyncSession) -> None:
+    listing = await upsert_private_listing(
+        session, _raw_listing(asking="15000"), parser_version="v1",
+    )
+    wm_id = await _notified_match(session, listing)
+
+    listing2 = await upsert_private_listing(
+        session, _raw_listing(asking="13500"), parser_version="v1",
+    )
+    await session.flush()
+    assert listing2.previous_asking_price_cad == Decimal("15000")
+
+    session.expire_all()
+    wm = await session.get(WantMatch, wm_id)
+    assert wm is not None
+    assert wm.notified_at is None  # fire-once cleared → notifier re-delivers
+
+
+async def test_price_increase_records_previous_but_does_not_re_alert(
+    session: AsyncSession,
+) -> None:
+    listing = await upsert_private_listing(
+        session, _raw_listing(asking="15000"), parser_version="v1",
+    )
+    wm_id = await _notified_match(session, listing)
+
+    listing2 = await upsert_private_listing(
+        session, _raw_listing(asking="16000"), parser_version="v1",
+    )
+    await session.flush()
+    assert listing2.previous_asking_price_cad == Decimal("15000")
+
+    session.expire_all()
+    wm = await session.get(WantMatch, wm_id)
+    assert wm is not None
+    assert wm.notified_at is not None  # an increase must NOT re-alert
 
 
 async def test_upsert_no_reset_on_idempotent_reingest(session: AsyncSession) -> None:

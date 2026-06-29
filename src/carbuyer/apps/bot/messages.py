@@ -28,62 +28,20 @@ class LotEmbedData:
     location: str
     current_high_bid_cad: Decimal | None
     all_in_cad: Decimal | None
-    expected_value_cad: Decimal | None
     value_low_cad: Decimal | None
     value_high_cad: Decimal | None
-    price_deal_score: float | None
-    rarity_score: float | None
-    confidence_bucket: str | None
-    condition_categorical: str | None
-    top_red_flags: tuple[str, ...]
-    top_green_flags: tuple[str, ...]
-    suspicious_underprice: bool
     scheduled_end_at: datetime | None
+    # Private-listing price-drop re-alert: the asking price before the latest
+    # drop (None for auctions / no prior drop).
+    previous_asking_cad: Decimal | None = None
+    # NHTSA reliability signal (None = not looked up).
+    recall_count: int | None = None
+    complaint_count: int | None = None
 
 
 def _vehicle_title(d: LotEmbedData) -> str:
     parts = [str(d.year or ""), d.make or "", d.model or "", d.trim or ""]
     return " ".join(p for p in parts if p).strip()
-
-
-def render_early_warning_text(d: LotEmbedData) -> str:
-    title = _vehicle_title(d)
-    end = d.scheduled_end_at.strftime("%b %d") if d.scheduled_end_at else "?"
-    bid = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no bid yet)"
-    if d.value_low_cad and d.value_high_cad:
-        rng = f"${int(d.value_low_cad):,}–${int(d.value_high_cad):,}"  # noqa: RUF001 (en dash for Discord display)
-    else:
-        rng = "(uncomped)"
-    rarity = ", ".join(d.top_green_flags[:3]) or "rare/desirable"
-    return (
-        f"⭐ RARE FIND — {title} ({d.location})\n"
-        f"Closes {end}\n"
-        f"Current bid: {bid} · Estimated value: {rng}\n"
-        f"Rarity: {rarity}\n"
-        f"{d.url}"
-    )
-
-
-def render_going_cheap_text(d: LotEmbedData) -> str:
-    title = _vehicle_title(d)
-    bid = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "no bid"
-    all_in = f"${int(d.all_in_cad):,}" if d.all_in_cad else "?"
-    ev = f"${int(d.expected_value_cad):,}" if d.expected_value_cad else "?"
-    margin = ""
-    if d.expected_value_cad and d.all_in_cad:
-        m = int(d.expected_value_cad - d.all_in_cad)
-        margin = f"  ·  Margin at current bid: ${m:,}"
-    flags = ", ".join(d.top_green_flags[:3])
-    prefix = "⚠ PRICED BELOW TYPICAL LOW END\n" if d.suspicious_underprice else ""
-    return (
-        f"{prefix}\U0001f4b0 Going cheap — {title}\n"
-        f"{d.location}\n"
-        f"Current bid: {bid}  →  All-in: {all_in}\n"
-        f"Estimated value: {ev}{margin}\n"
-        f"Confidence: {d.confidence_bucket or '?'} · Condition: {d.condition_categorical or '?'}\n"
-        f"{('✅ ' + flags) if flags else ''}\n"
-        f"{d.url}"
-    ).rstrip()
 
 
 def render_closing_soon_text(d: LotEmbedData) -> str:
@@ -128,6 +86,17 @@ def render_want_match_text(
     gracefully to '(not enough comps to price)' when the lot is uncomped."""
     title = _vehicle_title(d)
     price = f"${int(d.current_high_bid_cad):,}" if d.current_high_bid_cad else "(no price yet)"
+    drop_line = ""
+    if (
+        d.previous_asking_cad is not None
+        and d.current_high_bid_cad is not None
+        and d.previous_asking_cad > d.current_high_bid_cad
+    ):
+        drop = int(d.previous_asking_cad - d.current_high_bid_cad)
+        drop_line = (
+            f"\U0001f4c9 Price drop: ${int(d.previous_asking_cad):,} -> "
+            f"${int(d.current_high_bid_cad):,} (down ${drop:,})\n"
+        )
     parts: list[str] = []
     if pct_below_market is not None and dollars_below_market_cad is not None:
         pct = round(pct_below_market * 100)
@@ -142,10 +111,16 @@ def render_want_match_text(
     budget = ""
     if dollars_under_ceiling_cad is not None:
         budget = f"\n${int(dollars_under_ceiling_cad):,} under your budget"
+    reliability = ""
+    if d.recall_count is not None or d.complaint_count is not None:
+        recalls = d.recall_count if d.recall_count is not None else "?"
+        complaints = d.complaint_count if d.complaint_count is not None else "?"
+        reliability = f"\n\U0001f527 NHTSA: {recalls} recalls · {complaints} complaints"
     return (
         f"\U0001f3af Matches your want “{want_name}”\n"
+        f"{drop_line}"
         f"{title} ({d.location})\n"
-        f"Price: {price} · {deal_line}{budget}\n"
+        f"Price: {price} · {deal_line}{budget}{reliability}\n"
         f"{d.url}"
     )
 

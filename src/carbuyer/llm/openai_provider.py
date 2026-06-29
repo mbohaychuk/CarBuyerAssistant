@@ -29,6 +29,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 from carbuyer.llm.base import (
+    ArchetypeProvider,
     DescribeInput,
     LLMProvider,
     VisionInput,
@@ -36,10 +37,11 @@ from carbuyer.llm.base import (
 from carbuyer.llm.prompts import (
     VISION_AGGREGATION_PROMPT,
     VISION_PER_IMAGE_PROMPT,
+    archetype_system_prompt,
     description_system_prompt,
     description_user_prompt,
 )
-from carbuyer.llm.schemas import EnrichmentOutput, PerImageOutput, VisionOutput
+from carbuyer.llm.schemas import ArchetypeExpansion, EnrichmentOutput, PerImageOutput, VisionOutput
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 
@@ -56,6 +58,7 @@ DESCRIBE_MAX_TOKENS = 3000
 # richer VisionOutput.
 _VISION_PER_IMAGE_MAX_TOKENS = 512
 _VISION_AGGREGATE_MAX_TOKENS = 1024
+ARCHETYPE_MAX_TOKENS = 1500
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -72,7 +75,7 @@ def _is_reasoning_model(model: str) -> bool:
     return any(model.startswith(p) for p in _REASONING_MODEL_PREFIXES)
 
 
-class OpenAIProvider(LLMProvider):
+class OpenAIProvider(LLMProvider, ArchetypeProvider):
     """OpenAI implementation of `describe` and `vision` (Phase 3 + Phase 8).
 
     Both methods funnel through `_parse_to`, which is the single chokepoint
@@ -278,4 +281,17 @@ class OpenAIProvider(LLMProvider):
             max_tokens=_VISION_AGGREGATE_MAX_TOKENS,
             kind="vision_aggregate",
             lot_id=payload.lot_id,
+        )
+
+    async def expand_archetype(self, text: str) -> ArchetypeExpansion:
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": archetype_system_prompt()},
+            {"role": "user", "content": text},
+        ]
+        return await self._parse_to(
+            response_format=ArchetypeExpansion,
+            messages=messages,
+            max_tokens=ARCHETYPE_MAX_TOKENS,
+            kind="archetype",
+            lot_id=None,
         )

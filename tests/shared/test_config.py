@@ -3,9 +3,6 @@ from pydantic import ValidationError
 
 from carbuyer.shared.config import Settings
 
-DEFAULT_NOTIFY_THRESHOLD = 0.15
-DEFAULT_EARLY_WARNING_HOURS = 48
-
 
 def test_settings_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5433/db")
@@ -17,14 +14,12 @@ def test_settings_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.openai_api_key == "sk-test"
     assert s.discord_bot_token == "tok"
     assert s.home_province == "AB"
-    assert s.notify_threshold == DEFAULT_NOTIFY_THRESHOLD
-    assert s.early_warning_min_hours_to_close == DEFAULT_EARLY_WARNING_HOURS
 
 
 def test_discord_channels_parses_json_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DISCORD_CHANNELS", '{"early_warning": 111, "hot_deals": 222}')
+    monkeypatch.setenv("DISCORD_CHANNELS", '{"wants": 111, "auction_closing": 222}')
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.discord_channels == {"early_warning": 111, "hot_deals": 222}
+    assert s.discord_channels == {"wants": 111, "auction_closing": 222}
 
 
 def test_discord_channels_empty_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

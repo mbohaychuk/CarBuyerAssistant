@@ -112,6 +112,21 @@ class PerImageOutput(BaseModel):
     explicit_unknowns: list[str]
 
 
+class ExpandedModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    make: str
+    model: str
+    year_min: int | None
+    year_max: int | None
+    trims: list[str]
+    reason: str  # one line: why this model fits the archetype (shown in the table)
+
+
+class ArchetypeExpansion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    models: list[ExpandedModel]
+
+
 class VisionOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     coverage_gaps: list[str]

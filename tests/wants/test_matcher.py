@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 from carbuyer.db.models import AuctionLot
-from carbuyer.wants.criteria import WantCriteria
+from carbuyer.wants.criteria import ModelSpec, WantCriteria
 from carbuyer.wants.matcher import matches
 
 
@@ -162,3 +162,48 @@ def test_showstopper_excludes_even_when_all_else_matches() -> None:
     want = WantCriteria(makes=["Nissan"], models=["Xterra"], year_min=2005, year_max=2015)
     flagged = _lot(showstopper_flags=[{"flag": "frame_rot", "evidence": "rust"}])
     assert matches(flagged, want) is False
+
+
+def test_model_spec_matches_within_its_year_range() -> None:
+    crit = WantCriteria(model_specs=[
+        ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009),
+        ModelSpec(make="Lexus", model="GX 460", year_min=2010, year_max=2019),
+    ])
+    assert matches(_lot(make="Lexus", model="GX 470", year=2005), crit) is True
+    assert matches(_lot(make="Lexus", model="GX 460", year=2015), crit) is True
+
+
+def test_model_spec_excludes_sibling_out_of_its_range() -> None:
+    crit = WantCriteria(model_specs=[
+        ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009),
+    ])
+    # A GX 470 from 2015 is out of THIS spec's range → no match.
+    assert matches(_lot(make="Lexus", model="GX 470", year=2015), crit) is False
+
+
+def test_model_spec_unknown_year_excluded_when_spec_bounded() -> None:
+    # Year is core identity (see matcher module docstring): a lot whose year is
+    # unknown cannot be confirmed inside a spec's year range, so it is excluded —
+    # identical to the flat path's treatment of year. (The coarse WG1 gate is
+    # leniently inclusive of unknown years; the precise matcher here is strict.)
+    crit = WantCriteria(model_specs=[
+        ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009),
+    ])
+    assert matches(_lot(make="Lexus", model="GX 470", year=None), crit) is False
+
+
+def test_model_spec_trims_scoped_per_spec() -> None:
+    crit = WantCriteria(model_specs=[
+        ModelSpec(make="Toyota", model="4Runner", year_min=2003, year_max=2009, trims=["TRD"]),
+    ])
+    assert matches(_lot(make="Toyota", model="4Runner", year=2005, trim="TRD"), crit) is True
+    assert matches(_lot(make="Toyota", model="4Runner", year=2005, trim="SR5"), crit) is False
+    # Lenient on unknown trim (a buyer-assistant would rather over-alert).
+    assert matches(_lot(make="Toyota", model="4Runner", year=2005, trim=None), crit) is True
+
+
+def test_flat_path_unchanged_when_no_specs() -> None:
+    # Regression: a legacy flat want must behave exactly as before.
+    crit = WantCriteria(makes=["Nissan"], models=["Xterra"], year_min=2005, year_max=2015)
+    assert matches(_lot(make="Nissan", model="Xterra", year=2010), crit) is True
+    assert matches(_lot(make="Toyota", model="Tacoma", year=2010), crit) is False

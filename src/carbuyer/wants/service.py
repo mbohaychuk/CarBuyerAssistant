@@ -55,6 +55,14 @@ def _criteria_or_none(want: Search) -> WantCriteria | None:
         return None
 
 
+async def load_active_criteria(session: AsyncSession) -> list[WantCriteria]:
+    """Validated criteria of every enabled want (corrupt rows skipped). The
+    want-first gate's source of truth, shared by the ingester (WG2) and enricher
+    (WG3). Empty list ⇒ no active wants."""
+    wants = await repo.list_wants(session, enabled_only=True)
+    return [c for w in wants if (c := _criteria_or_none(w)) is not None]
+
+
 async def evaluate_lot_against_wants(
     session: AsyncSession,
     lot: VehicleOffer,
@@ -113,10 +121,11 @@ async def backfill_want(session: AsyncSession, want: Search) -> int:
         ):
             continue
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.current_high_bid_cad)
-        await repo.upsert_want_match(
+        match, _ = await repo.upsert_want_match(
             session, search_id=want.id, lot_id=lot.id, want_relative_score=deal.score
         )
-        count += 1
+        if not match.dismissed:  # cross-source VIN duplicates don't count as findable
+            count += 1
 
     # Private listings already valued — same predicate, channel-specific price +
     # province injected (the matcher is source-agnostic). Active candidates only;
@@ -140,8 +149,9 @@ async def backfill_want(session: AsyncSession, want: Search) -> int:
         ):
             continue
         deal = score_want_deal(listing, criteria, offer_price_cad=listing.asking_price_cad)
-        await repo.upsert_want_match(
+        match, _ = await repo.upsert_want_match(
             session, search_id=want.id, lot_id=listing.id, want_relative_score=deal.score,
         )
-        count += 1
+        if not match.dismissed:  # cross-source VIN duplicates don't count as findable
+            count += 1
     return count

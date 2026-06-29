@@ -19,16 +19,8 @@ def _data(**over: Any) -> LotEmbedData:
         "location": "Calgary, AB",
         "current_high_bid_cad": Decimal("8000"),
         "all_in_cad": None,
-        "expected_value_cad": Decimal("10000"),
         "value_low_cad": None,
         "value_high_cad": None,
-        "price_deal_score": None,
-        "rarity_score": None,
-        "confidence_bucket": None,
-        "condition_categorical": None,
-        "top_red_flags": (),
-        "top_green_flags": (),
-        "suspicious_underprice": False,
         "scheduled_end_at": None,
     }
     base.update(over)
@@ -57,6 +49,71 @@ def test_render_want_match_full() -> None:
     assert "9 comps" in text
     assert "$7,000 under your budget" in text
     assert "http://x/lot" in text
+
+
+def test_render_want_match_shows_price_drop() -> None:
+    text = render_want_match_text(
+        _data(previous_asking_cad=Decimal("10000"), current_high_bid_cad=Decimal("8000")),
+        want_name="GX470",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "Price drop" in text
+    assert "$10,000" in text  # was
+    assert "$8,000" in text   # now
+
+
+def test_render_want_match_no_drop_line_without_previous() -> None:
+    text = render_want_match_text(
+        _data(),  # previous_asking_cad defaults to None
+        want_name="w",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "Price drop" not in text
+
+
+def test_render_want_match_no_drop_line_on_increase() -> None:
+    # previous < current (price went up) → no drop line.
+    text = render_want_match_text(
+        _data(previous_asking_cad=Decimal("8000"), current_high_bid_cad=Decimal("9000")),
+        want_name="w",
+        pct_below_market=None,
+        dollars_below_market_cad=None,
+        dollars_under_ceiling_cad=None,
+        comp_count=None,
+    )
+    assert "Price drop" not in text
+
+
+def test_render_want_match_shows_reliability() -> None:
+    text = render_want_match_text(
+        _data(recall_count=2, complaint_count=47),
+        want_name="w",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "NHTSA" in text
+    assert "2 recalls" in text
+    assert "47 complaints" in text
+
+
+def test_render_want_match_no_reliability_line_when_absent() -> None:
+    text = render_want_match_text(
+        _data(),  # recall_count/complaint_count default None
+        want_name="w",
+        pct_below_market=0.2,
+        dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None,
+        comp_count=9,
+    )
+    assert "NHTSA" not in text
 
 
 def test_render_want_match_uncomped() -> None:

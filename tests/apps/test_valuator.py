@@ -26,6 +26,8 @@ from carbuyer.apps.valuator.valuator import (
 from carbuyer.db.enums import NotificationStatus, ValuationStatus
 from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
 from carbuyer.scoring.fair_value import ConfidenceBucket
+from carbuyer.wants import repo
+from carbuyer.wants.criteria import WantCriteria
 
 
 def _seed_auction(session: AsyncSession, **overrides: object) -> Auction:
@@ -122,13 +124,10 @@ async def test_value_one_writes_full_valuation_when_comps_exist(
     assert lot.value_low_cad is not None
     assert lot.value_high_cad is not None
     assert lot.price_deal_score is not None
-    assert lot.recommended_max_bid_cad is not None
     assert lot.all_in_at_current_bid_cad is not None
     assert lot.landed_cost_premium_cad is not None
     assert lot.scoring_version is not None
     assert lot.weights_hash is not None
-    assert lot.flag_score == 0  # no flags fired
-    assert lot.historical_comp_count is not None
 
 
 @pytest.mark.asyncio
@@ -173,6 +172,30 @@ async def test_value_one_marks_insufficient_when_no_comps(
 
 
 @pytest.mark.asyncio
+async def test_value_one_want_match_alerts_despite_no_comps(
+    session: AsyncSession,
+) -> None:
+    """WG4 / best-effort deal scoring: a lot the user explicitly wants must still
+    alert when we can't price it (no comps → INSUFFICIENT). The want forces
+    notification PENDING — contrast the no-want case above, which SKIPs."""
+    a = _seed_auction(session)
+    await session.flush()
+    lot = _seed_lot(session, a)  # Toyota Tacoma, no comps seeded
+    await repo.create_want(
+        session, name="tacoma",
+        criteria=WantCriteria(makes=["Toyota"], models=["Tacoma"]),
+    )
+    await session.commit()
+
+    await value_one(session, lot)
+    await session.commit()
+
+    assert lot.valuation_status == ValuationStatus.INSUFFICIENT  # still couldn't price it
+    assert lot.expected_value_cad is None  # no deal score attached
+    assert lot.notification_status == NotificationStatus.PENDING  # but the want alerts
+
+
+@pytest.mark.asyncio
 async def test_value_one_threads_sparse_to_fair_value(
     session: AsyncSession,
 ) -> None:
@@ -193,34 +216,6 @@ async def test_value_one_threads_sparse_to_fair_value(
     assert confident.expected_value_cad is not None
     assert sparse.expected_value_cad is not None
     assert sparse.expected_value_cad < confident.expected_value_cad
-
-
-@pytest.mark.asyncio
-async def test_value_one_threads_description_quality_to_flag_score(
-    session: AsyncSession,
-) -> None:
-    """Phase 4 overlay #10: thin descriptions floor flag_score at -2 even
-    when the cumulative red weight would otherwise be lower."""
-    a = _seed_auction(session)
-    await session.flush()
-    _seed_comps(session, [10000, 11000, 12000, 13000, 14000,
-                          15000, 16000, 17000, 18000, 19000])
-    heavy_reds = [
-        {"flag": "engine_knock", "weight": -3, "evidence": "x"},
-        {"flag": "transmission_slipping", "weight": -3, "evidence": "x"},
-    ]
-    thin = _seed_lot(session, a, source_lot_id="thin",
-                     description_quality="thin", red_flags=heavy_reds)
-    detailed = _seed_lot(session, a, source_lot_id="detailed",
-                         description_quality="detailed", red_flags=heavy_reds)
-    await session.commit()
-
-    await value_one(session, thin)
-    await value_one(session, detailed)
-    await session.commit()
-
-    assert thin.flag_score == -2  # noqa: PLR2004 — thin floor
-    assert detailed.flag_score == -5  # noqa: PLR2004 — clipped
 
 
 @pytest.mark.asyncio

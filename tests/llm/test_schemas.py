@@ -123,6 +123,17 @@ def test_rarity_assessment_round_trip() -> None:
     assert r.desirable_trim_or_spec is True
 
 
+def test_archetype_expansion_round_trips() -> None:
+    from carbuyer.llm.schemas import ArchetypeExpansion
+    payload = {"models": [
+        {"make": "Lexus", "model": "GX 470", "year_min": 2003, "year_max": 2009,
+         "trims": [], "reason": "J120 4Runner platform, body-on-frame"},
+    ]}
+    exp = ArchetypeExpansion.model_validate(payload)
+    assert exp.models[0].make == "Lexus"
+    assert exp.models[0].reason
+
+
 def test_per_image_output_severity_bounds() -> None:
     payload = {
         "shot_type": "exterior_front",
