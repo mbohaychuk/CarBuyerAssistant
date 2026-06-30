@@ -26,7 +26,11 @@ def test_great_deal_at_or_above_threshold_is_instant() -> None:
 def test_ordinary_below_threshold_is_digest() -> None:
     assert _tier(want_relative_score=0.14) == "digest"
     assert _tier(want_relative_score=0.0) == "digest"
-    assert _tier(want_relative_score=None) == "digest"
+
+
+def test_uncomped_none_score_is_instant() -> None:
+    # WG4: a wanted vehicle we can't price still surfaces (instantly, not digest).
+    assert _tier(want_relative_score=None) == "instant"
 
 
 def test_price_drop_is_instant() -> None:

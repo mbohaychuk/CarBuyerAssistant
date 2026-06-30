@@ -22,7 +22,10 @@ def delivery_tier(
     deal_threshold: float,
     closing_hours: int,
 ) -> Literal["instant", "digest"]:
-    if want_relative_score is not None and want_relative_score >= deal_threshold:
+    # An uncomped match (score=None — we couldn't price the deal) is surfaced
+    # instantly rather than buried in the digest: WG4 holds that a wanted vehicle
+    # alerts even when unpriceable, and these are low-volume (wanted models only).
+    if want_relative_score is None or want_relative_score >= deal_threshold:
         return "instant"
     if (
         previous_asking_price_cad is not None
