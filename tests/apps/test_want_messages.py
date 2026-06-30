@@ -4,7 +4,12 @@ from decimal import Decimal
 from typing import Any
 
 from carbuyer.apps.bot.channels import select_channel
-from carbuyer.apps.bot.messages import LotEmbedData, render_want_match_text
+from carbuyer.apps.bot.messages import (
+    DigestRow,
+    LotEmbedData,
+    render_digest_text,
+    render_want_match_text,
+)
 
 
 def _data(**over: Any) -> LotEmbedData:
@@ -151,3 +156,38 @@ def test_render_want_match_without_ceiling_omits_budget_line() -> None:
         comp_count=9,
     )
     assert "budget" not in text
+
+
+def test_render_digest_groups_by_want() -> None:
+    groups = [
+        ("4runner platform", [
+            DigestRow(title="2005 Lexus GX 470", price_cad=Decimal("12000"),
+                      pct_below_market=0.08, url="http://x/1"),
+        ]),
+        ("manual xterra", [
+            DigestRow(title="2012 Nissan Xterra", price_cad=Decimal("9900"),
+                      pct_below_market=0.01, url="http://x/2"),
+            DigestRow(title="2010 Nissan Xterra", price_cad=None,
+                      pct_below_market=None, url="http://x/3"),
+        ]),
+    ]
+    text = render_digest_text(groups)
+    assert "4runner platform" in text
+    assert "manual xterra" in text
+    assert "GX 470" in text
+    assert "http://x/2" in text
+    assert "8%" in text
+    assert "None" not in text
+
+
+def test_render_digest_empty_groups_is_empty_string() -> None:
+    assert render_digest_text([]) == ""
+
+
+def test_render_digest_flips_sign_for_above_market() -> None:
+    text = render_digest_text([
+        ("w", [DigestRow(title="2012 Nissan Xterra", price_cad=Decimal("11000"),
+                         pct_below_market=-0.05, url="http://x/1")]),
+    ])
+    assert "5% above market" in text
+    assert "below market" not in text

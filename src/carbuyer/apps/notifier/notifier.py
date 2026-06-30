@@ -48,6 +48,7 @@ from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.deal import WantDeal, score_want_deal
+from carbuyer.wants.delivery import delivery_tier
 from carbuyer.wants.matcher import matches
 
 log = get_logger("notifier")
@@ -61,6 +62,7 @@ class WantAlert:
     want_match_id: int
     want_name: str
     deal: WantDeal
+    tier: str
 
 
 async def _load_want_alerts(
@@ -68,6 +70,8 @@ async def _load_want_alerts(
     lot: VehicleOffer,
     *,
     pickup_province: str | None,
+    scheduled_end_at: datetime | None,
+    now: datetime,
 ) -> list[WantAlert]:
     """Un-notified, non-dismissed want_matches for this lot, each with its want
     name and a freshly-computed deal breakdown for the message."""
@@ -95,7 +99,19 @@ async def _load_want_alerts(
         ):
             continue
         deal = score_want_deal(lot, criteria, offer_price_cad=lot.offer_price)
-        alerts.append(WantAlert(want_match_id, want_name, deal))
+        previous_asking = (
+            lot.previous_asking_price_cad if isinstance(lot, PrivateListing) else None
+        )
+        tier = delivery_tier(
+            want_relative_score=deal.score,
+            offer_price_cad=lot.offer_price,
+            previous_asking_price_cad=previous_asking,
+            scheduled_end_at=scheduled_end_at,
+            now=now,
+            deal_threshold=settings.instant_deal_threshold,
+            closing_hours=settings.instant_closing_hours,
+        )
+        alerts.append(WantAlert(want_match_id, want_name, deal, tier))
     return alerts
 
 
@@ -105,16 +121,21 @@ async def _post_want_alerts(
     lot_id: int,
     *,
     http_session: aiohttp.ClientSession,
+    now: datetime,
 ) -> tuple[bool, bool, bool, list[int], str | None, str | None]:
-    """Post each want match to the 'wants' channel. Want alerts bypass quiet
-    hours — the user explicitly asked for these vehicles. Returns
-    (attempted, succeeded, failed, stamped_want_match_ids, last_channel, last_error)
-    where `failed` means at least one delivery to a configured channel failed."""
+    """Post INSTANT-tier want matches to the 'wants' channel, outside quiet hours.
+    Digest-tier and quiet-deferred matches are left un-notified for the daily
+    digest. Returns (attempted, succeeded, failed, stamped_want_match_ids,
+    last_channel, last_error) where `failed` means at least one delivery to a
+    configured channel failed."""
     attempted = succeeded = failed = False
     stamped_ids: list[int] = []
     last_channel: str | None = None
     last_error: str | None = None
+    quiet = _in_quiet_hours(now, settings.quiet_hours_start, settings.quiet_hours_end)
     for alert in want_alerts:
+        if alert.tier != "instant" or quiet:
+            continue  # digest-tier + quiet-deferred matches wait for the daily digest
         channel_key = select_channel(trigger="want_match", score=None)
         channel_id = settings.discord_channels.get(channel_key)
         if channel_id is None:
@@ -211,6 +232,19 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     }.get(trigger)
 
 
+def _in_quiet_hours(now: datetime, start_hour: int, end_hour: int) -> bool:
+    """Quiet hours window wraps midnight when start > end (typical: 22..08).
+
+    UTC hour-of-day — a single-user MVP; a per-user local offset is a later
+    refinement. Only the instant want-alert path consults this; a quiet-window
+    instant match is deferred into the next morning digest.
+    """
+    h = now.hour
+    if start_hour <= end_hour:
+        return start_hour <= h < end_hour
+    return h >= start_hour or h < end_hour
+
+
 async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     lot_id: int, *, http_session: aiohttp.ClientSession,
 ) -> str:
@@ -230,6 +264,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     notification_status=DONE, so a Discord rate-limit / 4xx / network blip
     silently lost the notification while the DB showed the lot as notified.
     """
+    now = datetime.now(UTC)
     # Load offer (+ auction, for auction lots) in a short read transaction.
     async with get_session() as s:
         lot = await s.get(VehicleOffer, lot_id)
@@ -248,9 +283,10 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
                 auction.pickup_province if auction is not None
                 else (lot.location_province if isinstance(lot, PrivateListing) else None)
             ),
+            scheduled_end_at=auction.scheduled_end_at if auction is not None else None,
+            now=now,
         )
 
-    now = datetime.now(UTC)
     # Auction triggers (closing_soon, lot_extended) gate on bid state + scheduled
     # close, which private listings don't have — those alert only via want
     # matches. So triggers are auction-only.
@@ -316,7 +352,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     # Want-match alerts (dedup keyed on want_matches.notified_at, not lot columns).
     (
         w_attempted, w_succeeded, w_failed, stamped_want_ids, w_channel, w_error,
-    ) = await _post_want_alerts(want_alerts, data, lot_id, http_session=http_session)
+    ) = await _post_want_alerts(want_alerts, data, lot_id, http_session=http_session, now=now)
     any_post_attempted = any_post_attempted or w_attempted
     any_post_succeeded = any_post_succeeded or w_succeeded
     if w_channel is not None:

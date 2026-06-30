@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -65,6 +66,7 @@ from carbuyer.scoring.score import (
 from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
+from carbuyer.wants.delivery import delivery_tier
 from carbuyer.wants.service import evaluate_lot_against_wants
 
 log = get_logger("valuator")
@@ -277,23 +279,50 @@ async def value_one(session: AsyncSession, lot: VehicleOffer) -> None:
         pickup_province=want_province,
         offer_price_cad=want_price,
     )
-    if await _has_unnotified_want_match(session, lot.id):
+    scheduled_end = auction.scheduled_end_at if auction is not None else None
+    if await _has_unnotified_instant_match(
+        session, lot, scheduled_end_at=scheduled_end, now=datetime.now(UTC),
+    ):
         lot.notification_status = NotificationStatus.PENDING
 
 
-async def _has_unnotified_want_match(session: AsyncSession, offer_id: int) -> bool:
-    stmt = (
-        select(WantMatch.id)
-        .join(Search, Search.id == WantMatch.search_id)
-        .where(
-            WantMatch.lot_id == offer_id,
-            WantMatch.notified_at.is_(None),
-            WantMatch.dismissed.is_(False),
-            Search.enabled.is_(True),
+async def _has_unnotified_instant_match(
+    session: AsyncSession,
+    lot: VehicleOffer,
+    *,
+    scheduled_end_at: datetime | None,
+    now: datetime,
+) -> bool:
+    """True if the lot has an un-notified, non-dismissed, enabled want match that
+    is INSTANT-tier. Digest-tier matches are delivered by the nightly digest, so
+    they must not force notification PENDING (would churn PENDING<->SKIPPED)."""
+    rows = (
+        await session.execute(
+            select(WantMatch.want_relative_score)
+            .join(Search, Search.id == WantMatch.search_id)
+            .where(
+                WantMatch.lot_id == lot.id,
+                WantMatch.notified_at.is_(None),
+                WantMatch.dismissed.is_(False),
+                Search.enabled.is_(True),
+            )
         )
-        .limit(1)
+    ).all()
+    previous_asking = (
+        lot.previous_asking_price_cad if isinstance(lot, PrivateListing) else None
     )
-    return (await session.execute(stmt)).first() is not None
+    return any(
+        delivery_tier(
+            want_relative_score=score,
+            offer_price_cad=lot.offer_price,
+            previous_asking_price_cad=previous_asking,
+            scheduled_end_at=scheduled_end_at,
+            now=now,
+            deal_threshold=settings.instant_deal_threshold,
+            closing_hours=settings.instant_closing_hours,
+        ) == "instant"
+        for (score,) in rows
+    )
 
 
 async def _process_one(lot_id: int) -> str:

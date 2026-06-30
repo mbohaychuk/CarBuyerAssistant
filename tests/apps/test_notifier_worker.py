@@ -28,6 +28,18 @@ from carbuyer.db.enums import NotificationStatus
 from carbuyer.db.models import Auction, AuctionLot, PrivateListing, Search, WantMatch
 
 
+@pytest.fixture(autouse=True)
+def _not_quiet_hours(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default for this file: NOT in quiet hours, so instant want-alert tests are
+    independent of the wall clock the suite runs at. Tests that exercise quiet
+    hours themselves (name contains 'quiet_hours') opt out and manage it."""
+    if "quiet_hours" in request.node.name:
+        return
+    monkeypatch.setattr(notifier_mod, "_in_quiet_hours", lambda *_: False)
+
+
 def _seed_lot(
     session: AsyncSession,
     *,
@@ -724,3 +736,95 @@ async def test_process_one_skips_stale_want_match_criteria_no_longer_satisfied(
     outcome = await _process_one(lot_id, http_session=MagicMock())
     assert outcome == "skipped"
     assert posted == []
+
+
+def test_in_quiet_hours_wraparound_window() -> None:
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=22), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=2), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=7), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=8), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=12), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=21), 22, 8) is False
+
+
+def test_in_quiet_hours_non_wraparound() -> None:
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=9), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=16), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=17), 9, 17) is False
+    assert _in_quiet_hours(base.replace(hour=8), 9, 17) is False
+
+
+# ─── tiered delivery: instant-only + quiet-hours defer ───
+
+
+@pytest.mark.asyncio
+async def test_digest_tier_want_match_is_not_posted_instantly(
+    _patched_get_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary (digest-tier) want match is left un-notified for the digest."""
+    session = _patched_get_session
+    _, lot = _seed_lot(session, notification_status="in_progress")
+    lot.make, lot.model, lot.year = "Nissan", "Xterra", 2012
+    lot.expected_value_cad = Decimal("10000")
+    lot.value_mid_cad = Decimal("10000")
+    lot.comp_count = 9
+    lot.current_high_bid_cad = Decimal("9900")  # ~1% below → digest tier
+    want = Search(name="xterra", config={"makes": ["Nissan"], "models": ["Xterra"]})
+    session.add(want)
+    await session.flush()
+    wm = WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.01)
+    session.add(wm)
+    await session.flush()
+    wm_id, lot_id = wm.id, lot.id
+
+    posted: list[int] = []
+    async def fake_post(c, content, lid, *, session=None):  # noqa: ANN001, ANN202
+        posted.append(lid)
+        return True
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr("carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242})
+
+    await _process_one(lot_id, http_session=MagicMock())
+    assert posted == []  # not posted instantly
+    session.expire_all()
+    assert (await session.get(WantMatch, wm_id)).notified_at is None  # left for the digest
+
+
+@pytest.mark.asyncio
+async def test_instant_tier_want_match_deferred_during_quiet_hours(
+    _patched_get_session: AsyncSession, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An instant-tier match in the quiet window is not posted (rolls into the digest)."""
+    from carbuyer.apps.notifier import notifier as nm
+    session = _patched_get_session
+    _, lot = _seed_lot(session, notification_status="in_progress")
+    lot.make, lot.model, lot.year = "Nissan", "Xterra", 2012
+    lot.expected_value_cad = Decimal("10000")
+    lot.value_mid_cad = Decimal("10000")
+    lot.comp_count = 9
+    lot.current_high_bid_cad = Decimal("3000")  # deep deal → instant tier
+    want = Search(name="xterra", config={"makes": ["Nissan"], "models": ["Xterra"]})
+    session.add(want)
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.7))
+    await session.flush()
+    lot_id = lot.id
+
+    monkeypatch.setattr(nm, "_in_quiet_hours", lambda *_: True)
+    posted: list[int] = []
+    async def fake_post(c, content, lid, *, session=None):  # noqa: ANN001, ANN202
+        posted.append(lid)
+        return True
+    monkeypatch.setattr(notifier_mod, "post_message", fake_post)
+    monkeypatch.setattr("carbuyer.apps.notifier.notifier.settings.discord_channels", {"wants": 4242})
+
+    await _process_one(lot_id, http_session=MagicMock())
+    assert posted == []  # deferred by quiet hours

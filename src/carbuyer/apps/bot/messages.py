@@ -146,3 +146,30 @@ def render_needs_plugin_text(
         f"to capture lot data. After deploying the plugin, click 'Retry routing' "
         f"on /needs-plugin (auction id {auction_id}) to reprocess this auction."
     )
+
+
+@dataclass(slots=True, frozen=True)
+class DigestRow:
+    title: str
+    price_cad: Decimal | None
+    pct_below_market: float | None
+    url: str
+
+
+def render_digest_text(groups: list[tuple[str, list[DigestRow]]]) -> str:
+    """One daily digest message: ordinary in-budget want matches grouped by want.
+    Empty groups → empty string (the digest job skips posting)."""
+    if not groups:
+        return ""
+    lines = ["\U0001f4f0 Daily want-list digest"]
+    for want_name, rows in groups:
+        lines.append(f"\n**{want_name}** ({len(rows)})")
+        for r in rows:
+            price = f"${int(r.price_cad):,}" if r.price_cad is not None else "(no price)"
+            if r.pct_below_market is None:
+                pct = ""
+            else:
+                p = round(r.pct_below_market * 100)
+                pct = f" · {p}% below market" if p >= 0 else f" · {-p}% above market"
+            lines.append(f"• {r.title} — {price}{pct}\n  {r.url}")
+    return "\n".join(lines)

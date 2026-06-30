@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from carbuyer.apps.notifier.notifier import _load_want_alerts
-from carbuyer.apps.valuator.valuator import _has_unnotified_want_match
+from carbuyer.apps.valuator.valuator import _has_unnotified_instant_match
 from carbuyer.db.models import Auction, AuctionLot, PrivateListing, Search, WantMatch
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
@@ -155,8 +155,8 @@ async def test_dedup_is_scoped_per_want(session: AsyncSession) -> None:
 
 async def test_dismissed_duplicate_does_not_alert_on_either_path(session: AsyncSession) -> None:
     # The dedup only WORKS because both alerting paths filter dismissed: the
-    # valuator's force-PENDING (_has_unnotified_want_match) and the notifier's
-    # want-alert builder (_load_want_alerts). Pin that tie.
+    # valuator's force-PENDING (_has_unnotified_instant_match) and the notifier's
+    # want-alert builder (_load_want_alerts). Pin that tie. (score 0.2 → instant.)
     want_id = await _want(session)
     auction = await _auction(session)
     primary = _auction_lot(auction, vin=_VIN, sid="L1")  # live
@@ -167,9 +167,16 @@ async def test_dismissed_duplicate_does_not_alert_on_either_path(session: AsyncS
     await _match(session, want_id, primary.id)
     assert (await _match(session, want_id, dup.id)).dismissed is True
 
-    assert await _has_unnotified_want_match(session, primary.id) is True   # primary alerts
-    assert await _has_unnotified_want_match(session, dup.id) is False       # dup does not
-    assert await _load_want_alerts(session, dup, pickup_province=None) == []  # nor in the notifier
+    _now = datetime.now(UTC)
+    assert await _has_unnotified_instant_match(
+        session, primary, scheduled_end_at=None, now=_now,
+    ) is True   # primary alerts
+    assert await _has_unnotified_instant_match(
+        session, dup, scheduled_end_at=None, now=_now,
+    ) is False  # dup does not
+    assert await _load_want_alerts(
+        session, dup, pickup_province=None, scheduled_end_at=None, now=_now,
+    ) == []  # nor in the notifier
 
 
 async def test_reeval_of_dismissed_duplicate_stays_dismissed(session: AsyncSession) -> None:
@@ -213,7 +220,7 @@ async def test_backfill_dedups_same_vin(session: AsyncSession) -> None:
     assert sum(1 for m in rows if not m.dismissed) == 1  # exactly one is live
 
 
-async def test_has_unnotified_want_match_ignores_disabled_search(session: AsyncSession) -> None:
+async def test_has_unnotified_instant_match_ignores_disabled_search(session: AsyncSession) -> None:
     """FIX 6: a disabled Search with an un-notified match must not force PENDING."""
     auction = await _auction(session)
     lot = _auction_lot(auction, vin=None, sid="L-disabled")
@@ -221,9 +228,11 @@ async def test_has_unnotified_want_match_ignores_disabled_search(session: AsyncS
     want = Search(name="disabled-want", config={}, enabled=False)
     session.add(want)
     await session.flush()
-    wm = WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.1)
+    wm = WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.5)
     session.add(wm)
     await session.flush()
 
-    result = await _has_unnotified_want_match(session, lot.id)
+    result = await _has_unnotified_instant_match(
+        session, lot, scheduled_end_at=None, now=datetime.now(UTC),
+    )
     assert result is False
