@@ -47,7 +47,7 @@ Staged pipeline of independent worker processes sharing one Postgres. Each stage
                           └──────────────────┘    └──────────────────┘
 ```
 
-Ten processes, all systemd-managed. Three are timers (ingester, vision, distiller); seven run continuously with `Restart=always`. Logs go to journald.
+Eleven processes, all systemd-managed. Four are timers (ingester, vision, distiller, digest); seven run continuously with `Restart=always`. Logs go to journald. The `digest` timer runs the daily want-list digest — schedule it at `QUIET_HOURS_END` (default 08:00) so a standout deal deferred overnight by quiet hours is delivered first thing.
 
 ## Design decisions
 
@@ -148,6 +148,7 @@ uv run python -m carbuyer.apps.notifier
 uv run python -m carbuyer.apps.bid_poller
 uv run python -m carbuyer.apps.vision_batcher
 uv run python -m carbuyer.apps.auction_distiller
+uv run python -m carbuyer.apps.digest          # daily want-list digest (cron at QUIET_HOURS_END)
 
 # 6. Start the dashboard
 uv run python -m carbuyer.apps.dashboard
