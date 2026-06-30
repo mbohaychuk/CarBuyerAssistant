@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     discord_channels: dict[str, int | str] = Field(default_factory=dict)
     home_province: Province = "AB"
 
+    # Tiered delivery (§5d): want_relative_score at/above which a match pings
+    # instantly; auction lots closing within instant_closing_hours ping too;
+    # quiet hours defer the instant tier into the next morning digest.
+    instant_deal_threshold: float = 0.15
+    instant_closing_hours: int = 24
+    quiet_hours_start: int = 22
+    quiet_hours_end: int = 8
+
     # Phase 4 valuator. batch_size mirrors enrichment_batch_size but the
     # valuator does no LLM I/O, so it can drain larger batches.
     valuation_batch_size: int = 30

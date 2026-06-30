@@ -724,3 +724,27 @@ async def test_process_one_skips_stale_want_match_criteria_no_longer_satisfied(
     outcome = await _process_one(lot_id, http_session=MagicMock())
     assert outcome == "skipped"
     assert posted == []
+
+
+def test_in_quiet_hours_wraparound_window() -> None:
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=22), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=2), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=7), 22, 8) is True
+    assert _in_quiet_hours(base.replace(hour=8), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=12), 22, 8) is False
+    assert _in_quiet_hours(base.replace(hour=21), 22, 8) is False
+
+
+def test_in_quiet_hours_non_wraparound() -> None:
+    from carbuyer.apps.notifier.notifier import (  # pyright: ignore[reportPrivateUsage]
+        _in_quiet_hours,
+    )
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+    assert _in_quiet_hours(base.replace(hour=9), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=16), 9, 17) is True
+    assert _in_quiet_hours(base.replace(hour=17), 9, 17) is False
+    assert _in_quiet_hours(base.replace(hour=8), 9, 17) is False

@@ -211,6 +211,19 @@ def _timestamp_field_for_trigger(trigger: str) -> str | None:
     }.get(trigger)
 
 
+def _in_quiet_hours(now: datetime, start_hour: int, end_hour: int) -> bool:
+    """Quiet hours window wraps midnight when start > end (typical: 22..08).
+
+    UTC hour-of-day — a single-user MVP; a per-user local offset is a later
+    refinement. Only the instant want-alert path consults this; a quiet-window
+    instant match is deferred into the next morning digest.
+    """
+    h = now.hour
+    if start_hour <= end_hour:
+        return start_hour <= h < end_hour
+    return h >= start_hour or h < end_hour
+
+
 async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
     lot_id: int, *, http_session: aiohttp.ClientSession,
 ) -> str:
