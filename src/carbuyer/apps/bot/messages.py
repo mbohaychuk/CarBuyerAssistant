@@ -166,9 +166,10 @@ def render_digest_text(groups: list[tuple[str, list[DigestRow]]]) -> str:
         lines.append(f"\n**{want_name}** ({len(rows)})")
         for r in rows:
             price = f"${int(r.price_cad):,}" if r.price_cad is not None else "(no price)"
-            pct = (
-                f" · {round(r.pct_below_market * 100)}% below market"
-                if r.pct_below_market is not None else ""
-            )
+            if r.pct_below_market is None:
+                pct = ""
+            else:
+                p = round(r.pct_below_market * 100)
+                pct = f" · {p}% below market" if p >= 0 else f" · {-p}% above market"
             lines.append(f"• {r.title} — {price}{pct}\n  {r.url}")
     return "\n".join(lines)

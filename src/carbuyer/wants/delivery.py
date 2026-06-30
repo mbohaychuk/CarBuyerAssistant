@@ -1,9 +1,13 @@
 """Delivery tier for a want-match: instant ping vs the daily digest.
 
-A pure classifier (inputs injected — no DB, no settings) so the valuator's
-force-PENDING gate, the notifier's instant post, and the digest job all agree on
-which matches are instant. A match is instant when it is a standout deal, a
-price-drop on an already-matched listing, or an auction lot closing soon.
+A pure classifier (inputs injected — no DB, no settings), shared by the valuator's
+force-PENDING gate (which classifies from the stored want_relative_score at
+valuation time) and the notifier's instant post (which re-classifies from the
+freshest offer price, so a since-risen auction bid correctly downgrades an instant
+match to digest). The nightly digest delivers every still-un-notified match
+regardless of tier, so a downgrade never loses a match — it only defers it to the
+morning. A match is instant when it is a standout deal, an uncomped wanted vehicle,
+a price-drop on an already-matched listing, or an auction lot closing soon.
 """
 from __future__ import annotations
 
