@@ -19,12 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from carbuyer.apps.valuator import valuator as valuator_mod
 from carbuyer.apps.valuator.valuator import (
     SUSPICIOUS_UNDERPRICE_FRACTION,
+    _has_unnotified_instant_match,
     _process_one,
     process_pending,
     value_one,
 )
 from carbuyer.db.enums import NotificationStatus, ValuationStatus
-from carbuyer.db.models import Auction, AuctionLot, HistoricalSale
+from carbuyer.db.models import Auction, AuctionLot, HistoricalSale, WantMatch
 from carbuyer.scoring.fair_value import ConfidenceBucket
 from carbuyer.wants import repo
 from carbuyer.wants.criteria import WantCriteria
@@ -512,3 +513,41 @@ async def test_value_one_recent_auction_lot_comps_contribute(
 
     assert target.valuation_status == ValuationStatus.DONE
     assert target.comp_count == 10  # noqa: PLR2004
+
+
+# ─── tiered delivery: instant-only force-PENDING gate ───
+# Tested directly on the gate to avoid the system deal-filter
+# (_decide_notification_status) confound — a clean comped lot is PENDING via the
+# system path regardless of tier.
+
+
+@pytest.mark.asyncio
+async def test_instant_gate_true_for_instant_tier_match(session: AsyncSession) -> None:
+    a = _seed_auction(session)
+    await session.flush()
+    lot = _seed_lot(session, a, current_high_bid=Decimal("3000"))
+    want = await repo.create_want(
+        session, name="tacoma", criteria=WantCriteria(makes=["Toyota"], models=["Tacoma"]),
+    )
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.5))
+    await session.flush()
+    assert await _has_unnotified_instant_match(
+        session, lot, scheduled_end_at=None, now=datetime.now(UTC),
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_instant_gate_false_for_digest_tier_match(session: AsyncSession) -> None:
+    a = _seed_auction(session)
+    await session.flush()
+    lot = _seed_lot(session, a, current_high_bid=Decimal("9500"))
+    want = await repo.create_want(
+        session, name="tacoma", criteria=WantCriteria(makes=["Toyota"], models=["Tacoma"]),
+    )
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=lot.id, want_relative_score=0.05))
+    await session.flush()
+    assert await _has_unnotified_instant_match(
+        session, lot, scheduled_end_at=None, now=datetime.now(UTC),
+    ) is False
