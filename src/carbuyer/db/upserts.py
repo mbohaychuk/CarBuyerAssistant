@@ -291,6 +291,7 @@ async def upsert_private_listing(
             vin=raw.vin,
             location_province=raw.location_province,
             asking_price_cad=raw.asking_price_cad,
+            original_asking_price_cad=raw.asking_price_cad,  # baseline for buyer-leverage
             seller_type=raw.seller_type,
             days_on_market=raw.days_on_market,
             listing_status=raw.listing_status,
@@ -339,6 +340,9 @@ async def upsert_private_listing(
             and existing.asking_price_cad is not None
             and existing.asking_price_cad < pre_asking
         ):
+            existing.price_drop_count += 1  # buyer-leverage: count the drop
+            if existing.original_asking_price_cad is None:
+                existing.original_asking_price_cad = pre_asking  # backfill pre-feature rows
             await session.execute(
                 update(WantMatch)
                 .where(WantMatch.lot_id == existing.id, WantMatch.dismissed.is_(False))
