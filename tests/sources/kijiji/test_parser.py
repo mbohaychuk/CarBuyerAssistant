@@ -3,11 +3,13 @@ a captured 'Cars & Trucks' search page; no network."""
 from __future__ import annotations
 
 import pathlib
+import re
 from decimal import Decimal
 
 from carbuyer.sources.kijiji.parser import parse_search_listings
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "search_cars_canada.html"
+_PHONE = re.compile(r"\d{3}[\s.\-]?\d{3}[\s.\-]?\d{4}")
 
 
 def _listings() -> list:
@@ -57,3 +59,11 @@ def test_prices_are_cad_decimals_or_none() -> None:
 
 def test_empty_html_yields_nothing() -> None:
     assert parse_search_listings("<html><head></head><body></body></html>") == []
+
+
+def test_no_seller_phone_survives_in_description() -> None:
+    # 5 of the 46 real listings embed a seller phone in the free-text blurb;
+    # RawListing rule 3 / PIPEDA forbids storing it.
+    for x in _listings():
+        if x.description:
+            assert not _PHONE.search(x.description), x.description

@@ -13,8 +13,10 @@ read that one block. Fields absent from it degrade gracefully:
   ``extra``.
 
 Legal (carried from research): the image URL is stored for deep-linking only —
-never the photo bytes (Trader v. CarGurus) — and no seller PII (PIPEDA); the
-ld+json carries none.
+never the photo bytes (Trader v. CarGurus). Private sellers routinely paste a
+phone number (sometimes an email) into the free-text description, so
+``_scrub_pii`` redacts those before the listing is stored (PIPEDA); no other
+seller PII appears in the ld+json.
 """
 from __future__ import annotations
 
@@ -30,6 +32,10 @@ from carbuyer.sources.base import ListingRef, RawListing
 _ID_RE = re.compile(r"/(\d+)(?:\?|$)")
 _SELLER_RE = re.compile(r"ca-prod-(fsbo|dealer)-ads")
 _SELLER_KIND = {"fsbo": "private", "dealer": "dealer"}
+# North-American phone (with or without separators/country code) and email. The
+# digit lookarounds keep it from slicing into a longer run (VIN, stock number).
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)")
+_EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")
 
 
 def parse_search_listings(html: str) -> list[RawListing]:
@@ -77,7 +83,7 @@ def _car_to_listing(item: dict[str, Any]) -> RawListing | None:
     return RawListing(
         ref=ListingRef(source="kijiji", source_listing_id=m.group(1), url=url),
         title=_str(item.get("name")),
-        description=_str(item.get("description")),
+        description=_scrub_pii(_str(item.get("description"))),
         photos=[image] if image else [],
         year=_to_int(item.get("vehicleModelDate")),
         make=_str(brand.get("name")),
@@ -115,6 +121,15 @@ def _cad_price(offers: dict[str, Any]) -> Decimal | None:
 
 def _as_dict(obj: Any) -> dict[str, Any]:
     return cast("dict[str, Any]", obj) if isinstance(obj, dict) else {}
+
+
+def _scrub_pii(text: str | None) -> str | None:
+    """Redact seller-published phone/email from free text before storing it
+    (RawListing rule 3 / PIPEDA). Returns None if nothing meaningful remains."""
+    if text is None:
+        return None
+    scrubbed = _EMAIL_RE.sub("", _PHONE_RE.sub("", text))
+    return re.sub(r"\s{2,}", " ", scrubbed).strip() or None
 
 
 def _str(value: Any) -> str | None:
