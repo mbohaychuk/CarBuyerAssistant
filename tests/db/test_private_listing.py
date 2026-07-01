@@ -175,3 +175,53 @@ async def test_upsert_no_reset_on_idempotent_reingest(session: AsyncSession) -> 
     await session.flush()
     # Identical content (price unchanged) → no spurious cascade.
     assert listing2.enrichment_status == EnrichmentStatus.DONE
+
+
+# ─── buyer-leverage: original asking + drop count ───
+
+
+async def _upsert(session: AsyncSession, asking: str) -> PrivateListing:
+    return await upsert_private_listing(
+        session, _raw_listing(asking=asking), parser_version="v1",
+    )
+
+
+async def test_upsert_insert_sets_original_and_zero_drop_count(session: AsyncSession) -> None:
+    listing = await _upsert(session, "18000")
+    await session.flush()
+    assert listing.original_asking_price_cad == Decimal("18000")
+    assert listing.price_drop_count == 0
+
+
+async def test_price_drop_increments_count_and_keeps_original(session: AsyncSession) -> None:
+    await _upsert(session, "18000")
+    await session.flush()
+    listing = await _upsert(session, "15000")
+    await session.flush()
+    assert listing.price_drop_count == 1
+    assert listing.previous_asking_price_cad == Decimal("18000")
+    assert listing.original_asking_price_cad == Decimal("18000")  # baseline unchanged
+    listing = await _upsert(session, "14000")
+    await session.flush()
+    assert listing.price_drop_count == 2  # noqa: PLR2004
+
+
+async def test_price_increase_does_not_increment_drop_count(session: AsyncSession) -> None:
+    await _upsert(session, "15000")
+    await session.flush()
+    listing = await _upsert(session, "16000")
+    await session.flush()
+    assert listing.price_drop_count == 0
+    assert listing.original_asking_price_cad == Decimal("15000")
+
+
+async def test_drop_backfills_null_original(session: AsyncSession) -> None:
+    await _upsert(session, "18000")
+    await session.flush()
+    listing = (await session.execute(select(PrivateListing))).scalars().first()
+    listing.original_asking_price_cad = None  # mimic a pre-feature row
+    await session.flush()
+    listing = await _upsert(session, "15000")
+    await session.flush()
+    assert listing.original_asking_price_cad == Decimal("18000")  # backfilled from pre-drop price
+    assert listing.price_drop_count == 1

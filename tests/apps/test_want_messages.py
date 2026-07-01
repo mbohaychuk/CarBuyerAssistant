@@ -191,3 +191,21 @@ def test_render_digest_flips_sign_for_above_market() -> None:
     ])
     assert "5% above market" in text
     assert "below market" not in text
+
+
+def test_render_want_match_shows_leverage_line() -> None:
+    text = render_want_match_text(
+        _data(leverage_line="listed 90 days · down $3,000 (17%) from $18,000 · 2 drops"),
+        want_name="w", pct_below_market=0.2, dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None, comp_count=9,
+    )
+    assert "listed 90 days" in text
+    assert "2 drops" in text
+
+
+def test_render_want_match_omits_leverage_when_none() -> None:
+    text = render_want_match_text(
+        _data(), want_name="w", pct_below_market=0.2, dollars_below_market_cad=Decimal("2000"),
+        dollars_under_ceiling_cad=None, comp_count=9,
+    )
+    assert "listed" not in text

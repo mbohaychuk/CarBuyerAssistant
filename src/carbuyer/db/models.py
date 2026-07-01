@@ -515,6 +515,12 @@ class PrivateListing(VehicleOffer):
     # The asking price before the most recent change — drives the price-drop
     # re-alert (was → now) when it is higher than the current asking.
     previous_asking_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    # Buyer-leverage signals (§5d): the first-seen asking price and how many times
+    # it has dropped since — "down $X from the original over N drops".
+    original_asking_price_cad: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    price_drop_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False,
+    )
     seller_type: Mapped[str | None] = mapped_column(String(32))
     days_on_market: Mapped[int | None] = mapped_column(Integer)
     listing_status: Mapped[str] = mapped_column(
