@@ -1,53 +1,120 @@
-"""Kijiji private-listing source (Phase 1 S4 — scaffold).
+"""Kijiji private-listing source.
 
-Registered and contract-complete, but NOT yet implemented: turning a Kijiji
-search page into ``RawListing``s needs real sample pages, and fetching a live
-commercial site to harvest them is out of scope for an autonomous build. So
-``search_listings`` raises ``NotImplementedError`` BEFORE any network I/O — the
-scaffold never touches the live site. When sample pages exist, implement the
-fetch (via ``carbuyer.sources.curl_transport.CurlCffiTransport`` under
-``RetryTransport`` / ``make_client``) + parse here.
-
-The ``_search_url`` criteria→URL mapping is the one part pinnable without
-samples, so it's implemented + unit-tested. Legal rules carried from research:
-store only derived metadata + the source URL (deep-link), never the listing
-photos (Trader v. CarGurus) and never seller PII (PIPEDA).
+Pulls a want's Cars & Trucks search page and parses its schema.org ld+json
+ItemList into ``RawListing``s (see ``parser.py``). The client lifecycle mirrors
+``McDougallSource``: production wires a ``RetryTransport`` around
+``httpx.AsyncHTTPTransport`` in ``__aenter__``; tests inject an
+``httpx.MockTransport``. Legal rules (carried from research): store only derived
+metadata + the source URL (deep-link), never the listing photos (Trader v.
+CarGurus) and never seller PII (PIPEDA).
 """
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, ClassVar
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, ClassVar, Self
+from urllib.parse import quote
+
+import httpx
 
 from carbuyer.sources.base import ListingSource, RawListing, SourceType, register
+from carbuyer.sources.http import jittered_sleep, make_client
+from carbuyer.sources.kijiji.parser import parse_search_listings
+from carbuyer.sources.retry import RetryTransport
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from types import TracebackType
+
     from carbuyer.wants.criteria import WantCriteria
+
+_SEARCH_BASE = "https://www.kijiji.ca/b-cars-trucks/canada"
+
+
+def _keywords(criteria: WantCriteria) -> list[str]:
+    """One search keyword per make+model the want targets, de-duplicated.
+
+    Archetype wants carry ``model_specs`` (flat makes/models empty); manual wants
+    carry the flat lists. A single make is prefixed to each model so a
+    multi-model fan-out (models=["4Runner","Tacoma"]) becomes one search each.
+    Empty -> no search: we never fall back to the unkeyworded all-cars page,
+    which would ingest every car in Canada.
+    """
+    if criteria.model_specs:
+        raw = [f"{s.make} {s.model}" for s in criteria.model_specs]
+    elif criteria.models:
+        make = criteria.makes[0] if len(criteria.makes) == 1 else ""
+        raw = [f"{make} {m}" for m in criteria.models]
+    else:
+        raw = list(criteria.makes)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for kw in (k.strip() for k in raw):
+        if kw and kw.lower() not in seen:
+            seen.add(kw.lower())
+            out.append(kw)
+    return out
+
+
+def _search_url(keyword: str) -> str:
+    # Kijiji classic puts the query in the path: /<keyword>/k0c174l0 (verified
+    # live — a `?keyword=` query is silently ignored and returns all cars). Each
+    # token is percent-encoded so a '/'-bearing term (e.g. "3/4 ton") can't
+    # escape the keyword segment.
+    slug = "+".join(quote(part.lower(), safe="") for part in keyword.split())
+    return f"{_SEARCH_BASE}/{slug}/k0c174l0"
 
 
 class KijijiSource(ListingSource):
     name: ClassVar[str] = "kijiji"
-    version: ClassVar[str] = "0.1"
+    version: ClassVar[str] = "1.0"
     kind: ClassVar[SourceType] = "listing"
 
-    _SEARCH_BASE = "https://www.kijiji.ca/b-cars-trucks/canada"
+    def __init__(self, *, _transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._injected_transport = _transport
+        self._client_cm: AbstractAsyncContextManager[httpx.AsyncClient] | None = None
+        self._client: httpx.AsyncClient | None = None
 
-    def _search_url(self, criteria: WantCriteria) -> str:
-        # ponytail: provisional URL shape — verify against live Kijiji when the
-        # parser is implemented. The criteria→URL mapping is the part pinnable
-        # without sample pages; the exact Kijiji query grammar is not yet fixed.
-        terms = [t for t in (criteria.makes[:1] + criteria.models[:1]) if t]
-        keyword = " ".join(terms).strip()
-        url = f"{self._SEARCH_BASE}/c174l0"
-        if keyword:
-            url = f"{url}?keyword={keyword.replace(' ', '+')}"
-        return url
+    async def __aenter__(self) -> Self:
+        transport = self._injected_transport or RetryTransport(httpx.AsyncHTTPTransport())
+        self._client_cm = make_client(transport=transport)
+        self._client = await self._client_cm.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if self._client_cm is not None:
+            await self._client_cm.__aexit__(exc_type, exc, tb)
+        self._client_cm = None
+        self._client = None
+
+    @property
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None:
+            raise RuntimeError(
+                "KijijiSource used outside `async with` — wrap in context manager",
+            )
+        return self._client
 
     async def search_listings(self, criteria: WantCriteria) -> AsyncIterator[RawListing]:
-        raise NotImplementedError(
-            "Kijiji result selectors pending real sample pages (Phase 1 S4); "
-            "implement fetch + parse here, then yield RawListings.",
-        )
-        yield  # pragma: no cover -- unreachable; marks this an async generator
+        # One search per targeted make+model; dedupe across searches by ad id so
+        # a car matching two keywords is yielded once. A want with no make/model
+        # (nor model_specs) searches nothing rather than the whole site.
+        seen: set[str] = set()
+        for i, keyword in enumerate(_keywords(criteria)):
+            if i:
+                await jittered_sleep()
+            resp = await self._http.get(_search_url(keyword))
+            resp.raise_for_status()
+            for listing in parse_search_listings(resp.text):
+                if listing.ref.source_listing_id in seen:
+                    continue
+                seen.add(listing.ref.source_listing_id)
+                yield listing
 
 
 register(KijijiSource())
