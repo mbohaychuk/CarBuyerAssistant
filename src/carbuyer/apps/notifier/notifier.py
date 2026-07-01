@@ -49,6 +49,7 @@ from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.deal import WantDeal, score_want_deal
 from carbuyer.wants.delivery import delivery_tier
+from carbuyer.wants.leverage import buyer_leverage_line
 from carbuyer.wants.matcher import matches
 
 log = get_logger("notifier")
@@ -184,7 +185,7 @@ def _state_from_lot(lot: AuctionLot, auction: Auction) -> LotState:
     )
 
 
-def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
+def _embed_data(lot: VehicleOffer, auction: Auction | None, now: datetime) -> LotEmbedData:
     previous_asking = None
     if auction is not None:
         location = (
@@ -212,6 +213,7 @@ def _embed_data(lot: VehicleOffer, auction: Auction | None) -> LotEmbedData:
         previous_asking_cad=previous_asking,
         recall_count=lot.recall_count,
         complaint_count=lot.complaint_count,
+        leverage_line=buyer_leverage_line(lot, now),
     )
 
 
@@ -304,7 +306,7 @@ async def _process_one(  # noqa: PLR0911, PLR0912, PLR0915
                 log.warning("lot vanished before SKIPPED write", lot_id=lot_id)
         return "skipped"
 
-    data = _embed_data(lot, auction)
+    data = _embed_data(lot, auction, now)
 
     # HTTP I/O outside any DB transaction.
     last_channel: str | None = None

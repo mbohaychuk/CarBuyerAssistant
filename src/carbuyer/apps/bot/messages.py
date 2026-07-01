@@ -37,6 +37,9 @@ class LotEmbedData:
     # NHTSA reliability signal (None = not looked up).
     recall_count: int | None = None
     complaint_count: int | None = None
+    # Buyer-leverage line for private listings (days-on-market + price-drop
+    # summary); None for auctions / no data.
+    leverage_line: str | None = None
 
 
 def _vehicle_title(d: LotEmbedData) -> str:
@@ -116,11 +119,12 @@ def render_want_match_text(
         recalls = d.recall_count if d.recall_count is not None else "?"
         complaints = d.complaint_count if d.complaint_count is not None else "?"
         reliability = f"\n\U0001f527 NHTSA: {recalls} recalls · {complaints} complaints"
+    leverage = f"\n\U0001f552 {d.leverage_line}" if d.leverage_line else ""
     return (
         f"\U0001f3af Matches your want “{want_name}”\n"
         f"{drop_line}"
         f"{title} ({d.location})\n"
-        f"Price: {price} · {deal_line}{budget}{reliability}\n"
+        f"Price: {price} · {deal_line}{budget}{reliability}{leverage}\n"
         f"{d.url}"
     )
 
