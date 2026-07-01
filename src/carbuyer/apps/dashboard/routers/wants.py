@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import httpx
@@ -18,6 +19,7 @@ from carbuyer.shared.logging import get_logger
 from carbuyer.wants import repo, service
 from carbuyer.wants.archetype import expand_archetype
 from carbuyer.wants.criteria import ModelSpec, WantCriteria, first_error, split_csv
+from carbuyer.wants.leverage import buyer_leverage_line
 
 router = APIRouter()
 log = get_logger("dashboard.wants")
@@ -221,7 +223,11 @@ async def want_detail(
             .order_by(WantMatch.want_relative_score.desc().nulls_last())
         )
     ).all()
-    items: list[dict[str, Any]] = [{"match": wm, "lot": lot} for (wm, lot) in rows]
+    now = datetime.now(UTC)
+    items: list[dict[str, Any]] = [
+        {"match": wm, "lot": lot, "leverage": buyer_leverage_line(lot, now)}
+        for (wm, lot) in rows
+    ]
     return templates.TemplateResponse(
         request, "pages/want_detail.html", {"want": want, "items": items}
     )

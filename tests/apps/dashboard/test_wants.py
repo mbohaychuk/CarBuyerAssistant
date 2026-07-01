@@ -241,3 +241,26 @@ async def test_save_archetype_want_persists_model_specs(_patch_deps: AsyncSessio
     assert crit.model_specs == [
         ModelSpec(make="Lexus", model="GX 470", year_min=2003, year_max=2009, trims=[])
     ]
+
+
+async def test_want_detail_shows_buyer_leverage_for_private_listing(
+    _patch_deps: AsyncSession,
+) -> None:
+    session = _patch_deps
+    listing = PrivateListing(
+        source="kijiji", source_listing_id="PL2", url="http://k/2",
+        title="2005 Lexus GX 470", make="Lexus", model="GX 470", year=2005,
+        asking_price_cad=Decimal("15000"), original_asking_price_cad=Decimal("18000"),
+        price_drop_count=2, days_on_market=90, listing_status="active",
+    )
+    want = Search(name="gx470", config={})
+    session.add_all([listing, want])
+    await session.flush()
+    session.add(WantMatch(search_id=want.id, lot_id=listing.id, want_relative_score=0.1))
+    await session.commit()
+
+    async with _client() as c:
+        r = await c.get(f"/wants/{want.id}")
+    assert r.status_code == 200  # noqa: PLR2004
+    assert "listed 90 days" in r.text
+    assert "2 drops" in r.text
