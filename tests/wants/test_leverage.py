@@ -62,3 +62,12 @@ def test_leverage_none_when_no_data() -> None:
                  original_asking_price_cad=None, price_drop_count=0), NOW,
     )
     assert line is None
+
+
+def test_leverage_zero_original_does_not_divide_by_zero() -> None:
+    # orig=0 with a (nonsensical) negative current price must not crash; the drop
+    # clause is suppressed and only the days clause remains.
+    line = buyer_leverage_line(
+        _listing(original_asking_price_cad=Decimal("0"), asking_price_cad=Decimal("-100")), NOW,
+    )
+    assert line == "listed 90 days"

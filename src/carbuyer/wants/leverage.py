@@ -37,7 +37,9 @@ def buyer_leverage_line(offer: VehicleOffer, now: datetime) -> str | None:
 
     orig = offer.original_asking_price_cad
     cur = offer.asking_price_cad
-    if orig is not None and cur is not None and orig > cur:
+    # `orig > 0` guards the pct division and rejects a non-positive baseline
+    # (a zero/negative original price is not meaningful leverage).
+    if orig is not None and cur is not None and orig > cur and orig > 0:
         drop = orig - cur
         pct = round(drop / orig * 100)
         drop_clause = f"down ${int(drop):,} ({pct}%) from ${int(orig):,}"
