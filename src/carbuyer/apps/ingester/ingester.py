@@ -30,13 +30,20 @@ from carbuyer.shared.config import settings
 from carbuyer.shared.logging import get_logger
 from carbuyer.shared.singleton import acquire_singleton_lock
 from carbuyer.sources.base import SOURCES, ListingSource, RawLot
+from carbuyer.sources.craigslist.source import CraigslistSource
 from carbuyer.sources.hibid.source import HibidSource
+from carbuyer.sources.kijiji.source import KijijiSource
 from carbuyer.sources.mcdougall.source import McDougallSource
 from carbuyer.wants.criteria import WantCriteria
 from carbuyer.wants.matcher import could_match_any_want
 from carbuyer.wants.service import load_active_criteria
 
 log = get_logger("ingester")
+
+# Auction sources are dispatched by name below; listing sources are picked up
+# generically from SOURCES by `_run_listing_pull`. Naming the classes here both
+# triggers their registration (register() runs at import) and documents the set.
+_LISTING_SOURCES = (CraigslistSource, KijijiSource)
 
 
 async def _load_active_criteria() -> list[WantCriteria]:
