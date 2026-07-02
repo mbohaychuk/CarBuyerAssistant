@@ -127,3 +127,29 @@ class WantCriteria(BaseModel):
         ):
             raise ValueError("year_min must not be greater than year_max")
         return self
+
+
+def search_keywords(criteria: WantCriteria) -> list[str]:
+    """One search keyword per make+model a want targets, de-duplicated.
+
+    Archetype wants carry ``model_specs`` (flat makes/models empty); manual wants
+    carry the flat lists. A single make is prefixed to each model so a multi-model
+    fan-out (models=["4Runner","Tacoma"]) becomes one search each. Empty -> no
+    keywords: listing sources must not fall back to an unkeyworded whole-site
+    crawl. Shared by the Kijiji and Craigslist sources.
+    """
+    if criteria.model_specs:
+        raw = [f"{s.make} {s.model}" for s in criteria.model_specs]
+    elif criteria.models:
+        make = criteria.makes[0] if len(criteria.makes) == 1 else ""
+        raw = [f"{make} {m}" for m in criteria.models]
+    else:
+        raw = list(criteria.makes)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for kw in (k.strip() for k in raw):
+        if kw and kw.lower() not in seen:
+            seen.add(kw.lower())
+            out.append(kw)
+    return out

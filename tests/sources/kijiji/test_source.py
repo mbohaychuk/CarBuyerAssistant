@@ -9,8 +9,8 @@ import pytest
 
 from carbuyer.sources.base import SOURCES
 from carbuyer.sources.kijiji import KijijiSource
-from carbuyer.sources.kijiji.source import _keywords, _search_url
-from carbuyer.wants.criteria import ModelSpec, WantCriteria
+from carbuyer.sources.kijiji.source import _search_url
+from carbuyer.wants.criteria import ModelSpec, WantCriteria, search_keywords
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "search_cars_canada.html"
 
@@ -40,12 +40,12 @@ def test_search_url_percent_encodes_path_significant_terms() -> None:
 
 
 def test_keywords_prefix_single_make_to_each_model() -> None:
-    kws = _keywords(WantCriteria(makes=["Toyota"], models=["4Runner", "Tacoma"]))
+    kws = search_keywords(WantCriteria(makes=["Toyota"], models=["4Runner", "Tacoma"]))
     assert kws == ["Toyota 4Runner", "Toyota Tacoma"]
 
 
 def test_keywords_from_model_specs_pair_make_and_model() -> None:
-    kws = _keywords(
+    kws = search_keywords(
         WantCriteria(
             model_specs=[
                 ModelSpec(make="Lexus", model="GX 470"),
@@ -57,7 +57,7 @@ def test_keywords_from_model_specs_pair_make_and_model() -> None:
 
 
 def test_keywords_empty_when_no_make_model_or_spec() -> None:
-    assert _keywords(WantCriteria()) == []
+    assert search_keywords(WantCriteria()) == []
 
 
 async def test_search_listings_fetches_and_parses() -> None:

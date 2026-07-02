@@ -20,6 +20,7 @@ from carbuyer.sources.base import ListingSource, RawListing, SourceType, registe
 from carbuyer.sources.http import jittered_sleep, make_client
 from carbuyer.sources.kijiji.parser import parse_search_listings
 from carbuyer.sources.retry import RetryTransport
+from carbuyer.wants.criteria import search_keywords
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -28,32 +29,6 @@ if TYPE_CHECKING:
     from carbuyer.wants.criteria import WantCriteria
 
 _SEARCH_BASE = "https://www.kijiji.ca/b-cars-trucks/canada"
-
-
-def _keywords(criteria: WantCriteria) -> list[str]:
-    """One search keyword per make+model the want targets, de-duplicated.
-
-    Archetype wants carry ``model_specs`` (flat makes/models empty); manual wants
-    carry the flat lists. A single make is prefixed to each model so a
-    multi-model fan-out (models=["4Runner","Tacoma"]) becomes one search each.
-    Empty -> no search: we never fall back to the unkeyworded all-cars page,
-    which would ingest every car in Canada.
-    """
-    if criteria.model_specs:
-        raw = [f"{s.make} {s.model}" for s in criteria.model_specs]
-    elif criteria.models:
-        make = criteria.makes[0] if len(criteria.makes) == 1 else ""
-        raw = [f"{make} {m}" for m in criteria.models]
-    else:
-        raw = list(criteria.makes)
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for kw in (k.strip() for k in raw):
-        if kw and kw.lower() not in seen:
-            seen.add(kw.lower())
-            out.append(kw)
-    return out
 
 
 def _search_url(keyword: str) -> str:
@@ -105,7 +80,7 @@ class KijijiSource(ListingSource):
         # a car matching two keywords is yielded once. A want with no make/model
         # (nor model_specs) searches nothing rather than the whole site.
         seen: set[str] = set()
-        for i, keyword in enumerate(_keywords(criteria)):
+        for i, keyword in enumerate(search_keywords(criteria)):
             if i:
                 await jittered_sleep()
             resp = await self._http.get(_search_url(keyword))
