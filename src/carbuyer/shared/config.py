@@ -112,6 +112,17 @@ class Settings(BaseSettings):
         default_factory=lambda: ["AB", "BC", "SK", "MB"],
     )
 
+    # Craigslist regions (subdomains) the source searches; a want scoped to
+    # provinces only hits regions in those provinces. Override via env, e.g.
+    # `CRAIGSLIST_REGIONS='["calgary","edmonton"]'`.
+    craigslist_regions: list[str] = Field(
+        default_factory=lambda: [
+            "calgary", "edmonton", "vancouver", "victoria", "kelowna",
+            "winnipeg", "toronto", "ottawa", "hamilton", "kitchener",
+            "london", "windsor", "montreal", "halifax", "saskatoon", "regina",
+        ],
+    )
+
     @field_validator("discord_channels", mode="before")
     @classmethod
     def _parse_discord_channels(cls, value: Any) -> dict[str, int | str]:
