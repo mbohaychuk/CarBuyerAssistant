@@ -64,11 +64,17 @@ class CurlCffiTransport(httpx.AsyncBaseTransport):
             allow_redirects=False,  # httpx follows redirects above the transport
         )
         raw_headers = resp.headers
-        headers = (
+        items = (
             list(raw_headers.multi_items())
             if hasattr(raw_headers, "multi_items")
-            else dict(raw_headers)
+            else list(dict(raw_headers).items())
         )
+        # curl_cffi already returns the decoded body, so drop the headers that
+        # describe the *encoded* upstream body — otherwise httpx re-decompresses
+        # it ("incorrect header check") and Content-Length mismatches the body.
+        headers = [
+            (k, v) for k, v in items if k.lower() not in ("content-encoding", "content-length")
+        ]
         return httpx.Response(
             status_code=resp.status_code,
             headers=headers,

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from carbuyer.sources.curl_transport import CurlCffiTransport
+from carbuyer.sources.http import make_client
 
 
 class _FakeResp:
@@ -59,3 +60,38 @@ async def test_aclose_closes_session() -> None:
     transport = CurlCffiTransport(impersonate="chrome", session=fake)
     await transport.aclose()
     assert fake.closed is True
+
+
+class _EncodedResp:
+    """curl_cffi already returns a decoded body but keeps the upstream
+    Content-Encoding/Content-Length headers."""
+
+    def __init__(self) -> None:
+        self.status_code = 200
+        self.headers = {
+            "content-type": "text/html",
+            "content-encoding": "gzip",
+            "content-length": "9999",  # stale: refers to the compressed body
+        }
+        self.content = b"<html>already decoded</html>"
+
+
+class _EncodedSession:
+    async def request(self, method: str, url: str, **kw: Any) -> _EncodedResp:
+        return _EncodedResp()
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_strips_content_encoding_so_httpx_does_not_double_decompress() -> None:
+    # Without stripping Content-Encoding, httpx re-decompresses the already
+    # decoded body and raises DecodingError ("incorrect header check").
+    transport = CurlCffiTransport(impersonate="chrome", session=_EncodedSession())
+    async with make_client(transport=transport) as client:
+        resp = await client.get("https://example.test/")
+    assert resp.text == "<html>already decoded</html>"
+    assert "content-encoding" not in {k.lower() for k in resp.headers}
+    # the stale upstream Content-Length (9999) must not survive; httpx recomputes
+    # an accurate one from the decoded body.
+    assert resp.headers.get("content-length") == str(len(b"<html>already decoded</html>"))
