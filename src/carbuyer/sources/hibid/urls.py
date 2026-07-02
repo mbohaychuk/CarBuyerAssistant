@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-# Western Canadian provinces. Other provinces (ON, QC, etc.) follow the same
-# slug pattern but are out-of-scope for the MVP.
+# HiBid province slug per Canadian province/territory code. All follow the same
+# lowercase-hyphenated pattern (ontario + quebec verified live). Which of these
+# the discoverer actually walks is set by `settings.hibid_provinces`.
 PROVINCE_PATH: dict[str, str] = {
     "AB": "alberta",
     "BC": "british-columbia",
     "SK": "saskatchewan",
     "MB": "manitoba",
+    "ON": "ontario",
+    "QC": "quebec",
+    "NS": "nova-scotia",
+    "NB": "new-brunswick",
+    "NL": "newfoundland-and-labrador",
+    "PE": "prince-edward-island",
+    "YT": "yukon",
+    "NT": "northwest-territories",
+    "NU": "nunavut",
 }
 
 # HiBid's "Cars & Vehicles" category id.

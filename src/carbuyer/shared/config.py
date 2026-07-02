@@ -106,10 +106,12 @@ class Settings(BaseSettings):
     # two keyless HTTP calls per lot; best-effort, off by default).
     nhtsa_reliability_enabled: bool = False
 
-    # HiBid plugin discovery target provinces. Override via env, e.g.
+    # HiBid discovery target provinces: western + central Canada + territories.
+    # Atlantic provinces are mapped (sources.hibid.urls.PROVINCE_PATH) but off by
+    # default (far from home, high landed cost). Override via env, e.g.
     # `HIBID_PROVINCES='["AB","BC","SK"]'` to scope discovery for testing.
     hibid_provinces: list[Province] = Field(
-        default_factory=lambda: ["AB", "BC", "SK", "MB"],
+        default_factory=lambda: ["AB", "BC", "SK", "MB", "ON", "QC", "YT", "NT", "NU"],
     )
 
     # Craigslist regions (subdomains) the source searches; a want scoped to
