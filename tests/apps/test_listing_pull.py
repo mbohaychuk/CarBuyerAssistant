@@ -15,7 +15,7 @@ from carbuyer.db.enums import ListingStatus
 from carbuyer.db.models import PrivateListing, Search, VehicleOffer
 from carbuyer.db.upserts import upsert_private_listing
 from carbuyer.scoring.comps import build_comp_set
-from carbuyer.sources.base import ListingRef, ListingSource, RawListing
+from carbuyer.sources.base import SOURCES, ListingRef, ListingSource, RawListing
 from carbuyer.wants.criteria import WantCriteria
 
 
@@ -218,3 +218,11 @@ async def test_run_listing_pull_reads_enabled_wants(
     assert n == 1
     session.expire_all()
     assert await _count(session, PrivateListing) == 1
+
+
+def test_ingester_import_registers_the_real_listing_sources() -> None:
+    # Importing the ingester (done above) must register the concrete listing
+    # sources, so _run_listing_pull's SOURCES.values() filter actually finds them.
+    _ = ingester_mod  # the import is the point
+    registered = {name for name, s in SOURCES.items() if isinstance(s, ListingSource)}
+    assert {"kijiji", "craigslist"} <= registered
