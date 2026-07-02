@@ -35,14 +35,27 @@ def test_first_posting_fields_mapped() -> None:
     assert first.photos == []  # legal: never store photos
 
 
-def test_posting_without_decodable_subarea_uses_region_only_url() -> None:
-    # 6/20 lack a decodable subarea; the region-only URL is valid (craigslist
-    # redirects it to the canonical subarea URL).
+def test_subarea_decoded_from_first_location_index() -> None:
+    # item[4] is "subareaIdx:hoodIdx"; the subarea comes from the FIRST index.
+    # This langley posting ("2:5") -> locations[2]='rds'.
     listing = next(x for x in _listings() if x.ref.source_listing_id == "7943747852")
     assert listing.ref.url == (
-        "https://vancouver.craigslist.org/cto/d/"
+        "https://vancouver.craigslist.org/rds/cto/d/"
         "langley-township-northwest-2019-toyota/7943747852.html"
     )
+
+
+def test_unmappable_subarea_falls_back_to_region_only_url() -> None:
+    # When the subarea index is out of range, the region-only URL is used
+    # (craigslist redirects it to the canonical one).
+    payload = {
+        "data": {
+            "decode": {"minPostingId": 100, "locations": [0]},  # only index 0
+            "items": [[5, 0, 145, 9000, "1:0~49~-123", "x", [6, "some-car"], "A Car"]],
+        },
+    }
+    listing = parse_search_results(payload, region="vancouver", province="BC")[0]
+    assert listing.ref.url == "https://vancouver.craigslist.org/cto/d/some-car/105.html"
 
 
 def test_ids_are_stable_digits_and_prices_decimal() -> None:

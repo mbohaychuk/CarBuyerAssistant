@@ -18,11 +18,14 @@ from urllib.parse import urlencode
 import httpx
 
 from carbuyer.shared.config import settings
+from carbuyer.shared.logging import get_logger
 from carbuyer.sources.base import ListingSource, RawListing, SourceType, register
 from carbuyer.sources.craigslist.parser import parse_search_results
 from carbuyer.sources.http import jittered_sleep, make_client
 from carbuyer.sources.retry import RetryTransport
 from carbuyer.wants.criteria import search_keywords
+
+log = get_logger("craigslist")
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -87,6 +90,9 @@ class CraigslistSource(ListingSource):
         self._injected_transport = _transport
         self._client_cm: AbstractAsyncContextManager[httpx.AsyncClient] | None = None
         self._client: httpx.AsyncClient | None = None
+        # Politeness spans the whole source lifetime (all wants), not one call:
+        # only the very first fetch skips the jittered delay.
+        self._warmed = False
 
     async def __aenter__(self) -> Self:
         transport = self._injected_transport or RetryTransport(httpx.AsyncHTTPTransport())
@@ -118,19 +124,25 @@ class CraigslistSource(ListingSource):
         if not keywords:
             return
         seen: set[str] = set()
-        first = True
         for region in _regions_for(criteria, self._regions):
             province = _REGION_PROVINCE.get(region)
             for keyword in keywords:
-                if not first:
+                if self._warmed:
                     await jittered_sleep()
-                first = False
-                resp = await self._http.get(_search_url(region, keyword))
-                resp.raise_for_status()
-                payload: Any = resp.json()
-                for listing in parse_search_results(
-                    payload, region=region, province=province,
-                ):
+                self._warmed = True
+                try:
+                    resp = await self._http.get(_search_url(region, keyword))
+                    resp.raise_for_status()
+                    payload: Any = resp.json()
+                    listings = parse_search_results(
+                        payload, region=region, province=province,
+                    )
+                except Exception:
+                    # One region/keyword failing must not lose the other regions
+                    # (and other wants) — mirror McDougall's per-page tolerance.
+                    log.exception("search failed; skipping", region=region, keyword=keyword)
+                    continue
+                for listing in listings:
                     if listing.ref.source_listing_id in seen:
                         continue
                     seen.add(listing.ref.source_listing_id)

@@ -16,11 +16,14 @@ from urllib.parse import quote
 
 import httpx
 
+from carbuyer.shared.logging import get_logger
 from carbuyer.sources.base import ListingSource, RawListing, SourceType, register
 from carbuyer.sources.http import jittered_sleep, make_client
 from carbuyer.sources.kijiji.parser import parse_search_listings
 from carbuyer.sources.retry import RetryTransport
 from carbuyer.wants.criteria import search_keywords
+
+log = get_logger("kijiji")
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -49,6 +52,9 @@ class KijijiSource(ListingSource):
         self._injected_transport = _transport
         self._client_cm: AbstractAsyncContextManager[httpx.AsyncClient] | None = None
         self._client: httpx.AsyncClient | None = None
+        # Politeness spans the whole source lifetime (all wants); only the very
+        # first fetch skips the jittered delay.
+        self._warmed = False
 
     async def __aenter__(self) -> Self:
         transport = self._injected_transport or RetryTransport(httpx.AsyncHTTPTransport())
@@ -80,12 +86,19 @@ class KijijiSource(ListingSource):
         # a car matching two keywords is yielded once. A want with no make/model
         # (nor model_specs) searches nothing rather than the whole site.
         seen: set[str] = set()
-        for i, keyword in enumerate(search_keywords(criteria)):
-            if i:
+        for keyword in search_keywords(criteria):
+            if self._warmed:
                 await jittered_sleep()
-            resp = await self._http.get(_search_url(keyword))
-            resp.raise_for_status()
-            for listing in parse_search_listings(resp.text):
+            self._warmed = True
+            try:
+                resp = await self._http.get(_search_url(keyword))
+                resp.raise_for_status()
+                listings = parse_search_listings(resp.text)
+            except Exception:
+                # One keyword failing must not lose the others (or later wants).
+                log.exception("search failed; skipping", keyword=keyword)
+                continue
+            for listing in listings:
                 if listing.ref.source_listing_id in seen:
                     continue
                 seen.add(listing.ref.source_listing_id)

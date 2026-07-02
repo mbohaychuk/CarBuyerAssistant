@@ -76,6 +76,31 @@ async def test_search_listings_fetches_per_region_and_keyword_dedupes(
     assert all(x.location_province == "BC" for x in listings)
 
 
+async def test_search_listings_tolerates_a_failing_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("carbuyer.sources.craigslist.source.jittered_sleep", _noop)
+    payload = _FIXTURE.read_text()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "area%2Fvancouver" in str(request.url):
+            return httpx.Response(500, text="boom")  # one region blips
+        return httpx.Response(200, text=payload)
+
+    src = CraigslistSource(
+        regions=["vancouver", "victoria"], _transport=httpx.MockTransport(handler),
+    )
+    async with src:  # both BC; vancouver 500s, victoria must still come through
+        listings = [
+            x
+            async for x in src.search_listings(
+                WantCriteria(makes=["Toyota"], models=["Tacoma"], provinces=["BC"]),
+            )
+        ]
+    assert len(listings) == 20  # noqa: PLR2004 -- victoria's postings survive
+    assert all(x.location_province == "BC" for x in listings)
+
+
 async def test_search_listings_without_keywords_does_not_fetch() -> None:
     called = False
 

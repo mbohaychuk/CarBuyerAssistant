@@ -2,9 +2,9 @@
 
 The response packs each posting as a variable-length array decoded against
 ``data.decode``: posting id = ``minPostingId + item[0]``, price = ``item[3]``,
-location = ``item[4]`` ("hoodIdx:locIdx~lat~lon"), title = the last element, plus
-optional tagged sublists (tag 6 = url slug, tag 9 = odometer). The detail URL is
-rebuilt from region + subarea (``decode.locations[locIdx][2]``) + slug + id; a
+location = ``item[4]`` ("subareaIdx:hoodIdx~lat~lon"), title = the last element,
+plus optional tagged sublists (tag 6 = url slug, tag 9 = odometer). The detail URL
+is rebuilt from region + subarea (``decode.locations[subareaIdx][2]``) + slug + id; a
 posting whose subarea can't be decoded uses the region-only URL, which craigslist
 redirects to the canonical one.
 
@@ -85,10 +85,10 @@ def _tagged(item: list[Any], tag: int) -> Any:
 def _subarea(loc: Any, locations: list[Any]) -> str | None:
     if not isinstance(loc, str):
         return None
-    parts = loc.split("~", 1)[0].split(":")  # "hoodIdx:locIdx"
-    if len(parts) != 2 or not parts[1].isdigit():  # noqa: PLR2004
+    parts = loc.split("~", 1)[0].split(":")  # "subareaIdx:hoodIdx"
+    if len(parts) != 2 or not parts[0].isdigit():  # noqa: PLR2004
         return None
-    idx = int(parts[1])
+    idx = int(parts[0])  # first index selects the subarea; second is the neighborhood
     if 0 <= idx < len(locations):
         entry = locations[idx]
         if isinstance(entry, list):
